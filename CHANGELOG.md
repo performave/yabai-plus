@@ -4,8 +4,26 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+This is **yabai-plus**, a fork of [koekeishiya/yabai](https://github.com/koekeishiya/yabai).
+Entries tagged `-plus.N` are changes specific to this fork, layered on top of the
+upstream release named in the heading. Entries without a `-plus` suffix are
+inherited from upstream.
+
 ## [Unreleased]
-### Changed
+
+## [7.1.25-plus.1]
+This release is based on upstream `master` (post-7.1.25) and therefore also
+includes upstream changes not yet part of a tagged upstream release.
+
+### Changed (yabai-plus)
+- Don't warp *mouse_follows_focus* to or from windows that are ineligible for
+  management. Auxiliary windows such as a browser Picture-in-Picture panel or a
+  system dialog (`AXSystemDialog`) frequently steal and then return focus on their
+  own; previously this dragged the cursor across the screen even though the user
+  never initiated a focus change. The cursor is now only centered when both the
+  window gaining focus and the window losing it are eligible for management.
+
+### Changed (inherited from upstream)
 - Fixed scripting-addition *add_space* pattern for macOS 26.6 Apple Silicon arm64 [#2799](https://github.com/asmvik/yabai/issues/2799)
 - Fixed minor memory leak on space destruction, and added a few missing null checks to SkyLight API calls [#2791](https://github.com/asmvik/yabai/issues/2791)
 

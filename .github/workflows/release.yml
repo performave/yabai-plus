@@ -118,12 +118,37 @@ jobs:
           echo "tarball=bin/${VERSION}.tar.gz" >> "$GITHUB_OUTPUT"
           shasum -a 256 "bin/${VERSION}.tar.gz"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Extract changelog notes
+        id: notes
         run: |
           set -euo pipefail
-          gh release create "${{ github.ref_name }}" \
-            "${{ steps.archive.outputs.tarball }}" \
-            --title "${{ steps.archive.outputs.version }}" \
-            --generate-notes
+          # Tag is e.g. v7.1.25-plus.1 -> changelog heading is "## [7.1.25-plus.1]".
+          TAG="${{ github.ref_name }}"
+          HEADING="${TAG#v}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+
+          # Pull the body between this version's heading and the next "## " heading.
+          awk -v h="## [${HEADING}]" '
+            index($0, h) == 1 { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md | sed '/./,$!d' > "$NOTES_FILE"
+
+          if [ -s "$NOTES_FILE" ]; then
+            echo "Found changelog section for ${HEADING}:"
+            cat "$NOTES_FILE"
+            echo "file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changelog section for ${HEADING}; will fall back to generated notes."
+            echo "file=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.archive.outputs.version }}
+          files: ${{ steps.archive.outputs.tarball }}
+          body_path: ${{ steps.notes.outputs.file }}
+          # Fall back to auto-generated notes only if no changelog section was found.
+          generate_release_notes: ${{ steps.notes.outputs.file == '' }}

@@ -119,12 +119,151 @@ static bool scripting_addition_write_file(char *buffer, unsigned int size, char 
     return result;
 }
 
+#ifdef __arm64__
+#define MACHO_CPU_TYPE_ARM64       16777228
+#define MACHO_CPU_SUBTYPE_ARM64E   2
+#define MACHO_CPU_SUBTYPE_MASK     0x00FFFFFFu
+#define MACHO_FAT_MAGIC            0xCAFEBABEu
+#define MACHO_MH_MAGIC_64          0xFEEDFACFu
+#define MACHO_DOCK_PATH            "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock"
+
+static bool macho_read_u32_be(FILE *handle, long offset, uint32_t *result)
+{
+    uint8_t bytes[4];
+    if (fseek(handle, offset, SEEK_SET) != 0) return false;
+    if (fread(bytes, sizeof(bytes), 1, handle) != 1) return false;
+
+    *result = ((uint32_t) bytes[0] << 24) |
+              ((uint32_t) bytes[1] << 16) |
+              ((uint32_t) bytes[2] << 8)  |
+              ((uint32_t) bytes[3]);
+    return true;
+}
+
+static bool macho_read_u32_le(FILE *handle, long offset, uint32_t *result)
+{
+    uint8_t bytes[4];
+    if (fseek(handle, offset, SEEK_SET) != 0) return false;
+    if (fread(bytes, sizeof(bytes), 1, handle) != 1) return false;
+
+    *result = ((uint32_t) bytes[3] << 24) |
+              ((uint32_t) bytes[2] << 16) |
+              ((uint32_t) bytes[1] << 8)  |
+              ((uint32_t) bytes[0]);
+    return true;
+}
+
+static bool macho_find_arm64e_caps(FILE *handle, uint8_t *caps, long *fat_caps_offset, long *mach_caps_offset)
+{
+    uint32_t magic;
+    if (!macho_read_u32_be(handle, 0, &magic)) return false;
+
+    *fat_caps_offset = -1;
+    *mach_caps_offset = -1;
+
+    if (magic == MACHO_FAT_MAGIC) {
+        uint32_t arch_count;
+        if (!macho_read_u32_be(handle, 4, &arch_count)) return false;
+
+        for (uint32_t i = 0; i < arch_count; ++i) {
+            long arch_offset = 8 + (long) i * 20;
+            uint32_t cputype, cpusubtype, slice_offset;
+
+            if (!macho_read_u32_be(handle, arch_offset, &cputype)) return false;
+            if (!macho_read_u32_be(handle, arch_offset + 4, &cpusubtype)) return false;
+            if (!macho_read_u32_be(handle, arch_offset + 8, &slice_offset)) return false;
+
+            if (cputype != MACHO_CPU_TYPE_ARM64) continue;
+            if ((cpusubtype & MACHO_CPU_SUBTYPE_MASK) != MACHO_CPU_SUBTYPE_ARM64E) continue;
+
+            uint32_t slice_magic, slice_cputype, slice_cpusubtype;
+            if (!macho_read_u32_le(handle, slice_offset, &slice_magic)) return false;
+            if (slice_magic != MACHO_MH_MAGIC_64) return false;
+            if (!macho_read_u32_le(handle, slice_offset + 4, &slice_cputype)) return false;
+            if (!macho_read_u32_le(handle, slice_offset + 8, &slice_cpusubtype)) return false;
+            if (slice_cputype != MACHO_CPU_TYPE_ARM64) return false;
+            if ((slice_cpusubtype & MACHO_CPU_SUBTYPE_MASK) != MACHO_CPU_SUBTYPE_ARM64E) return false;
+
+            *caps = cpusubtype >> 24;
+            *fat_caps_offset = arch_offset + 4;
+            *mach_caps_offset = slice_offset + 11;
+            return true;
+        }
+
+        return false;
+    }
+
+    if (!macho_read_u32_le(handle, 0, &magic)) return false;
+    if (magic == MACHO_MH_MAGIC_64) {
+        uint32_t cputype, cpusubtype;
+        if (!macho_read_u32_le(handle, 4, &cputype)) return false;
+        if (!macho_read_u32_le(handle, 8, &cpusubtype)) return false;
+        if (cputype != MACHO_CPU_TYPE_ARM64) return false;
+        if ((cpusubtype & MACHO_CPU_SUBTYPE_MASK) != MACHO_CPU_SUBTYPE_ARM64E) return false;
+
+        *caps = cpusubtype >> 24;
+        *mach_caps_offset = 11;
+        return true;
+    }
+
+    return false;
+}
+
+static bool scripting_addition_patch_loader_pac_abi(bool *patched)
+{
+    *patched = false;
+
+    FILE *dock = fopen(MACHO_DOCK_PATH, "rb");
+    if (!dock) return false;
+
+    uint8_t dock_caps;
+    long ignored_fat_caps_offset, ignored_mach_caps_offset;
+    bool dock_result = macho_find_arm64e_caps(dock, &dock_caps, &ignored_fat_caps_offset, &ignored_mach_caps_offset);
+    fclose(dock);
+    if (!dock_result) return false;
+
+    FILE *loader = fopen(osax_bin_loader, "r+b");
+    if (!loader) return false;
+
+    uint8_t loader_caps;
+    long fat_caps_offset, mach_caps_offset;
+    bool loader_result = macho_find_arm64e_caps(loader, &loader_caps, &fat_caps_offset, &mach_caps_offset);
+    if (!loader_result) goto err;
+    if (loader_caps == dock_caps) goto out;
+
+    if (fat_caps_offset != -1) {
+        if (fseek(loader, fat_caps_offset, SEEK_SET) != 0) goto err;
+        if (fputc(dock_caps, loader) == EOF) goto err;
+    }
+
+    if (mach_caps_offset != -1) {
+        if (fseek(loader, mach_caps_offset, SEEK_SET) != 0) goto err;
+        if (fputc(dock_caps, loader) == EOF) goto err;
+    }
+
+    *patched = true;
+
+out:
+    fclose(loader);
+    return true;
+
+err:
+    fclose(loader);
+    return false;
+}
+#endif
+
 static void scripting_addition_prepare_binaries(void)
 {
     char cmd[MAXLEN];
 
     snprintf(cmd, sizeof(cmd), "%s %s", "chmod +x", osax_bin_loader);
     system(cmd);
+
+#ifdef __arm64__
+    bool loader_patched;
+    scripting_addition_patch_loader_pac_abi(&loader_patched);
+#endif
 
     snprintf(cmd, sizeof(cmd), "%s %s %s", "codesign -f -s -", osax_bin_loader, "2>/dev/null");
     system(cmd);
@@ -396,6 +535,15 @@ int scripting_addition_load(void)
         notify("scripting-addition", "missing required nvram boot-arg '-arm64e_preview_abi'!");
         result = 1;
         goto out;
+    }
+
+    bool loader_patched;
+    if (!scripting_addition_patch_loader_pac_abi(&loader_patched)) {
+        warn("yabai: scripting-addition failed to check loader arm64e PAC ABI!\n");
+    } else if (loader_patched) {
+        char cmd[MAXLEN];
+        snprintf(cmd, sizeof(cmd), "%s %s %s", "codesign -f -s -", osax_bin_loader, "2>/dev/null");
+        system(cmd);
     }
 #endif
 

@@ -87,7 +87,7 @@ from your hotkeys working — verify with `--check-sa` or the table below.
 | Operation | Needs SA? |
 |---|---|
 | `space --focus` (switch active space) | **No** — works without it |
-| `window --space` (move window to another space) | **No** — works without it |
+| `window --space` (move window to another space) | **No** — works without it; this fork prefers SA when loaded |
 | `space --create` / `--destroy` / `--move` | **Yes** — fails with "error with the scripting-addition" |
 | smooth `scripting_addition_move_window` during alt-drag | **Yes** — without it, drags fall back to the blocking AX path (the mid-drag freeze) |
 
@@ -95,25 +95,32 @@ So the cleanest "is the SA really loaded?" test is `yabai -m space --create`
 (then destroy the result). Space focus / window-to-space succeeding proves
 nothing.
 
-### Known injection failure
+### Sequoia arm64e PAC ABI gotcha
 
-On this machine `sudo yabai --load-sa` currently fails at the arm64e thread
-spawn:
+On Sequoia 15.7.x, upstream release builds can fail at the arm64e remote-thread
+spawn even when SIP and boot-args are correct:
 
 ```
 could not spawn remote thread: (os/kern) protection failure
 ```
 
-What has been ruled out: `-arm64e_preview_abi` **is** live in the running kernel
-(`sysctl kern.bootargs` confirms it, not just `nvram boot-args`), and a reboot
-does **not** fix it — so the handoff-era "reboot will fix it" theory is wrong.
-SIP is in the expected custom config (Filesystem / Debugging / NVRAM
-protections disabled). Release CI signs identically to `make dev`, so signing is
-not the differentiator. This looks like a deeper macOS-15 injection-path issue
-in the upstream loader (`src/osax/loader.m`, arm64e path ~lines 220–240), not
-something introduced by this fork's patches. Day-to-day tiling, focus, and
-window-to-space all work without it; the cost is the occasional drag freeze and
-no `space --create`.
+The root cause is a Mach-O arm64e PAC ABI capability mismatch: Sequoia's
+`Dock.app` is `caps 0x80`, while newer toolchains can emit the yabai loader as
+`caps 0x81`. The kernel rejects the injected thread for the mismatched target.
+Check with:
+
+```bash
+otool -f /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock
+otool -f /Library/ScriptingAdditions/yabai.osax/Contents/MacOS/loader
+```
+
+This fork patches that automatically in `--load-sa`: before signing/injection,
+the installed loader's arm64e fat-header and Mach-O-header capability bytes are
+rewritten to match Dock. The loader and payload are still ad-hoc signed, as in
+upstream; do not Developer-ID/hardened-runtime sign injected OSAX components.
+If SA still fails, first verify `sysctl kern.bootargs` contains
+`-arm64e_preview_abi` and `csrutil status` shows Filesystem / Debugging / NVRAM
+protections disabled.
 
 ## Mission Control / multi-display debugging
 

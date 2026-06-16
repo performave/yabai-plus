@@ -36,6 +36,11 @@ git rebase upstream/master     # rebase the patch branch onto latest
 - **"Add `yabai --check-sa`"** (`src/yabai.c`, `src/sa.m`, `src/sa.h`): report
   whether the scripting addition is loaded and healthy by talking to the payload
   in Dock directly (no root, no re-inject).
+- **"Patch SA loader PAC ABI to match Dock on Sequoia"** (`src/sa.m`): on
+  Apple Silicon, normalize the installed loader's arm64e PAC capability to the
+  Dock binary before signing/injection. This preserves SA loading on Sequoia
+  where Dock is PAC ABI `0x80` but newer toolchains can emit loader binaries as
+  `0x81`.
 - **Local-dev makefile block** (`makefile`): `make dev` / `dev-restore` /
   `sa-status` — see Building below.
 
@@ -80,6 +85,9 @@ Mission Control / multi-display debugging notes.
   (as root). This is a user setup step; no code/signing change removes it.
 - Injection into Dock is gated by SIP + root — **not** by yabai's own code-signing
   flags. Signing yabai with the hardened runtime does not break the SA.
+- On Apple Silicon, `--load-sa` also normalizes the loader's arm64e PAC ABI to
+  match Dock before ad-hoc signing it. Do not replace that with Developer-ID or
+  hardened-runtime signing for the injected loader/payload.
 - **Only `bin/yabai` is codesigned.** The injected loader/payload must not be
   hardened-runtime signed (they run inside Dock). Never add signing of the osax
   payloads.

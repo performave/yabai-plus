@@ -685,7 +685,9 @@ void space_manager_move_window_list_to_space(uint64_t sid, uint32_t *window_list
 
 void space_manager_move_window_to_space(uint64_t sid, struct window *window)
 {
-    if (SLSPerformAsynchronousBridgedWindowManagementOperation) {
+    if (scripting_addition_move_window_to_space(sid, window->id)) {
+        return;
+    } else if (SLSPerformAsynchronousBridgedWindowManagementOperation) {
         CFArrayRef window_list_ref = cfarray_of_cfnumbers(&window->id, sizeof(uint32_t), 1, kCFNumberSInt32Type);
         Class cls = objc_getClass("SLSBridgedMoveWindowsToManagedSpaceOperation");
         SEL sel = sel_registerName("initWithWindows:spaceID:");
@@ -697,7 +699,7 @@ void space_manager_move_window_to_space(uint64_t sid, struct window *window)
         CFArrayRef window_list_ref = cfarray_of_cfnumbers(&window->id, sizeof(uint32_t), 1, kCFNumberSInt32Type);
         SLSMoveWindowsToManagedSpace(g_connection, window_list_ref, sid);
         CFRelease(window_list_ref);
-    } else if (!scripting_addition_move_window_to_space(sid, window->id)) {
+    } else {
         SLSSpaceSetCompatID(g_connection, sid, 0x79616265);
         SLSSetWindowListWorkspace(g_connection, &window->id, 1, 0x79616265);
         SLSSpaceSetCompatID(g_connection, sid, 0x0);

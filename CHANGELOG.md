@@ -11,6 +11,32 @@ inherited from upstream.
 
 ## [Unreleased]
 
+## [7.1.25-plus.3]
+
+### Changed (yabai-plus)
+- Fix scripting-addition loading on Sequoia Apple Silicon when the installed
+  loader's arm64e PAC ABI capability does not match Dock. `yabai --load-sa` now
+  normalizes the installed loader to Dock's PAC capability before ad-hoc signing
+  and injection.
+- Prefer the scripting-addition path for single-window `window --space` moves
+  when SA is loaded, falling back to the upstream asynchronous bridged SkyLight
+  path when SA is unavailable. This targets the visible cross-display flash when
+  moving a window between spaces on different displays.
+- Add local development and debugging documentation for the yabai-plus workflow,
+  scripting-addition health checks, and Mission Control display/space debugging.
+
+### Added (yabai-plus)
+- Add `yabai --check-sa` to report whether the scripting addition is actually
+  loaded and healthy by handshaking with the Dock payload without root or
+  re-injection.
+- Add local development make targets: `make dev`, `make dev-restore`, and
+  `make sa-status`.
+
+### Fixed (yabai-plus)
+- Fix Mission Control cross-display space-drag teleport by recomputing a visible
+  view's frame when its space/display association changed but the layout was not
+  otherwise dirty.
+
 ## [7.1.25-plus.2]
 
 ### Changed (yabai-plus)

@@ -28,6 +28,16 @@ git rebase upstream/master     # rebase the patch branch onto latest
   previously-focused windows are eligible for management. Prevents involuntary
   cursor jumps when auxiliary windows (Picture-in-Picture panels, `AXSystemDialog`)
   steal and return focus on their own.
+- **"Fix Mission Control cross-display space-drag teleport"** (`src/window_manager.c`):
+  recompute a view's frame for its current display when the view is invalid,
+  before the dirty gate, so a space dragged to another display repositions its
+  windows onto the new display instead of leaving them behind. See
+  [docs/debugging.md](./docs/debugging.md) for the root-cause notes.
+- **"Add `yabai --check-sa`"** (`src/yabai.c`, `src/sa.m`, `src/sa.h`): report
+  whether the scripting addition is loaded and healthy by talking to the payload
+  in Dock directly (no root, no re-inject).
+- **Local-dev makefile block** (`makefile`): `make dev` / `dev-restore` /
+  `sa-status` — see Building below.
 
 When adding patches, keep each one a focused, well-described commit so it stays
 easy to rebase onto upstream.
@@ -43,6 +53,13 @@ make clean     # remove build artifacts
 
 The build is a single `xcrun clang` invocation (see `makefile`); there is no
 external dependency graph beyond the macOS SDK + frameworks. C standard is C11.
+
+For the local dev loop, `make dev` builds a Developer-ID-signed **canary** binary
+(marked in `yabai --version`) and swaps it into the Homebrew path; `make
+dev-restore` puts the release binary back. See **[docs/debugging.md](./docs/debugging.md)**
+for the full workflow — getting verbose traces, the scripting-addition gotchas
+(what actually needs it, how to check it, the known injection failure), and
+Mission Control / multi-display debugging notes.
 
 ## Architecture (orientation, not exhaustive)
 

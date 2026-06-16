@@ -8,6 +8,7 @@ extern unsigned int __src_osax_loader_len;
 
 int scripting_addition_load(void);
 int scripting_addition_uninstall(void);
+int scripting_addition_status(void);
 
 bool scripting_addition_create_space(uint64_t sid);
 bool scripting_addition_destroy_space(uint64_t sid);

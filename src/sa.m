@@ -415,6 +415,45 @@ out:
     return result;
 }
 
+//
+// NOTE(plus): Report whether the scripting addition is actually live, without root and
+// without re-injecting. We talk to the payload's socket directly (handshake opcode), so
+// this reflects the real running state inside Dock -- not just whether files are installed.
+// Exit 0 only when the payload answers, matches this build's OSAX_VERSION, and advertises
+// full support for the current macOS. Handy because a missing/outdated SA silently sends
+// window moves down the slow, blocking AX path.
+//
+int scripting_addition_status(void)
+{
+    char *user = getenv("USER");
+    if (!user) {
+        fprintf(stdout, "scripting-addition: cannot check -- 'env USER' not set\n");
+        return 1;
+    }
+    snprintf(g_sa_socket_file, sizeof(g_sa_socket_file), SA_SOCKET_PATH_FMT, user);
+
+    uint32_t attrib = 0;
+    char version[SA_SOCKET_BUFF_LEN] = {0};
+
+    if (!scripting_addition_request_handshake(version, &attrib)) {
+        fprintf(stdout, "scripting-addition: NOT loaded (no response on %s)\n", g_sa_socket_file);
+        return 1;
+    }
+
+    if (!string_equals(version, OSAX_VERSION)) {
+        fprintf(stdout, "scripting-addition: loaded but OUTDATED (payload v%s, this build expects v%s) -- run 'sudo yabai --load-sa'\n", version, OSAX_VERSION);
+        return 1;
+    }
+
+    if ((attrib & OSAX_ATTRIB_ALL) != OSAX_ATTRIB_ALL) {
+        fprintf(stdout, "scripting-addition: loaded v%s but missing support for this macOS (attrib 0x%X)\n", version, attrib);
+        return 1;
+    }
+
+    fprintf(stdout, "scripting-addition: loaded and healthy (payload v%s)\n", version);
+    return 0;
+}
+
 #define sa_payload_init() char bytes[SA_SOCKET_BUFF_LEN]; int16_t length = 1+sizeof(length)
 #define pack(v) memcpy(bytes+length, &v, sizeof(v)); length += sizeof(v)
 #define sa_payload_send(op) *(int16_t*)bytes = length-sizeof(length), bytes[sizeof(length)] = op, scripting_addition_send_bytes(bytes, length)

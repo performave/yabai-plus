@@ -4,6 +4,7 @@
 
 #define SCRPT_ADD_LOAD_OPT      "--load-sa"
 #define SCRPT_ADD_UNINSTALL_OPT "--uninstall-sa"
+#define SCRPT_ADD_CHECK_OPT     "--check-sa"
 #define SERVICE_INSTALL_OPT     "--install-service"
 #define SERVICE_UNINSTALL_OPT   "--uninstall-service"
 #define SERVICE_START_OPT       "--start-service"
@@ -190,6 +191,7 @@ static void parse_arguments(int argc, char **argv)
                         "Options:\n"
                         "    --load-sa              Install and load the scripting-addition.\n"
                         "    --uninstall-sa         Uninstall the scripting-addition.\n"
+                        "    --check-sa             Report whether the scripting-addition is loaded and healthy.\n"
                         "    --install-service      Write launchd service file to disk.\n"
                         "    --uninstall-service    Remove launchd service file from disk.\n"
                         "    --start-service        Enable, load, and start the launchd service.\n"
@@ -222,6 +224,10 @@ static void parse_arguments(int argc, char **argv)
 
     if (string_equals(argv[1], SCRPT_ADD_LOAD_OPT)) {
         exit(scripting_addition_load());
+    }
+
+    if (string_equals(argv[1], SCRPT_ADD_CHECK_OPT)) {
+        exit(scripting_addition_status());
     }
 
     if (string_equals(argv[1], SERVICE_INSTALL_OPT)) {

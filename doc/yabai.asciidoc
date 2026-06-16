@@ -23,7 +23,7 @@ yabai - window manager
 Synopsis
 --------
 
-*yabai* [*--load-sa*|*--uninstall-sa*|*--install-service*|*--uninstall-service*|*--start-service*|*--restart-service*|*--stop-service*|*--message*,*-m* 'msg'|*--config*,*-c* 'config_file'|*--verbose*,*-V*|*--version*,*-v*|*--help*,*-h*]
+*yabai* [*--load-sa*|*--uninstall-sa*|*--check-sa*|*--install-service*|*--uninstall-service*|*--start-service*|*--restart-service*|*--stop-service*|*--message*,*-m* 'msg'|*--config*,*-c* 'config_file'|*--verbose*,*-V*|*--version*,*-v*|*--help*,*-h*]
 
 Description
 -----------
@@ -42,6 +42,14 @@ Options
     Uninstall the scripting-addition. Must be run as root. +
     Path is /Library/ScriptingAdditions/yabai.osax. +
     System Integrity Protection must be partially disabled.
+
+*--check-sa*::
+    Report whether the scripting-addition is loaded and healthy. +
+    Talks to the payload running inside Dock.app directly, so it reflects the
+    real running state rather than whether files are installed. +
+    Does not require root and does not re-inject. +
+    Exits 0 only when the payload responds, matches this build's version, and
+    advertises full support for the current macOS; non-zero otherwise.
 
 *--install-service*::
     Writes a launchd service file to disk. +

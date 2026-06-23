@@ -97,6 +97,9 @@ jobs:
           # NOTE: a standalone CLI binary can't be stapled; Gatekeeper verifies the
           # notarization ticket online on first run, which is sufficient.
 
+      - name: Apply Finder icon
+        run: make icon
+
       - name: Assemble archive
         id: archive
         run: |

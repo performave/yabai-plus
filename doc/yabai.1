@@ -2,12 +2,12 @@
 .\"     Title: yabai
 .\"    Author: [see the "AUTHOR(S)" section]
 .\" Generator: Asciidoctor 2.0.26
-.\"      Date: 2026-05-08
+.\"      Date: 2026-06-22
 .\"    Manual: Yabai Manual
 .\"    Source: Yabai
 .\"  Language: English
 .\"
-.TH "YABAI" "1" "2026-05-08" "Yabai" "Yabai Manual"
+.TH "YABAI" "1" "2026-06-22" "Yabai" "Yabai Manual"
 .ie \n(.g .ds Aq \(aq
 .el       .ds Aq '
 .ss \n[.ss] 0
@@ -31,7 +31,7 @@
 yabai \- window manager
 .SH "SYNOPSIS"
 .sp
-\fByabai\fP [\fB\-\-load\-sa\fP|\fB\-\-uninstall\-sa\fP|\fB\-\-install\-service\fP|\fB\-\-uninstall\-service\fP|\fB\-\-start\-service\fP|\fB\-\-restart\-service\fP|\fB\-\-stop\-service\fP|\fB\-\-message\fP,\fB\-m\fP \fImsg\fP|\fB\-\-config\fP,\fB\-c\fP \fIconfig_file\fP|\fB\-\-verbose\fP,\fB\-V\fP|\fB\-\-version\fP,\fB\-v\fP|\fB\-\-help\fP,\fB\-h\fP]
+\fByabai\fP [\fB\-\-load\-sa\fP|\fB\-\-uninstall\-sa\fP|\fB\-\-check\-sa\fP|\fB\-\-install\-sudoers\fP|\fB\-\-uninstall\-sudoers\fP|\fB\-\-install\-service\fP|\fB\-\-uninstall\-service\fP|\fB\-\-start\-service\fP|\fB\-\-restart\-service\fP|\fB\-\-stop\-service\fP|\fB\-\-message\fP,\fB\-m\fP \fImsg\fP|\fB\-\-config\fP,\fB\-c\fP \fIconfig_file\fP|\fB\-\-verbose\fP,\fB\-V\fP|\fB\-\-version\fP,\fB\-v\fP|\fB\-\-help\fP,\fB\-h\fP]
 .SH "DESCRIPTION"
 .sp
 \fByabai\fP is a tiling window manager for macOS based on binary space partitioning.
@@ -55,6 +55,44 @@ Uninstall the scripting\-addition. Must be run as root.
 Path is /Library/ScriptingAdditions/yabai.osax.
 .br
 System Integrity Protection must be partially disabled.
+.RE
+.sp
+\fB\-\-check\-sa\fP
+.RS 4
+Report whether the scripting\-addition is loaded and healthy.
+.br
+Talks to the payload running inside Dock.app directly, so it reflects the
+real running state rather than whether files are installed.
+.br
+Does not require root and does not re\-inject.
+.br
+Exits 0 only when the payload responds, matches this build\(cqs version, and
+advertises full support for the current macOS; non\-zero otherwise.
+.RE
+.sp
+\fB\-\-install\-sudoers\fP
+.RS 4
+Writes a sha256\-pinned passwordless sudoers rule that lets the running user
+invoke \fBsudo yabai \-\-load\-sa\fP without a password. Must be run as root
+(typically \fBsudo yabai \-\-install\-sudoers\fP).
+.br
+The rule is pinned to this exact binary\(cqs sha256 and only authorizes the
+\fB\-\-load\-sa\fP subcommand, so it stops authorizing the moment the binary
+changes. It lets the launchd service \(em which has no tty \(em inject the
+scripting\-addition unattended; without it, window moves fall back to the
+blocking accessibility path.
+.br
+Path is /private/etc/sudoers.d/yabai. The generated rule is validated with
+\fBvisudo \-c\fP before being moved into place, so a malformed rule can never
+lock sudo.
+.RE
+.sp
+\fB\-\-uninstall\-sudoers\fP
+.RS 4
+Removes the passwordless \fB\-\-load\-sa\fP sudoers rule. Must be run as root
+(typically \fBsudo yabai \-\-uninstall\-sudoers\fP).
+.br
+Path is /private/etc/sudoers.d/yabai.
 .RE
 .sp
 \fB\-\-install\-service\fP
@@ -204,6 +242,31 @@ When focusing a window, put the mouse at its center.
 \fBfocus_follows_mouse\fP [\fIautofocus|autoraise|off\fP]
 .RS 4
 Automatically focus the window under the mouse.
+.RE
+.sp
+\fBmanage\fP [\fI<BOOL_SEL>\fP]
+.RS 4
+Automatically manage (tile) eligible windows.
+.br
+\fIon\fP (default): Eligible windows are tiled, matching upstream behaviour.
+.br
+\fIoff\fP: Hybrid mode. Windows are only tiled when matched by a rule that sets
+\fImanage=on\fP; everything else floats, including pre\-existing windows at startup.
+.br
+Toggling this at runtime re\-evaluates existing windows, so a restart is not required.
+.RE
+.sp
+\fBwindow_sublayer_auto\fP [\fI<BOOL_SEL>\fP]
+.RS 4
+Control how the automatic (\fIauto\fP) window sub\-layer is resolved.
+.br
+\fIon\fP (default): Managed windows render below floating windows, matching upstream
+behaviour (floats sit on top of tiles).
+.br
+\fIoff\fP: All windows using the \fIauto\fP layer resolve to the normal sub\-layer, so
+floating windows no longer render above tiled windows.
+.br
+Toggling this at runtime re\-applies the layer to existing windows.
 .RE
 .sp
 \fBdisplay_arrangement_order\fP [\fIdefault|vertical|horizontal\fP]

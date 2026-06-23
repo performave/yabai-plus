@@ -13,8 +13,8 @@ reconstructing context.
   `src/view.c` and the full `yabai -m` command grammar (all 7 domains) are
   ported into pure-Rust `yabai-core`; `yabai-runtime` has the full control plane
   (`AppState` + `Config` + `Runtime` flush + single-threaded `Actor`) plus the
-  first pure query serializer for state it owns; and `yabai-macos` has the first
-  real `LayoutSink` (`AxSink`) moving windows via the Accessibility API. 100
+  first pure query serializer for windows/spaces/displays; and `yabai-macos` has
+  the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API. 102
   workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-23.
 - User decisions captured:
@@ -243,6 +243,21 @@ without macOS or a daemon.
   id, not Mission Control index. That is acceptable for the pure state layer but
   must be revisited when live display/space discovery lands.
 - Whole workspace is now 100 passing tests; `cargo fmt --all`, `cargo test
+  --workspace`, and `cargo clippy --workspace --all-targets` are clean.
+
+- Extended the pure read path with display metadata owned by `AppState`: a
+  `display_id -> frame` registry plus `space -> display` associations, fed by
+  explicit methods and new `StateEvent::DisplayCreated` / `DisplayRemoved` /
+  `SpaceCreatedOnDisplay` variants. `query --displays` now serializes `id`,
+  `index`, `frame`, `spaces`, and `has-focus`; `query --spaces --display`,
+  `query --windows --display`, and `query --displays --space` are answered from
+  the same association map. Numeric display selectors follow C semantics by
+  resolving as arrangement indices over the registered displays, while serialized
+  `id` remains the display id.
+- Scope note: pure display `spaces` currently emits runtime space ids, not
+  Mission Control indices, for the same reason as the prior `--space` selector
+  note. UUIDs/labels still require live macOS metadata and remain unsupported.
+- Whole workspace is now 102 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
 
 Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight

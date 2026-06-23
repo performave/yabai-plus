@@ -32,6 +32,10 @@ pub type Response = Result<Option<String>, String>;
 /// exactly as `src/event_loop.c` serializes events through one worker queue.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StateEvent {
+    /// A display was discovered, with its full display frame.
+    DisplayCreated { display_id: u32, frame: Area },
+    /// A display disappeared.
+    DisplayRemoved { display_id: u32 },
     /// A new managed window appeared on the active space.
     WindowCreated { window_id: u32 },
     /// A managed window went away.
@@ -40,6 +44,12 @@ pub enum StateEvent {
     WindowFocused { window_id: u32 },
     /// A space was discovered, with its usable (already padded or full) frame.
     SpaceCreated { sid: u64, frame: Area },
+    /// A space was discovered on a known display.
+    SpaceCreatedOnDisplay {
+        sid: u64,
+        display_id: u32,
+        frame: Area,
+    },
     /// The active space changed.
     SpaceChanged { sid: u64 },
     /// A space's display frame changed (display add/resize/move); re-inset and
@@ -70,10 +80,17 @@ impl LayoutSink for RecordingSink {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DisplayInfo {
+    frame: Area,
+}
+
 /// Owns all mutable daemon state.
 #[derive(Debug, Default)]
 pub struct AppState {
     pub config: Config,
+    displays: HashMap<u32, DisplayInfo>,
+    space_displays: HashMap<u64, u32>,
     spaces: HashMap<u64, Tree>,
     active_space: Option<u64>,
     focused_window: Option<u32>,
@@ -84,6 +101,16 @@ impl AppState {
         Self::default()
     }
 
+    /// Register (or replace) a display's frame.
+    pub fn add_display(&mut self, display_id: u32, frame: Area) {
+        self.displays.insert(display_id, DisplayInfo { frame });
+    }
+
+    pub fn remove_display(&mut self, display_id: u32) {
+        self.displays.remove(&display_id);
+        self.space_displays.retain(|_, did| *did != display_id);
+    }
+
     /// Register (or replace) a space's layout tree with the given area, using
     /// the current config and the config's default layout.
     pub fn add_space(&mut self, sid: u64, area: Area) {
@@ -92,6 +119,12 @@ impl AppState {
         if self.active_space.is_none() {
             self.active_space = Some(sid);
         }
+    }
+
+    /// Register a space and associate it with a display.
+    pub fn add_space_to_display(&mut self, sid: u64, display_id: u32, area: Area) {
+        self.add_space(sid, area);
+        self.space_displays.insert(sid, display_id);
     }
 
     pub fn set_active_space(&mut self, sid: u64) {
@@ -190,6 +223,10 @@ impl AppState {
     /// call [`Self::flush_active`] afterward to push the new layout to windows.
     pub fn handle_event(&mut self, event: StateEvent) -> Result<(), String> {
         match event {
+            StateEvent::DisplayCreated { display_id, frame } => {
+                self.add_display(display_id, frame);
+            }
+            StateEvent::DisplayRemoved { display_id } => self.remove_display(display_id),
             StateEvent::WindowCreated { window_id } => {
                 if self.config.manage {
                     self.add_window(window_id)?;
@@ -205,6 +242,11 @@ impl AppState {
                 self.focused_window = Some(window_id);
             }
             StateEvent::SpaceCreated { sid, frame } => self.add_space(sid, frame),
+            StateEvent::SpaceCreatedOnDisplay {
+                sid,
+                display_id,
+                frame,
+            } => self.add_space_to_display(sid, display_id, frame),
             StateEvent::SpaceChanged { sid } => self.active_space = Some(sid),
             StateEvent::DisplayFrameChanged { sid, frame } => self.set_space_frame(sid, frame)?,
         }
@@ -313,9 +355,83 @@ impl AppState {
 
     fn dispatch_query(&self, cmd: &QueryCommand) -> Response {
         match cmd.target {
-            QueryTarget::Displays => Err("query --displays needs live display state".to_string()),
+            QueryTarget::Displays => self.query_displays(cmd),
             QueryTarget::Spaces => self.query_spaces(cmd),
             QueryTarget::Windows => self.query_windows(cmd),
+        }
+    }
+
+    fn query_displays(&self, cmd: &QueryCommand) -> Response {
+        let properties = query_properties(
+            &cmd.properties,
+            &["id", "index", "frame", "spaces", "has-focus"],
+            "display",
+        )?;
+
+        match &cmd.scope {
+            Some((QueryScopeKind::Display, selector)) => {
+                let display_id = self.resolve_display_selector(selector.as_ref())?;
+                let display = self
+                    .displays
+                    .get(&display_id)
+                    .ok_or_else(|| "could not retrieve display details.".to_string())?;
+                Ok(Some(format!(
+                    "{}\n",
+                    self.serialize_display(display_id, display, &properties)
+                )))
+            }
+            None => {
+                let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
+                display_ids.sort_unstable();
+                let mut output = String::from("[");
+                for (idx, display_id) in display_ids.into_iter().enumerate() {
+                    if idx > 0 {
+                        output.push(',');
+                    }
+                    let display = self.displays.get(&display_id).unwrap();
+                    output.push_str(&self.serialize_display(display_id, display, &properties));
+                }
+                output.push_str("]\n");
+                Ok(Some(output))
+            }
+            Some((QueryScopeKind::Space, selector)) => {
+                let sid = self.resolve_space_selector(selector.as_ref())?;
+                let display_id = self
+                    .space_displays
+                    .get(&sid)
+                    .copied()
+                    .ok_or_else(|| "could not retrieve display details.".to_string())?;
+                let display = self
+                    .displays
+                    .get(&display_id)
+                    .ok_or_else(|| "could not retrieve display details.".to_string())?;
+                Ok(Some(format!(
+                    "{}\n",
+                    self.serialize_display(display_id, display, &properties)
+                )))
+            }
+            Some((QueryScopeKind::Window, selector)) => {
+                let window_id = match selector.as_ref() {
+                    Some(selector) => self.resolve_window(selector)?,
+                    None => self.require_focused()?,
+                };
+                let sid = self
+                    .window_space(window_id)
+                    .ok_or_else(|| "could not retrieve display details.".to_string())?;
+                let display_id = self
+                    .space_displays
+                    .get(&sid)
+                    .copied()
+                    .ok_or_else(|| "could not retrieve display details.".to_string())?;
+                let display = self
+                    .displays
+                    .get(&display_id)
+                    .ok_or_else(|| "could not retrieve display details.".to_string())?;
+                Ok(Some(format!(
+                    "{}\n",
+                    self.serialize_display(display_id, display, &properties)
+                )))
+            }
         }
     }
 
@@ -359,8 +475,22 @@ impl AppState {
                 output.push_str("]\n");
                 Ok(Some(output))
             }
-            Some((QueryScopeKind::Display, _)) => {
-                Err("query --spaces --display needs live display state".to_string())
+            Some((QueryScopeKind::Display, selector)) => {
+                let display_id = self.resolve_display_selector(selector.as_ref())?;
+                let sids = self.display_spaces(display_id);
+                let mut output = String::from("[");
+                for (idx, sid) in sids.into_iter().enumerate() {
+                    if idx > 0 {
+                        output.push(',');
+                    }
+                    let tree = self
+                        .spaces
+                        .get(&sid)
+                        .ok_or_else(|| "could not retrieve spaces for display.".to_string())?;
+                    output.push_str(&self.serialize_space(sid, tree, &properties));
+                }
+                output.push_str("]\n");
+                Ok(Some(output))
             }
             Some((QueryScopeKind::Window, _)) => {
                 Err("query --spaces --window needs live window state".to_string())
@@ -402,8 +532,14 @@ impl AppState {
                     .collect::<Vec<_>>();
                 Ok(Some(self.serialize_window_array(&frames, &properties)))
             }
-            Some((QueryScopeKind::Display, _)) => {
-                Err("query --windows --display needs live display state".to_string())
+            Some((QueryScopeKind::Display, selector)) => {
+                let display_id = self.resolve_display_selector(selector.as_ref())?;
+                let frames = self
+                    .display_spaces(display_id)
+                    .into_iter()
+                    .flat_map(|sid| self.flush(sid).unwrap_or_default())
+                    .collect::<Vec<_>>();
+                Ok(Some(self.serialize_window_array(&frames, &properties)))
             }
         }
     }
@@ -418,6 +554,35 @@ impl AppState {
         }
         output.push_str("]\n");
         output
+    }
+
+    fn serialize_display(
+        &self,
+        display_id: u32,
+        display: &DisplayInfo,
+        properties: &[&str],
+    ) -> String {
+        let mut fields = Vec::new();
+        for property in properties {
+            match *property {
+                "id" => fields.push(format!("\t\"id\":{display_id}")),
+                "index" => fields.push(format!(
+                    "\t\"index\":{}",
+                    self.display_index(display_id).unwrap_or(0)
+                )),
+                "frame" => fields.push(format_area("frame", display.frame)),
+                "spaces" => fields.push(format!(
+                    "\t\"spaces\":[{}]",
+                    join_u64s(&self.display_spaces(display_id))
+                )),
+                "has-focus" => fields.push(format!(
+                    "\t\"has-focus\":{}",
+                    json_bool(self.active_display() == Some(display_id))
+                )),
+                _ => unreachable!("query_properties rejects unsupported properties"),
+            }
+        }
+        format!("{{\n{}\n}}", fields.join(",\n"))
     }
 
     fn serialize_space(&self, sid: u64, tree: &Tree, properties: &[&str]) -> String {
@@ -455,10 +620,7 @@ impl AppState {
         for property in properties {
             match *property {
                 "id" => fields.push(format!("\t\"id\":{}", frame.window_id)),
-                "frame" => fields.push(format!(
-                    "\t\"frame\":{{\n\t\t\"x\":{:.4},\n\t\t\"y\":{:.4},\n\t\t\"w\":{:.4},\n\t\t\"h\":{:.4}\n\t}}",
-                    frame.area.x, frame.area.y, frame.area.w, frame.area.h
-                )),
+                "frame" => fields.push(format_area("frame", frame.area)),
                 "has-focus" => fields.push(format!(
                     "\t\"has-focus\":{}",
                     json_bool(self.focused_window == Some(frame.window_id))
@@ -474,6 +636,60 @@ impl AppState {
             .values()
             .flat_map(Tree::capture)
             .find(|frame| frame.window_id == window_id)
+    }
+
+    fn window_space(&self, window_id: u32) -> Option<u64> {
+        self.spaces
+            .iter()
+            .find_map(|(&sid, tree)| tree.window_list().contains(&window_id).then_some(sid))
+    }
+
+    fn display_spaces(&self, display_id: u32) -> Vec<u64> {
+        let mut spaces = self
+            .space_displays
+            .iter()
+            .filter_map(|(&sid, &did)| (did == display_id).then_some(sid))
+            .collect::<Vec<_>>();
+        spaces.sort_unstable();
+        spaces
+    }
+
+    fn active_display(&self) -> Option<u32> {
+        self.active_space
+            .and_then(|sid| self.space_displays.get(&sid).copied())
+    }
+
+    fn display_index(&self, display_id: u32) -> Option<usize> {
+        let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
+        display_ids.sort_unstable();
+        display_ids
+            .iter()
+            .position(|did| *did == display_id)
+            .map(|idx| idx + 1)
+    }
+
+    fn resolve_display_selector(&self, selector: Option<&Selector>) -> Result<u32, String> {
+        match selector {
+            Some(Selector::Index(index)) => {
+                let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
+                display_ids.sort_unstable();
+                let index = (*index as usize).checked_sub(1).ok_or_else(|| {
+                    "could not locate display with arrangement index '0'.".to_string()
+                })?;
+                display_ids.get(index).copied().ok_or_else(|| {
+                    format!(
+                        "could not locate display with arrangement index '{}'.",
+                        index + 1
+                    )
+                })
+            }
+            Some(selector) => Err(format!(
+                "selector {selector:?} cannot be resolved without live display state"
+            )),
+            None => self
+                .active_display()
+                .ok_or_else(|| "could not locate the selected display.".to_string()),
+        }
     }
 
     fn resolve_space_selector(&self, selector: Option<&Selector>) -> Result<u64, String> {
@@ -597,6 +813,21 @@ fn join_ids(windows: &[u32]) -> String {
         .join(", ")
 }
 
+fn join_u64s(values: &[u64]) -> String {
+    values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_area(name: &str, area: Area) -> String {
+    format!(
+        "\t\"{name}\":{{\n\t\t\"x\":{:.4},\n\t\t\"y\":{:.4},\n\t\t\"w\":{:.4},\n\t\t\"h\":{:.4}\n\t}}",
+        area.x, area.y, area.w, area.h
+    )
+}
+
 fn json_bool(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
@@ -611,6 +842,15 @@ mod tests {
     fn state_with_space() -> AppState {
         let mut state = AppState::new();
         state.add_space(1, Area::new(0.0, 0.0, 1000.0, 1000.0));
+        state
+    }
+
+    fn state_with_displays() -> AppState {
+        let mut state = AppState::new();
+        state.add_display(42, Area::new(0.0, 0.0, 1440.0, 900.0));
+        state.add_display(77, Area::new(1440.0, 0.0, 1280.0, 720.0));
+        state.add_space_to_display(1, 42, Area::new(0.0, 0.0, 1440.0, 900.0));
+        state.add_space_to_display(2, 77, Area::new(1440.0, 0.0, 1280.0, 720.0));
         state
     }
 
@@ -894,6 +1134,45 @@ mod tests {
             Ok(Some(
                 "{\n\t\"id\":1,\n\t\"type\":\"bsp\",\n\t\"windows\":[1, 2],\n\t\"first-window\":1,\n\t\"last-window\":2,\n\t\"has-focus\":true,\n\t\"is-visible\":true\n}\n".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn query_displays_serializes_registered_displays() {
+        let mut state = state_with_displays();
+        state.set_active_space(2);
+
+        assert_eq!(
+            state.handle_tokens(&toks(&[
+                "query",
+                "--displays",
+                "id,index,frame,spaces,has-focus",
+            ])),
+            Ok(Some(
+                "[{\n\t\"id\":42,\n\t\"index\":1,\n\t\"frame\":{\n\t\t\"x\":0.0000,\n\t\t\"y\":0.0000,\n\t\t\"w\":1440.0000,\n\t\t\"h\":900.0000\n\t},\n\t\"spaces\":[1],\n\t\"has-focus\":false\n},{\n\t\"id\":77,\n\t\"index\":2,\n\t\"frame\":{\n\t\t\"x\":1440.0000,\n\t\t\"y\":0.0000,\n\t\t\"w\":1280.0000,\n\t\t\"h\":720.0000\n\t},\n\t\"spaces\":[2],\n\t\"has-focus\":true\n}]\n".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn query_display_scope_filters_spaces_and_windows() {
+        let mut state = state_with_displays();
+        state.set_active_space(1);
+        state.add_window(10).unwrap();
+        state.set_active_space(2);
+        state.add_window(20).unwrap();
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--spaces", "id", "--display", "2"])),
+            Ok(Some("[{\n\t\"id\":2\n}]\n".to_string()))
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--windows", "id", "--display", "1"])),
+            Ok(Some("[{\n\t\"id\":10\n}]\n".to_string()))
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--displays", "id", "--space", "1"])),
+            Ok(Some("{\n\t\"id\":42\n}\n".to_string()))
         );
     }
 

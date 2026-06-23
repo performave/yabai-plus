@@ -856,6 +856,16 @@ void window_manager_adjust_layer(struct window *window, int layer)
 {
     if (window->layer != LAYER_AUTO) return;
 
+    //
+    // NOTE(yabai-plus): when window_sublayer_auto is off, never sink managed windows
+    // beneath floats. This is the real-time path (focus/tile/mouse events) that keeps
+    // tiles below floats; gating it here is what makes the config actually take effect.
+    //
+
+    if (!g_window_manager.enable_window_sublayer_auto && layer == LAYER_BELOW) {
+        layer = LAYER_NORMAL;
+    }
+
     scripting_addition_set_layer(window->id, layer);
 }
 

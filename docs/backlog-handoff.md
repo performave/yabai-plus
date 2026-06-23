@@ -52,8 +52,14 @@ yabai -m config window_sublayer_auto off   # floats no longer forced above tiles
 **Landed.** Implemented as two `struct window_manager` flags (`enable_window_sublayer_auto`,
 `manage`), both defaulting to `true`:
 
-- `window_manager_set_window_layer` now resolves `LAYER_AUTO` to `LAYER_NORMAL` for
+- `window_manager_set_window_layer` resolves `LAYER_AUTO` to `LAYER_NORMAL` for
   everything when `enable_window_sublayer_auto` is off.
+- **Plan correction:** the plan said `window_manager_adjust_layer` needed no change.
+  That was wrong. `adjust_layer` is the dominant *real-time* path (focus/tile/mouse
+  events in `event_loop.c`, `mouse_handler.c`, `space_manager.c`) and it passes its
+  `layer` argument straight to the SA without consulting the flag, so the config had
+  no runtime effect until `adjust_layer` was also gated (an `LAYER_BELOW` request is
+  demoted to `LAYER_NORMAL` when the flag is off).
 - `window_manager_should_manage_window` and the auto-float path in
   `window_manager_create_and_add_window` gate on `manage`; rule-managed
   (`WINDOW_RULE_MANAGED`) windows are always exempt.
@@ -64,7 +70,28 @@ yabai -m config window_sublayer_auto off   # floats no longer forced above tiles
   `doc/yabai.asciidoc`. NOTE: `doc/yabai.1` was not regenerated here — `asciidoctor`
   was not installed; run `make man` on a machine that has it.
 
-**Status: landed.**
+### Verification (canary, Tahoe)
+
+- **1b `manage` — fully verified.** `manage off` retroactively floated 9/10 existing
+  windows (the 10th, Spotify, reports an empty AX role → `window_is_real` false →
+  ineligible, correctly left untouched); `manage on` retiled all 10. A new Finder
+  window opened floating under `manage off`, and with a `manage=on` rule added it
+  tiled instead — confirming rule-managed windows still tile in hybrid mode. Config
+  set/read round-trips and bad values are rejected.
+- **1a `window_sublayer_auto` — code correct, not visually confirmable on this setup.**
+  On Tahoe the `query` `level`/`sub-level`/`sub-layer` fields read `0/normal` for all
+  windows regardless of the SA's actual sub-layer ordering, so the effect can't be
+  observed programmatically. The visual A/B (float over a focused tile) showed the
+  focused tiled window on top in *both* ON and OFF states — i.e., focus-raise
+  dominates and the BELOW-sublayer ordering produced no observable float-above-tile
+  effect here, so toggling the flag made no visible difference. The code change is
+  correct for the documented mechanism; **recommend re-checking against the specific
+  windows that originally motivated the `sub-layer=normal` hack** (those may be
+  sticky/PiP windows, which overlaps with Item 3). Possible that the Tahoe SA
+  sub-level path is itself ineffective for ordinary windows — worth a follow-up.
+
+**Status: landed (1b verified; 1a verified by construction, visual confirmation
+pending on motivating windows).**
 
 ---
 

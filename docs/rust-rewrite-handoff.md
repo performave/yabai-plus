@@ -14,7 +14,8 @@ reconstructing context.
   ported into pure-Rust `yabai-core`; `yabai-runtime` has the full control plane
   (`AppState` + `Config` + `Runtime` flush + single-threaded `Actor`) plus the
   first pure query serializer for windows/spaces/displays; and `yabai-macos` has
-  the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API. 103
+  the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API
+  plus live CoreGraphics display discovery. 104
   workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-23.
 - User decisions captured:
@@ -270,6 +271,22 @@ without macOS or a daemon.
   loop behind a non-conflicting flag. Added an in-process Unix-socket test that
   sends `query --windows id` through the daemon path and receives `[]\n`.
 - Whole workspace is now 103 passing tests; `cargo fmt --all`, `cargo test
+  --workspace`, and `cargo clippy --workspace --all-targets` are clean.
+
+- Added live display discovery to `yabai-macos`: `display::active_displays()`
+  wraps `CGGetActiveDisplayList` / `CGDisplayBounds` and returns display ids plus
+  `Area` frames. The dry-run Rust daemon seeds `AppState` with these displays on
+  startup, so `query --displays id,index,frame` now returns real display geometry
+  through the Rust socket even before SkyLight space discovery exists. The
+  workspace has a live-safe test that simply verifies the CoreGraphics call
+  returns successfully.
+- Live verification on this machine: stopped the running `/opt/homebrew/bin/yabai`
+  with `yabai --stop-service`, started `target/debug/yabai
+  --experimental-rust-daemon /tmp/yabai_rust_live.socket`, then queried it with
+  `USER=rust_live target/debug/yabai -m query --displays id,index,frame`. The
+  response reported one display (`id: 2`, `2560x1440`) via the Rust daemon. The
+  experimental socket was removed afterward.
+- Whole workspace is now 104 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
 
 Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight

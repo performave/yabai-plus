@@ -3,6 +3,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
+use yabai_macos::active_displays;
 use yabai_runtime::{Actor, AppState, RecordingSink, Runtime};
 
 fn main() -> ExitCode {
@@ -67,7 +68,9 @@ fn run_experimental_daemon(args: &[String]) -> ExitCode {
 
     match bind_experimental_daemon(socket_path) {
         Ok(listener) => {
-            let actor = Actor::spawn(Runtime::new(AppState::new(), RecordingSink::default()));
+            let mut state = AppState::new();
+            seed_live_displays(&mut state);
+            let actor = Actor::spawn(Runtime::new(state, RecordingSink::default()));
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => serve_one(stream, &actor),
@@ -81,6 +84,17 @@ fn run_experimental_daemon(args: &[String]) -> ExitCode {
             eprintln!("yabai-rust: failed to bind daemon socket at {socket_path}: {error}");
             ExitCode::from(1)
         }
+    }
+}
+
+fn seed_live_displays(state: &mut AppState) {
+    match active_displays() {
+        Ok(displays) => {
+            for display in displays {
+                state.add_display(display.id, display.frame);
+            }
+        }
+        Err(error) => eprintln!("yabai-rust: failed to discover displays: {error}"),
     }
 }
 

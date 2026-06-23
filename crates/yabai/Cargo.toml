@@ -12,5 +12,6 @@ workspace = true
 [dependencies]
 yabai-core = { path = "../yabai-core" }
 yabai-ipc = { path = "../yabai-ipc" }
+yabai-macos = { path = "../yabai-macos" }
 yabai-runtime = { path = "../yabai-runtime" }
 yabai-sa = { path = "../yabai-sa" }

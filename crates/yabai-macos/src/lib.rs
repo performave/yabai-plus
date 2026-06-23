@@ -2,9 +2,13 @@
 
 #[cfg(target_os = "macos")]
 pub mod ax;
+#[cfg(target_os = "macos")]
+pub mod display;
 
 #[cfg(target_os = "macos")]
 pub use ax::{AxSink, AxWindow};
+#[cfg(target_os = "macos")]
+pub use display::{MacDisplay, active_displays};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DisplayId(pub u32);

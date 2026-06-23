@@ -8,6 +8,7 @@ version = "0.0.0"
 dependencies = [
  "yabai-core",
  "yabai-ipc",
+ "yabai-macos",
  "yabai-runtime",
  "yabai-sa",
 ]

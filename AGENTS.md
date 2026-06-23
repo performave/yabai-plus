@@ -110,4 +110,7 @@ version macros in `src/yabai.c` and add a `CHANGELOG.md` entry before tagging.
   comment style) when patching, so diffs stay minimal and rebases stay clean.
 - Keep changes scoped; prefer small commits with clear messages explaining the
   *why* (these become rebase fodder against upstream).
+- Use Conventional Commits for all commit messages: `<type>(<scope>): <summary>`
+  or `<type>: <summary>`. Prefer `fix`, `feat`, `docs`, `build`, `ci`, `refactor`,
+  `test`, or `chore`; use `!` or a `BREAKING CHANGE:` footer for breaking changes.
 - Don't reformat upstream files wholesale — it makes future rebases painful.

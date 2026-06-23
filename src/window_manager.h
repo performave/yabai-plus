@@ -88,6 +88,8 @@ struct window_manager
     ProcessSerialNumber focused_window_psn;
     uint32_t last_window_id;
     bool enable_mff;
+    bool enable_window_sublayer_auto;
+    bool manage;
     enum ffm_mode ffm_mode;
     enum purify_mode purify_mode;
     enum window_origin_mode window_origin_mode;
@@ -177,6 +179,8 @@ void window_manager_set_window_opacity_enabled(struct window_manager *wm, bool e
 bool window_manager_set_opacity(struct window_manager *wm, struct window *window, float opacity);
 void window_manager_set_window_opacity(struct window_manager *wm, struct window *window, float opacity);
 void window_manager_set_focus_follows_mouse(struct window_manager *wm, enum ffm_mode mode);
+void window_manager_set_window_sublayer_auto_enabled(struct window_manager *wm, bool enabled);
+void window_manager_set_manage_enabled(struct space_manager *sm, struct window_manager *wm, bool enabled);
 enum window_op_error window_manager_set_window_insertion(struct space_manager *sm, struct window *window, int direction);
 enum window_op_error window_manager_stack_window(struct space_manager *sm, struct window_manager *wm, struct window *a, struct window *b);
 enum window_op_error window_manager_warp_window(struct space_manager *sm, struct window_manager *wm, struct window *a, struct window *b);

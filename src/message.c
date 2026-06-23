@@ -22,6 +22,8 @@ extern bool g_verbose;
 /* --------------------------------DOMAIN CONFIG-------------------------------- */
 #define COMMAND_CONFIG_DEBUG_OUTPUT          "debug_output"
 #define COMMAND_CONFIG_MFF                   "mouse_follows_focus"
+#define COMMAND_CONFIG_WINDOW_SUBLAYER_AUTO  "window_sublayer_auto"
+#define COMMAND_CONFIG_MANAGE                "manage"
 #define COMMAND_CONFIG_FFM                   "focus_follows_mouse"
 #define COMMAND_CONFIG_DISPLAY_ORDER         "display_arrangement_order"
 #define COMMAND_CONFIG_WINDOW_ORIGIN         "window_origin_display"
@@ -1186,6 +1188,28 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
                 g_window_manager.enable_mff = false;
             } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
                 g_window_manager.enable_mff = true;
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_WINDOW_SUBLAYER_AUTO)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_window_manager.enable_window_sublayer_auto]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                window_manager_set_window_sublayer_auto_enabled(&g_window_manager, false);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                window_manager_set_window_sublayer_auto_enabled(&g_window_manager, true);
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_MANAGE)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_window_manager.manage]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                window_manager_set_manage_enabled(&g_space_manager, &g_window_manager, false);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                window_manager_set_manage_enabled(&g_space_manager, &g_window_manager, true);
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }

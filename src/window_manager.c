@@ -229,6 +229,39 @@ void window_manager_set_focus_follows_mouse(struct window_manager *wm, enum ffm_
     wm->ffm_mode = mode;
 }
 
+void window_manager_set_window_sublayer_auto_enabled(struct window_manager *wm, bool enabled)
+{
+    wm->enable_window_sublayer_auto = enabled;
+
+    //
+    // NOTE(yabai-plus): re-resolve LAYER_AUTO for existing windows so the change takes
+    // effect immediately without a restart (replaces the python post-startup loop).
+    //
+
+    table_for (struct window *window, wm->window, {
+        if (window->layer == LAYER_AUTO) {
+            window_manager_set_window_layer(window, LAYER_AUTO);
+        }
+    })
+}
+
+void window_manager_set_manage_enabled(struct space_manager *sm, struct window_manager *wm, bool enabled)
+{
+    wm->manage = enabled;
+
+    //
+    // NOTE(yabai-plus): re-evaluate managed state for existing windows so toggling at
+    // runtime behaves like setting the value before startup. Rule-managed windows are
+    // left untouched; everything else floats when off and re-tiles (if eligible) when on.
+    //
+
+    table_for (struct window *window, wm->window, {
+        if (!window_manager_is_window_eligible(window))         continue;
+        if (window_check_rule_flag(window, WINDOW_RULE_MANAGED)) continue;
+        window_manager_make_window_floating(sm, wm, window, !enabled, true);
+    })
+}
+
 void window_manager_set_window_opacity_enabled(struct window_manager *wm, bool enabled)
 {
     wm->enable_window_opacity = enabled;
@@ -276,6 +309,8 @@ bool window_manager_should_manage_window(struct window *window)
     if (window_is_sticky(window->id))               return false;
     if (window_check_flag(window, WINDOW_MINIMIZE)) return false;
     if (window->application->is_hidden)             return false;
+
+    if (!g_window_manager.manage && !window_check_rule_flag(window, WINDOW_RULE_MANAGED)) return false;
 
     return (window_is_standard(window) && window_level_is_standard(window) && window_can_move(window)) || window_check_rule_flag(window, WINDOW_RULE_MANAGED);
 }
@@ -830,7 +865,9 @@ bool window_manager_set_window_layer(struct window *window, int layer)
     int child_layer = layer;
 
     if (layer == LAYER_AUTO) {
-        parent_layer = window_manager_find_managed_window(&g_window_manager, window) ? LAYER_BELOW : LAYER_NORMAL;
+        bool below = g_window_manager.enable_window_sublayer_auto &&
+                     window_manager_find_managed_window(&g_window_manager, window);
+        parent_layer = below ? LAYER_BELOW : LAYER_NORMAL;
         child_layer = LAYER_NORMAL;
     }
 
@@ -1502,7 +1539,8 @@ struct window *window_manager_create_and_add_window(struct space_manager *sm, st
                 goto out;
             }
 
-            if (window_is_sticky(window->id) ||
+            if (!wm->manage ||
+                window_is_sticky(window->id) ||
                 !window_can_move(window) ||
                 !window_is_standard(window) ||
                 !window_level_is_standard(window) ||
@@ -2742,6 +2780,8 @@ void window_manager_init(struct window_manager *wm)
     wm->purify_mode = PURIFY_DISABLED;
     wm->window_origin_mode = WINDOW_ORIGIN_DEFAULT;
     wm->enable_mff = false;
+    wm->enable_window_sublayer_auto = true;
+    wm->manage = true;
     wm->enable_window_opacity = false;
     wm->menubar_opacity = 1.0f;
     wm->active_window_opacity = 1.0f;

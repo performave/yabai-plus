@@ -162,6 +162,21 @@ Global Settings
 *focus_follows_mouse* ['autofocus|autoraise|off']::
     Automatically focus the window under the mouse.
 
+*manage* ['<BOOL_SEL>']::
+    Automatically manage (tile) eligible windows. +
+    'on' (default): Eligible windows are tiled, matching upstream behaviour. +
+    'off': Hybrid mode. Windows are only tiled when matched by a rule that sets
+    'manage=on'; everything else floats, including pre-existing windows at startup. +
+    Toggling this at runtime re-evaluates existing windows, so a restart is not required.
+
+*window_sublayer_auto* ['<BOOL_SEL>']::
+    Control how the automatic ('auto') window sub-layer is resolved. +
+    'on' (default): Managed windows render below floating windows, matching upstream
+    behaviour (floats sit on top of tiles). +
+    'off': All windows using the 'auto' layer resolve to the normal sub-layer, so
+    floating windows no longer render above tiled windows. +
+    Toggling this at runtime re-applies the layer to existing windows.
+
 *display_arrangement_order* ['default|vertical|horizontal']::
     Specify how displays are ordered (determined by center point). +
     'default': Native macOS ordering. +

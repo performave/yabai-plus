@@ -15,7 +15,7 @@ the source of truth for status**.
 
 | # | Item | Type | Status |
 |---|------|------|--------|
-| 1 | Config: disable floats-topmost + hybrid (no-manage-on-startup) | feat | **in progress** |
+| 1 | Config: disable floats-topmost + hybrid (no-manage-on-startup) | feat | **landed** |
 | 2 | Add command to create/update the `--load-sa` sudoers file | feat | queued |
 | 3 | Cross-display focus lands on sticky Arc instead of leaving focus | bug | queued (needs repro) |
 | 4 | Switching to an empty space triggers show-desktop (always on Tahoe) | bug | queued (needs repro) |
@@ -49,7 +49,22 @@ yabai -m config window_sublayer_auto off   # floats no longer forced above tiles
 # keep the targeted rules (CleanShot X, Adobe ... manage=on)
 ```
 
-**Status: in progress.**
+**Landed.** Implemented as two `struct window_manager` flags (`enable_window_sublayer_auto`,
+`manage`), both defaulting to `true`:
+
+- `window_manager_set_window_layer` now resolves `LAYER_AUTO` to `LAYER_NORMAL` for
+  everything when `enable_window_sublayer_auto` is off.
+- `window_manager_should_manage_window` and the auto-float path in
+  `window_manager_create_and_add_window` gate on `manage`; rule-managed
+  (`WINDOW_RULE_MANAGED`) windows are always exempt.
+- Runtime toggles re-apply to existing windows via
+  `window_manager_set_window_sublayer_auto_enabled` and
+  `window_manager_set_manage_enabled` (replaces the python loop).
+- Wired in `src/message.c` (`window_sublayer_auto`, `manage`) and documented in
+  `doc/yabai.asciidoc`. NOTE: `doc/yabai.1` was not regenerated here — `asciidoctor`
+  was not installed; run `make man` on a machine that has it.
+
+**Status: landed.**
 
 ---
 

@@ -16,7 +16,7 @@ the source of truth for status**.
 | # | Item | Type | Status |
 |---|------|------|--------|
 | 1 | Config: disable floats-topmost + hybrid (no-manage-on-startup) | feat | **landed** |
-| 2 | Add command to create/update the `--load-sa` sudoers file | feat | queued |
+| 2 | Add command to create/update the `--load-sa` sudoers file | feat | **landed** |
 | 3 | Cross-display focus lands on sticky Arc instead of leaving focus | bug | queued (needs repro) |
 | 4 | Switching to an empty space triggers show-desktop (always on Tahoe) | bug | queued (needs repro) |
 | 5 | Are these caused by the Arc PiP fix? | diag | **answered (below)** |
@@ -102,7 +102,28 @@ handling (`src/yabai.c`, impl in `src/sa.m`) that writes a sha256-pinned passwor
 rule to `/private/etc/sudoers.d/yabai` (root + `visudo -c` validation). Matches the
 dev-loop rule referenced in `docs/debugging.md`. Self-contained.
 
-**Status: queued.**
+**Landed.** `scripting_addition_install_sudoers` / `scripting_addition_uninstall_sudoers`
+(`src/sa.m`, declared in `src/sa.h`), wired as `--install-sudoers` / `--uninstall-sudoers`
+in `src/yabai.c` (`parse_arguments` + `--help`).
+
+- Both require root (run via `sudo yabai --install-sudoers`); refuse otherwise.
+- Install pins the rule to the *invoking* user (`SUDO_USER`, since `USER` is `root`
+  under sudo) and to this binary's own path (`_NSGetExecutablePath`, the same path
+  the launchd service is launched with) and sha256 (computed in-process via
+  CommonCrypto, hex). Rule line:
+  `<user> ALL=(root) NOPASSWD: sha256:<sha> <exe> --load-sa`.
+- Written to `/private/etc/sudoers.d/yabai.tmp`, `chmod 0440`, validated with
+  `visudo -cf` *before* `rename` into place, so a malformed rule can never lock sudo.
+  Uninstall `unlink`s the file (ENOENT treated as success/no-op).
+- This is the committed-binary equivalent of the rule `make dev` regenerates; the
+  format matches the makefile's `DEV_SUDOERS` line and was confirmed to pass
+  `visudo -c`. Documented in `doc/yabai.asciidoc` (SYNOPSIS + option entries).
+  NOTE: `doc/yabai.1` not regenerated — `asciidoctor` not installed here; run
+  `make man` on a machine that has it.
+
+**Status: landed (built clean; non-root refusal and rule/`visudo -c` format verified;
+live root install not exercised here to avoid clobbering the existing `make dev`
+sudoers file at the same path).**
 
 ---
 

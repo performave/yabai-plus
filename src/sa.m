@@ -1,4 +1,9 @@
 #include "sa.h"
+#include <CommonCrypto/CommonDigest.h>
+#include <errno.h>
+
+#define SUDOERS_PATH     "/private/etc/sudoers.d/yabai"
+#define SUDOERS_TMP_PATH "/private/etc/sudoers.d/yabai.tmp"
 
 extern int csr_get_active_config(uint32_t *config);
 #define CSR_ALLOW_UNRESTRICTED_FS 0x02
@@ -634,6 +639,139 @@ int scripting_addition_status(void)
     }
 
     fprintf(stdout, "scripting-addition: loaded and healthy (payload v%s)\n", version);
+    return 0;
+}
+
+//
+// NOTE(plus): Manage a passwordless-sudo rule for `yabai --load-sa` so the launchd
+// service -- which has no tty to type a password at -- can inject the scripting
+// addition unattended. Without it, window moves fall back to the blocking AX path
+// (the mid-drag freeze). This is the committed-binary equivalent of the dev-loop
+// rule that `make dev` regenerates; see docs/debugging.md.
+//
+// The rule is pinned to the running binary's sha256, so it only authorizes *this*
+// exact yabai (it stops authorizing the moment the binary changes) and only the
+// `--load-sa` subcommand. We hash the binary in-process, write the rule to a temp
+// file, validate it with `visudo -cf` *before* moving it into place (a malformed
+// line can never lock sudo), and chmod it 0440 as sudo requires.
+//
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static bool sudoers_compute_sha256_hex(const char *path, char *out, size_t out_size)
+{
+    if (out_size < CC_SHA256_DIGEST_LENGTH*2 + 1) return false;
+
+    FILE *handle = fopen(path, "rb");
+    if (!handle) return false;
+
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+
+    uint8_t buffer[65536];
+    size_t bytes;
+    while ((bytes = fread(buffer, 1, sizeof(buffer), handle)) > 0) {
+        CC_SHA256_Update(&ctx, buffer, (CC_LONG) bytes);
+    }
+
+    bool read_ok = ferror(handle) == 0;
+    fclose(handle);
+    if (!read_ok) return false;
+
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &ctx);
+
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
+        snprintf(out + i*2, 3, "%02x", digest[i]);
+    }
+    return true;
+}
+#pragma clang diagnostic pop
+
+int scripting_addition_install_sudoers(void)
+{
+    if (!is_root()) {
+        warn("yabai: sudoers rule must be installed as root! run 'sudo yabai --install-sudoers'\n");
+        return 1;
+    }
+
+    //
+    // NOTE(plus): we are root here, so getenv("USER") would read "root". The rule's
+    // first field must name the *invoking* user, which sudo exposes as SUDO_USER.
+    //
+    char *user = getenv("SUDO_USER");
+    if (!user || !user[0]) {
+        warn("yabai: cannot determine invoking user (env SUDO_USER not set); run via 'sudo yabai --install-sudoers'!\n");
+        return 1;
+    }
+
+    //
+    // NOTE(plus): pin the path sudo just resolved this invocation to -- that is the
+    // same path a later `sudo yabai --load-sa` resolves, and the same one the launchd
+    // service is launched with (both use _NSGetExecutablePath; see misc/service.h).
+    //
+    char exe_path[MAXLEN];
+    unsigned int exe_path_size = sizeof(exe_path);
+    if (_NSGetExecutablePath(exe_path, &exe_path_size) < 0) {
+        warn("yabai: unable to retrieve path of executable!\n");
+        return 1;
+    }
+
+    char sha[CC_SHA256_DIGEST_LENGTH*2 + 1];
+    if (!sudoers_compute_sha256_hex(exe_path, sha, sizeof(sha))) {
+        warn("yabai: unable to compute sha256 of '%s'!\n", exe_path);
+        return 1;
+    }
+
+    char rule[MAXLEN];
+    snprintf(rule, sizeof(rule), "%s ALL=(root) NOPASSWD: sha256:%s %s --load-sa\n", user, sha, exe_path);
+
+    if (!scripting_addition_write_file(rule, strlen(rule), SUDOERS_TMP_PATH, "w")) {
+        warn("yabai: failed to write '%s'!\n", SUDOERS_TMP_PATH);
+        return 1;
+    }
+
+    if (chmod(SUDOERS_TMP_PATH, 0440) != 0) {
+        warn("yabai: failed to set permissions on '%s'!\n", SUDOERS_TMP_PATH);
+        unlink(SUDOERS_TMP_PATH);
+        return 1;
+    }
+
+    char cmd[MAXLEN];
+    snprintf(cmd, sizeof(cmd), "%s %s %s", "visudo -cf", SUDOERS_TMP_PATH, ">/dev/null 2>&1");
+    int code = system(cmd);
+    if (code == -1 || !WIFEXITED(code) || WEXITSTATUS(code) != 0) {
+        warn("yabai: generated sudoers rule failed 'visudo -c' validation; not installing!\n");
+        unlink(SUDOERS_TMP_PATH);
+        return 1;
+    }
+
+    if (rename(SUDOERS_TMP_PATH, SUDOERS_PATH) != 0) {
+        warn("yabai: failed to move sudoers rule into place at '%s'!\n", SUDOERS_PATH);
+        unlink(SUDOERS_TMP_PATH);
+        return 1;
+    }
+
+    fprintf(stdout, "yabai: installed passwordless '--load-sa' sudoers rule at '%s' for user '%s'\n", SUDOERS_PATH, user);
+    return 0;
+}
+
+int scripting_addition_uninstall_sudoers(void)
+{
+    if (!is_root()) {
+        warn("yabai: sudoers rule must be uninstalled as root! run 'sudo yabai --uninstall-sudoers'\n");
+        return 1;
+    }
+
+    if (unlink(SUDOERS_PATH) != 0) {
+        if (errno == ENOENT) {
+            fprintf(stdout, "yabai: no sudoers rule installed at '%s'\n", SUDOERS_PATH);
+            return 0;
+        }
+        warn("yabai: failed to remove '%s'!\n", SUDOERS_PATH);
+        return 1;
+    }
+
+    fprintf(stdout, "yabai: removed sudoers rule at '%s'\n", SUDOERS_PATH);
     return 0;
 }
 

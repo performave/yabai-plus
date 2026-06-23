@@ -23,7 +23,7 @@ yabai - window manager
 Synopsis
 --------
 
-*yabai* [*--load-sa*|*--uninstall-sa*|*--check-sa*|*--install-service*|*--uninstall-service*|*--start-service*|*--restart-service*|*--stop-service*|*--message*,*-m* 'msg'|*--config*,*-c* 'config_file'|*--verbose*,*-V*|*--version*,*-v*|*--help*,*-h*]
+*yabai* [*--load-sa*|*--uninstall-sa*|*--check-sa*|*--install-sudoers*|*--uninstall-sudoers*|*--install-service*|*--uninstall-service*|*--start-service*|*--restart-service*|*--stop-service*|*--message*,*-m* 'msg'|*--config*,*-c* 'config_file'|*--verbose*,*-V*|*--version*,*-v*|*--help*,*-h*]
 
 Description
 -----------
@@ -50,6 +50,24 @@ Options
     Does not require root and does not re-inject. +
     Exits 0 only when the payload responds, matches this build's version, and
     advertises full support for the current macOS; non-zero otherwise.
+
+*--install-sudoers*::
+    Writes a sha256-pinned passwordless sudoers rule that lets the running user
+    invoke *sudo yabai --load-sa* without a password. Must be run as root
+    (typically *sudo yabai --install-sudoers*). +
+    The rule is pinned to this exact binary's sha256 and only authorizes the
+    *--load-sa* subcommand, so it stops authorizing the moment the binary
+    changes. It lets the launchd service -- which has no tty -- inject the
+    scripting-addition unattended; without it, window moves fall back to the
+    blocking accessibility path. +
+    Path is /private/etc/sudoers.d/yabai. The generated rule is validated with
+    *visudo -c* before being moved into place, so a malformed rule can never
+    lock sudo.
+
+*--uninstall-sudoers*::
+    Removes the passwordless *--load-sa* sudoers rule. Must be run as root
+    (typically *sudo yabai --uninstall-sudoers*). +
+    Path is /private/etc/sudoers.d/yabai.
 
 *--install-service*::
     Writes a launchd service file to disk. +

@@ -1,4 +1,5 @@
 /bin
+/target
 /tests/bin
 /archive
 /src/osax/loader_bin.c

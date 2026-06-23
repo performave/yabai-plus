@@ -1,0 +1,16 @@
+[package]
+name = "yabai"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+yabai-core = { path = "../yabai-core" }
+yabai-ipc = { path = "../yabai-ipc" }
+yabai-runtime = { path = "../yabai-runtime" }
+yabai-sa = { path = "../yabai-sa" }

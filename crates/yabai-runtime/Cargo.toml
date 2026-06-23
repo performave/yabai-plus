@@ -1,0 +1,13 @@
+[package]
+name = "yabai-runtime"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+yabai-core = { path = "../yabai-core" }
+
+[lints]
+workspace = true

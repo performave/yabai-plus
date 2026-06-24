@@ -11,6 +11,24 @@ inherited from upstream.
 
 ## [Unreleased]
 
+## [7.1.25-plus.7]
+
+### Fixed (yabai-plus)
+- Keep on-demand-tiled windows tiled across layout switches under `config manage
+  off`. A window tiled via `window --toggle float` was made managed but not
+  flagged `WINDOW_RULE_MANAGED`, so rebuild paths that consult
+  `should_manage_window` (notably switching a space between `bsp` and `stack`,
+  which clears and rebuilds the tree) dropped it, emptying the layout and leaving
+  the windows orphaned. The toggle now marks the window managed (and clears the
+  mark when floating it back), mirroring the manage-rule path, so it survives
+  every rebuild path. This supersedes the plus.6 cross-space special-casing.
+
+### Changed (yabai-plus)
+- `make dev` now swaps the canary in at the same resolved binary path the
+  production install runs from (overwriting the Cellar target in place and
+  backing the original up), so macOS preserves the Accessibility grant across
+  dev/production swaps instead of re-prompting each time.
+
 ## [7.1.25-plus.6]
 
 ### Fixed (yabai-plus)

@@ -11,6 +11,15 @@ inherited from upstream.
 
 ## [Unreleased]
 
+## [7.1.25-plus.6]
+
+### Fixed (yabai-plus)
+- Keep a managed window tiled when it is moved between spaces under
+  `config manage off`. Windows tiled on demand via `window --toggle float`
+  carry no manage rule, so the cross-space re-home paths previously dropped
+  them from the layout — untiled from the source space but refused on the
+  destination — leaving them floating over the tiles on the destination space.
+
 ## [7.1.25-plus.5]
 
 ### Changed (yabai-plus)

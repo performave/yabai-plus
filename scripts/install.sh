@@ -58,7 +58,7 @@ fi
 AUTHOR="Performave"
 REPO="yabai-plus"
 NAME="yabai"
-VERSION="7.1.25-plus.5"
+VERSION="7.1.25-plus.6"
 TMP_DIR="./${AUTHOR}-${NAME}-v${VERSION}-installer"
 ARCHIVE="${NAME}-v${VERSION}.tar.gz"
 CHECKSUM="${ARCHIVE}.sha256"

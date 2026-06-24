@@ -808,7 +808,10 @@ pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
                 continue;
             }
             // A synthetic id keyed on pid+index when the CG id will not resolve.
-            let id = window_id(window).unwrap_or(0xF000_0000 | (idx as u32 & 0x0FFF_FFFF));
+            // The high bit avoids clashing with real CG ids, and folding the pid
+            // in keeps synthetic ids unique across apps (for multi-app tiling).
+            let synthetic = 0x8000_0000 | ((pid as u32 & 0x7FFF) << 16) | (idx as u32 & 0xFFFF);
+            let id = window_id(window).unwrap_or(synthetic);
             let retained = CFRetain(window);
             result.push(DiscoveredAxWindow {
                 id,

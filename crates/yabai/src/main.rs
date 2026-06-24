@@ -4,10 +4,11 @@ use std::process::ExitCode;
 
 use yabai_core::Area;
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
+use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
     AxSink, accessibility_trusted_with_prompt, active_displays, focused_window,
     focused_window_diagnostics, main_visible_frame, move_focused_window, move_pid_window,
-    tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
+    regular_application_pids, tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
 };
 use yabai_runtime::{Actor, AppState, LayoutSink, RecordingSink, Runtime, StateEvent};
 
@@ -401,6 +402,25 @@ fn tile_config_tokens(gap: i32, padding: i32) -> Vec<String> {
     .collect()
 }
 
+/// Collect tileable windows for a daemon target: a single pid, or every regular
+/// (Dock-visible) application when `target` is `"all"`. Discovery failures for an
+/// individual app are skipped so one bad app can't abort multi-app tiling.
+fn collect_tileable_windows(target: &str) -> Vec<DiscoveredAxWindow> {
+    let pids: Vec<i32> = if target == "all" {
+        regular_application_pids()
+    } else {
+        target.parse::<i32>().into_iter().collect()
+    };
+
+    let mut windows = Vec::new();
+    for pid in pids {
+        if let Ok(found) = tileable_pid_windows(pid) {
+            windows.extend(found);
+        }
+    }
+    windows
+}
+
 /// A persistent Rust tiling daemon: it tiles one app's windows through
 /// `Actor<AxSink>` and keeps serving the socket, so live `-m` commands
 /// (`space --rotate`, `--balance`, `window --resize`, ...) re-tile real windows.
@@ -411,14 +431,18 @@ fn tile_config_tokens(gap: i32, padding: i32) -> Vec<String> {
 fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
     let Some(socket_path) = args.first() else {
         eprintln!(
-            "yabai-rust: --experimental-rust-tile-daemon requires <socket> <pid> [gap] [padding]"
+            "yabai-rust: --experimental-rust-tile-daemon requires <socket> <pid|all> [gap] [padding]"
         );
         return ExitCode::from(64);
     };
-    let Some(pid) = args.get(1).and_then(|arg| arg.parse::<i32>().ok()) else {
-        eprintln!("yabai-rust: --experimental-rust-tile-daemon requires a pid");
+    let Some(target) = args.get(1) else {
+        eprintln!("yabai-rust: --experimental-rust-tile-daemon requires a pid or 'all'");
         return ExitCode::from(64);
     };
+    if target != "all" && target.parse::<i32>().is_err() {
+        eprintln!("yabai-rust: tile target must be a pid or 'all', got '{target}'");
+        return ExitCode::from(64);
+    }
     let gap: i32 = args.get(2).and_then(|arg| arg.parse().ok()).unwrap_or(12);
     let padding: i32 = args.get(3).and_then(|arg| arg.parse().ok()).unwrap_or(gap);
 
@@ -452,17 +476,11 @@ fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
     };
     let usable = main_visible_frame().unwrap_or(display.frame);
 
-    let windows = match tileable_pid_windows(pid) {
-        Ok(windows) if !windows.is_empty() => windows,
-        Ok(_) => {
-            eprintln!("yabai-rust: pid {pid} has no tileable AX windows");
-            return ExitCode::from(1);
-        }
-        Err(error) => {
-            eprintln!("yabai-rust: failed to list AX windows for pid {pid}: {error}");
-            return ExitCode::from(1);
-        }
-    };
+    let windows = collect_tileable_windows(target);
+    if windows.is_empty() {
+        eprintln!("yabai-rust: no tileable AX windows found for target '{target}'");
+        return ExitCode::from(1);
+    }
 
     // Register every window's AX element in the sink before it moves to the actor
     // thread (the one allowed cross-thread move, per the single-actor invariant).
@@ -490,7 +508,7 @@ fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
     }
 
     eprintln!(
-        "yabai-rust: tiling daemon up on {socket_path} — pid {pid}, {} window(s), gap {gap}, padding {padding}",
+        "yabai-rust: tiling daemon up on {socket_path} — target {target}, {} window(s), gap {gap}, padding {padding}",
         ids.len()
     );
     eprintln!(
@@ -550,7 +568,7 @@ fn print_help() {
                                      Move/resize an app's index-th AX window.\n\
              --experimental-ax-tile-pid <pid> [gap] [padding]\n\
                                      BSP-tile an app's windows via the Rust core.\n\
-             --experimental-rust-tile-daemon <socket> <pid> [gap] [padding]\n\
+             --experimental-rust-tile-daemon <socket> <pid|all> [gap] [padding]\n\
                                      Persistent tiling daemon (serves -m commands).\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."

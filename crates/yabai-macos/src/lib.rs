@@ -6,6 +6,8 @@ pub mod ax;
 pub mod display;
 #[cfg(target_os = "macos")]
 pub mod screen;
+#[cfg(target_os = "macos")]
+pub mod workspace;
 
 #[cfg(target_os = "macos")]
 pub use ax::{
@@ -18,6 +20,8 @@ pub use ax::{
 pub use display::{MacDisplay, active_displays};
 #[cfg(target_os = "macos")]
 pub use screen::main_visible_frame;
+#[cfg(target_os = "macos")]
+pub use workspace::regular_application_pids;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DisplayId(pub u32);

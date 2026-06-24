@@ -394,6 +394,18 @@ without macOS or a daemon.
   reflected the reordered list. The daemon shut down cleanly and removed nothing
   it shouldn't. This is the first persistent Rust daemon that serves live `-m`
   commands which move real windows.
+- **Multi-app discovery** (item 2 below — done). Added
+  `workspace::regular_application_pids()` (local `NSWorkspace`/`libobjc` FFI):
+  the pids of regular, Dock-visible apps, filtered by
+  `NSApplicationActivationPolicyRegular == 0`. `--experimental-rust-tile-daemon`
+  now accepts `all` in place of a pid, collecting tileable windows across every
+  regular app into one BSP tree (per-app discovery failures are skipped so one
+  bad app can't abort the rest). Synthetic window ids now fold the pid in
+  (`0x8000_0000 | (pid & 0x7FFF) << 16 | idx`) so they stay unique across apps.
+- Live verification: `--experimental-rust-tile-daemon <sock> all 10 10` tiled
+  **8** windows across Finder + RustRover into a single BSP layout with 10px
+  gaps/padding inside the visible frame (no menu-bar/Dock overlap), confirmed via
+  screenshot; `query --windows id` over the socket reported 8. Clean shutdown.
 - Whole workspace is still 105 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
 
@@ -401,13 +413,11 @@ Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight
 *callbacks* (app observers, window create/destroy/focus, space/display changes)
 into `StateEvent`s, so the daemon tracks the world automatically instead of the
 current one-shot discovery snapshot; each new window must get its
-`AXUIElementRef` discovered and `register`ed with the sink. (2) Broaden the
-tiling daemon from a single pid to multi-app discovery (needs a running-apps
-enumeration, e.g. `NSWorkspace.runningApplications`) and feed observer events
-into `Actor::post_event`. (3) Expand the Rust query serializer as live
-app/title/display/space metadata becomes available. NOTE: the AX window set is
-volatile between snapshots, so the observer-driven model (1) is what makes the
-daemon robust against windows appearing/disappearing mid-run.
+`AXUIElementRef` discovered and `register`ed with the sink. This is now the main
+remaining gap: discovery and multi-app tiling work, but the daemon is still a
+snapshot — it won't react to windows opening/closing/focusing after startup, and
+the AX window set is volatile between snapshots. (2) Expand the Rust query
+serializer as live app/title/display/space metadata becomes available.
 
 ### 2026-06-23 (session 2)
 
@@ -778,6 +788,12 @@ chronological log and may describe earlier states.
     used by `--experimental-ax-tile-pid` to BSP-tile a real app's windows
     through `Runtime -> AppState -> AxSink` (verified live tiling 3 Finder
     windows). Plus `set_window_frame` / `read_window_frame` helpers.
+  - `screen.rs`: `main_visible_frame()` (`NSScreen.visibleFrame`, menu bar +
+    Dock excluded, flipped to top-left CG coords) via local objc FFI.
+  - `workspace.rs`: `regular_application_pids()` (`NSWorkspace`) for multi-app
+    discovery. A persistent `--experimental-rust-tile-daemon <socket> <pid|all>`
+    in `crates/yabai` wires `Actor<AxSink>` + the socket loop into a live tiling
+    WM that serves `-m` commands (verified: rotate/balance move real windows).
 - `crates/yabai-osax-common`, `-osax-legacy`, `-sa` — still scaffolding/constants.
 
 End-to-end today: `Actor -> Runtime -> AppState (Config + Tree) -> LayoutSink`

@@ -360,6 +360,20 @@ without macOS or a daemon.
   Every placement decision was pure Rust (`yabai-core` layout); only discovery and
   the moves touched macOS. Note the AX window set is volatile (a stale probe saw
   only the non-settable desktop window); discover-and-tile in one shot is reliable.
+- Made the tiling demo respect the usable display region. Added
+  `screen::main_visible_frame()` (local `NSScreen`/`libobjc` FFI, AppKit linked)
+  which returns the main display's `visibleFrame` — menu bar and Dock excluded —
+  flipped from AppKit's bottom-left origin into top-left CG coordinates. Without
+  it, windows tucked under the menu bar (macOS even clamps the top to y≈25) and
+  behind the Dock. `--experimental-ax-tile-pid` now tiles inside that frame and
+  also takes an optional `[padding]` arg: `window_gap` is the between-window gap
+  only, the four `*_padding` settings are the outer screen-edge margin (same
+  split as yabai). It sets all five via a `config` message and then
+  `set_space_frame` to inset the root area by the paddings.
+- Live verification: `--experimental-ax-tile-pid 527 5 5` tiled 5 Finder windows
+  with a 5px outer margin and 5px inter-window gaps — first window at
+  `x=61 y=30` (56px Dock + 5, 25px menu bar + 5) and the right edge at 2555
+  (2560 − 5). Confirmed visually via screenshot; no menu-bar/Dock overlap.
 - Whole workspace is still 105 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
 

@@ -6,8 +6,8 @@ use yabai_core::Area;
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::{
     AxSink, accessibility_trusted_with_prompt, active_displays, focused_window,
-    focused_window_diagnostics, move_focused_window, move_pid_window, tileable_pid_windows,
-    windows_for_pid, windows_for_pid_diagnostics,
+    focused_window_diagnostics, main_visible_frame, move_focused_window, move_pid_window,
+    tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
 };
 use yabai_runtime::{Actor, AppState, RecordingSink, Runtime, StateEvent};
 
@@ -300,10 +300,13 @@ fn run_ax_tile_pid(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
     let Some(pid) = args.first().and_then(|arg| arg.parse::<i32>().ok()) else {
-        eprintln!("yabai-rust: --experimental-ax-tile-pid requires a pid [gap]");
+        eprintln!("yabai-rust: --experimental-ax-tile-pid requires a pid [gap] [padding]");
         return ExitCode::from(64);
     };
     let gap: i32 = args.get(1).and_then(|arg| arg.parse().ok()).unwrap_or(12);
+    // Padding is the outer margin (window-to-screen-edge); window_gap is only the
+    // gap *between* windows, exactly as in yabai. Defaults to the gap value.
+    let padding: i32 = args.get(2).and_then(|arg| arg.parse().ok()).unwrap_or(gap);
 
     let display = match active_displays() {
         Ok(displays) => match displays.into_iter().next() {
@@ -334,12 +337,38 @@ fn run_ax_tile_pid(args: &[String]) -> ExitCode {
         }
     };
 
+    // Tile inside the usable frame (menu bar + Dock excluded), like the C daemon,
+    // so windows don't tuck under the menu bar. Falls back to the full bounds.
+    let usable = main_visible_frame().unwrap_or(display.frame);
+
     let mut rt = Runtime::new(AppState::new(), AxSink::new());
     rt.state.add_display(display.id, display.frame);
-    rt.state.add_space_to_display(1, display.id, display.frame);
+    rt.state.add_space_to_display(1, display.id, usable);
     rt.state.set_active_space(1);
-    // A non-zero gap makes the tiling visible at a glance.
-    let _ = rt.message(&["config", "window_gap", &gap.to_string()].map(String::from));
+    // window_gap controls the between-window gap; the four paddings control the
+    // outer margin. Set both, then inset the space's root area by the paddings.
+    let p = padding.to_string();
+    let config: Vec<String> = [
+        "config",
+        "window_gap",
+        &gap.to_string(),
+        "top_padding",
+        &p,
+        "bottom_padding",
+        &p,
+        "left_padding",
+        &p,
+        "right_padding",
+        &p,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let _ = rt.message(&config);
+    if let Err(error) = rt.state.set_space_frame(1, usable) {
+        eprintln!("yabai-rust: failed to apply padding: {error}");
+        return ExitCode::from(1);
+    }
 
     let count = windows.len();
     for window in windows {
@@ -353,7 +382,7 @@ fn run_ax_tile_pid(args: &[String]) -> ExitCode {
 
     let frames = rt.state.flush_active().unwrap_or_default();
     println!(
-        "tiled {count} window(s) of pid {pid} across display {} ({:.0}x{:.0}), gap {gap}:",
+        "tiled {count} window(s) of pid {pid} across display {} ({:.0}x{:.0}), gap {gap}, padding {padding}:",
         display.id, display.frame.w, display.frame.h
     );
     for frame in frames {
@@ -406,7 +435,7 @@ fn print_help() {
                                      Move/resize the focused AX window directly.\n\
              --experimental-ax-move-pid <pid> <index> <x> <y> <w> <h>\n\
                                      Move/resize an app's index-th AX window.\n\
-             --experimental-ax-tile-pid <pid> [gap]\n\
+             --experimental-ax-tile-pid <pid> [gap] [padding]\n\
                                      BSP-tile an app's windows via the Rust core.\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."

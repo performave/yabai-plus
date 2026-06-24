@@ -310,6 +310,16 @@ bool window_manager_should_manage_window(struct window *window)
     if (window_check_flag(window, WINDOW_MINIMIZE)) return false;
     if (window->application->is_hidden)             return false;
 
+    //
+    // NOTE(yabai-plus): never manage zero-area windows. Some apps (e.g. zoom.us)
+    // keep an invisible 0x0 AXStandardWindow alive; tiling it reserves a phantom
+    // BSP slot -- an empty gap in the layout -- while the real window is left
+    // floating and untouched. A window that legitimately starts at 0x0 is still
+    // tiled once it has a real frame, since this gate reads the live cached frame
+    // on every (re-)evaluation.
+    //
+    if (window->frame.size.width <= 0.0f || window->frame.size.height <= 0.0f) return false;
+
     if (!g_window_manager.manage && !window_check_rule_flag(window, WINDOW_RULE_MANAGED)) return false;
 
     return (window_is_standard(window) && window_level_is_standard(window) && window_can_move(window)) || window_check_rule_flag(window, WINDOW_RULE_MANAGED);

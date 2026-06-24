@@ -17,10 +17,10 @@ the source of truth for status**.
 |---|------|------|--------|
 | 1 | Config: disable floats-topmost + hybrid (no-manage-on-startup) | feat | **landed** |
 | 2 | Add command to create/update the `--load-sa` sudoers file | feat | **landed** |
-| 3 | Cross-display focus lands on sticky Arc instead of leaving focus | bug | queued (needs repro) |
+| 3 | Cross-display focus lands on sticky Arc instead of leaving focus | bug | **landed** |
 | 4 | Switching to an empty space triggers show-desktop (always on Tahoe) | bug | queued (needs repro) |
 | 5 | Are these caused by the Arc PiP fix? | diag | **answered (below)** |
-| 6 | Zoom window refuses to resize despite space being allocated | bug | queued (needs repro) |
+| 6 | Zoom window refuses to resize despite space being allocated | bug | **landed** |
 
 ---
 
@@ -134,7 +134,14 @@ z-order) on the target space; a sticky Arc window qualifies and wins. Likely fix
 skip ineligible/sticky windows when selecting the focus target across displays.
 Needs a live repro first.
 
-**Status: queued (needs repro).**
+**Landed.** `display_manager_focus_display` no longer picks raw rank-1 (top z-order);
+it calls `window_manager_find_focusable_window_on_space` (`src/window_manager.c:980`),
+whose loop skips ineligible windows **and** sticky windows
+(`window_is_sticky(window->id)`), so cross-display focus lands on a window actually
+homed on the target space rather than capturing the topmost sticky overlay (e.g. a
+sticky Arc PiP). Confirmed fixed on the live setup.
+
+**Status: landed.**
 
 ---
 
@@ -155,7 +162,10 @@ the mouse-warp patch in `src/event_loop.c` (`window_did_receive_focus`) — it
 suppresses cursor centering to/from ineligible windows and never changes focus
 targeting or space switching. Specifically:
 
-- Zoom-resize is the `AXEnhancedUserInterface` path (`misc/helpers.h:524`).
+- Zoom-resize was *suspected* to be the `AXEnhancedUserInterface` path
+  (`src/misc/helpers.h:524`), but the live diagnosis (Item 6) showed it was actually
+  yabai tiling an invisible 0×0 Zoom phantom window — unrelated to both that path and
+  the Arc PiP fix.
 - Cross-display focus landing on Arc is pre-existing rank-1 selection in
   `display_manager_focus_display` (`src/display_manager.c:465`).
 - Empty-space show-desktop is macOS/SLS behavior.
@@ -166,8 +176,37 @@ targeting or space switching. Specifically:
 
 ## Item 6 — Zoom won't resize
 
-`AX_ENHANCED_UI_WORKAROUND` (`misc/helpers.h:524`) wraps resize; Zoom may need the
+`AX_ENHANCED_UI_WORKAROUND` (`src/misc/helpers.h:524`) wraps resize; Zoom may need the
 toggle held across the move+resize, or a longer settle. Needs a live repro to
 characterize.
 
-**Status: queued (needs repro).**
+**Repro/diagnosis (live, Tahoe).** The original hypothesis was wrong — this is *not*
+an `AXEnhancedUserInterface` resize-clamp problem (the workaround already wraps the
+whole move+resize and double-sets the size). Live `yabai -m query --windows` for
+`zoom.us` showed **three** windows, with management inverted:
+
+- id 744 — `AXStandardWindow`, frame `0,0,0,0`, `is-visible:false`, **`is-floating:false`
+  (tiled)**: an invisible zero-area Zoom helper window. yabai built a BSP node for it
+  (it was the space's `last-window`), reserving an empty slot.
+- id 748 — `"Zoom Workplace"`, the real visible window, **`is-floating:true`** (left
+  untouched, exactly where the user put it).
+
+So the real window floats while yabai tiles an invisible 0×0 phantom — which is the
+"empty space where Zoom would be, real window unmanaged" symptom. `--toggle float` on
+744 dropped it from the tree (`split-type` → `none`), confirming it was the phantom
+node. (Aside: 744 escaped the user's `app=".*" manage=off` wildcard rule because the
+rule's role/subrole guard, `window_manager.c:204`, skips unscoped rules unless the
+window already reports `AXWindow`/`AXStandardWindow` at apply time; the phantom didn't,
+so it fell through to the default `manage on` and got tiled.)
+
+**Landed.** Added a zero-area guard to `window_manager_should_manage_window`
+(`src/window_manager.c`): a window whose cached frame has `width <= 0` or
+`height <= 0` is never managed. This is the central gate consulted by every tiling
+path (creation `:2194`, re-home `:2659`, float-toggles `:2283`/`:2312`), so the
+phantom can't enter the tree anywhere. Because the gate reads the live cached frame on
+each call, a window that legitimately starts at 0×0 and later grows is still tiled on
+re-evaluation — verified live: after the fix, a real `1067×1227` "Zoom Meeting" window
+tiles normally while no zero-area window appears in the tree.
+
+**Status: landed (built clean on canary; phantom-node confirmed live pre-fix, zero-area
+exclusion + normal tiling of real Zoom windows confirmed live post-fix).**

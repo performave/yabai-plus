@@ -6,7 +6,11 @@ pub mod ax;
 pub mod display;
 
 #[cfg(target_os = "macos")]
-pub use ax::{AxSink, AxWindow};
+pub use ax::{
+    AxDiagnostics, AxPidDiagnostics, AxSink, AxWindow, DiscoveredAxWindow, accessibility_trusted,
+    accessibility_trusted_with_prompt, focused_window, focused_window_diagnostics, windows_for_pid,
+    windows_for_pid_diagnostics,
+};
 #[cfg(target_os = "macos")]
 pub use display::{MacDisplay, active_displays};
 

@@ -15,7 +15,7 @@ reconstructing context.
   (`AppState` + `Config` + `Runtime` flush + single-threaded `Actor`) plus the
   first pure query serializer for windows/spaces/displays; and `yabai-macos` has
   the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API
-  plus live CoreGraphics display discovery. 104
+  plus live CoreGraphics display discovery and AX window diagnostics. 105
   workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-23.
 - User decisions captured:
@@ -288,6 +288,33 @@ without macOS or a daemon.
   experimental socket was removed afterward.
 - Whole workspace is now 104 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
+
+- Added AX discovery probes in `yabai-macos::ax`: trust checks with the same
+  prompt option pattern as the C daemon, focused-window probing, PID-based
+  `AXWindows` enumeration, and diagnostics for focused app / app-window counts /
+  `_AXUIElementGetWindow` mapping. `crates/yabai` exposes these behind
+  `--experimental-ax-focused-window`, `--experimental-ax-debug`,
+  `--experimental-ax-windows-for-pid <pid>`, and
+  `--experimental-ax-pid-debug <pid>`. A small build script adds the private
+  framework search path for the SkyLight `_AXUIElementGetWindow` symbol.
+- Live AX verification on this machine: Accessibility was granted and the probe
+  reports `trusted=true`. The system-wide focused app/window attributes returned
+  no value in this launch context, but PID diagnostics against Finder succeeded
+  at the AX layer: `AXUIElementCreateApplication(527)` worked,
+  `AXUIElementGetPid` returned `527`, and `AXWindows` returned 2 windows. The
+  current unresolved issue is CG-id mapping: `_AXUIElementGetWindow` returned no
+  ids for those Finder AX windows (`window_ids=[]`). This means the next live
+  movement test should operate directly on retained AX elements first, then add a
+  separate CGWindow/AX matching strategy for stable ids.
+- Whole workspace is now 105 passing tests; `cargo fmt --all`, `cargo test
+  --workspace`, and `cargo clippy --workspace --all-targets` are clean.
+- Commit status: this AX diagnostics slice is currently staged but **not
+  committed** because `git commit` failed twice with `1Password: failed to fill
+  whole buffer` while writing the signed commit object. Files staged for the
+  eventual commit are `crates/yabai-macos/build.rs`,
+  `crates/yabai-macos/src/ax.rs`, `crates/yabai-macos/src/lib.rs`,
+  `crates/yabai/src/main.rs`, and this handoff doc. Intended commit message:
+  `feat(rust-port): add AX window diagnostics`.
 
 Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight
 *callbacks* (app observers, window create/destroy/focus, space/display changes)

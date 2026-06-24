@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::io;
 use std::os::raw::c_char;
 
 use yabai_core::WindowFrame;
@@ -22,9 +23,13 @@ use yabai_runtime::LayoutSink;
 
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
+type CFDictionaryRef = *const c_void;
+type CFArrayRef = *const c_void;
 type CFAllocatorRef = *const c_void;
 type AXUIElementRef = *const c_void;
 type AXValueRef = *const c_void;
+type CFIndex = isize;
+type Boolean = u8;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -48,22 +53,52 @@ const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
+    static kCFBooleanTrue: CFTypeRef;
+
     fn CFStringCreateWithCString(
         alloc: CFAllocatorRef,
         c_str: *const c_char,
         encoding: u32,
     ) -> CFStringRef;
+    fn CFDictionaryCreate(
+        allocator: CFAllocatorRef,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        num_values: CFIndex,
+        key_callbacks: *const c_void,
+        value_callbacks: *const c_void,
+    ) -> CFDictionaryRef;
+    fn CFArrayGetCount(the_array: CFArrayRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: CFIndex) -> CFTypeRef;
+    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFRelease(cf: CFTypeRef);
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+
+    fn AXIsProcessTrusted() -> Boolean;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> Boolean;
+    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
     fn AXValueCreate(the_type: u32, value_ptr: *const c_void) -> AXValueRef;
     fn AXUIElementSetAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
         value: CFTypeRef,
     ) -> i32;
+}
+
+#[link(name = "SkyLight", kind = "framework")]
+unsafe extern "C" {
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> i32;
 }
 
 /// Create a CoreFoundation string from a NUL-terminated ASCII literal.
@@ -106,6 +141,426 @@ impl Drop for AxWindow {
             unsafe { CFRelease(self.element) };
         }
     }
+}
+
+/// A discovered Accessibility window plus its CoreGraphics window id.
+pub struct DiscoveredAxWindow {
+    pub id: u32,
+    pub window: AxWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxDiagnostics {
+    pub trusted: bool,
+    pub system_focused_window_id: Option<u32>,
+    pub focused_app_pid: Option<i32>,
+    pub focused_app_window_id: Option<u32>,
+    pub focused_app_window_count: Option<usize>,
+    pub focused_app_window_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxPidDiagnostics {
+    pub trusted: bool,
+    pub app_created: bool,
+    pub app_pid: Option<i32>,
+    pub windows_error: Option<i32>,
+    pub windows_count: Option<usize>,
+    pub window_ids: Vec<u32>,
+}
+
+pub fn accessibility_trusted() -> bool {
+    // SAFETY: simple process-global Accessibility trust query; no pointers.
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+pub fn accessibility_trusted_with_prompt() -> bool {
+    // SAFETY: `kAXTrustedCheckOptionPrompt` and `kCFBooleanTrue` are valid system
+    // constants. The dictionary is created for the duration of the trust query
+    // and then released.
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt];
+        let values = [kCFBooleanTrue];
+        let options = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        if options.is_null() {
+            return AXIsProcessTrusted() != 0;
+        }
+
+        let trusted = AXIsProcessTrustedWithOptions(options) != 0;
+        CFRelease(options);
+        trusted
+    }
+}
+
+/// Return the currently focused Accessibility window, if one can be resolved.
+pub fn focused_window() -> io::Result<Option<DiscoveredAxWindow>> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    let mut value = system_attribute(b"AXFocusedWindow\0");
+    if value.is_null() {
+        value = focused_application_window();
+    }
+    if !value.is_null() && window_id(value).is_none() {
+        // SAFETY: `value` is owned and will not be adopted; release before the
+        // broader focused-application window-list fallback.
+        unsafe { CFRelease(value) };
+        value = std::ptr::null();
+    }
+    if value.is_null() {
+        value = focused_application_first_mappable_window();
+    }
+
+    adopt_window(value)
+}
+
+pub fn focused_window_diagnostics() -> AxDiagnostics {
+    let trusted = accessibility_trusted();
+    if !trusted {
+        return AxDiagnostics {
+            trusted,
+            system_focused_window_id: None,
+            focused_app_pid: None,
+            focused_app_window_id: None,
+            focused_app_window_count: None,
+            focused_app_window_ids: Vec::new(),
+        };
+    }
+
+    let system_focused_window = system_attribute(b"AXFocusedWindow\0");
+    let system_focused_window_id = window_id(system_focused_window);
+    if !system_focused_window.is_null() {
+        // SAFETY: `system_focused_window` is an owned AX element from CopyAttributeValue.
+        unsafe { CFRelease(system_focused_window) };
+    }
+
+    let app = system_attribute(b"AXFocusedApplication\0");
+    let focused_app_pid = ax_pid(app);
+    let mut focused_app_window_id = None;
+    let mut focused_app_window_count = None;
+    let mut focused_app_window_ids = Vec::new();
+
+    if !app.is_null() {
+        // SAFETY: creates owned CFStrings for the duration of the copy attempts.
+        let (focused_window_attr, windows_attr) =
+            unsafe { (cfstring(b"AXFocusedWindow\0"), cfstring(b"AXWindows\0")) };
+        if !focused_window_attr.is_null() {
+            let focused_window = copy_attribute(app as AXUIElementRef, focused_window_attr);
+            focused_app_window_id = window_id(focused_window);
+            if !focused_window.is_null() {
+                // SAFETY: `focused_window` is an owned AX element from CopyAttributeValue.
+                unsafe { CFRelease(focused_window) };
+            }
+            // SAFETY: owned CFString no longer needed.
+            unsafe { CFRelease(focused_window_attr) };
+        }
+        if !windows_attr.is_null() {
+            let windows = copy_attribute(app as AXUIElementRef, windows_attr);
+            if !windows.is_null() {
+                // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue.
+                unsafe {
+                    let count = CFArrayGetCount(windows as CFArrayRef);
+                    focused_app_window_count = Some(count.max(0) as usize);
+                    for idx in 0..count {
+                        let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
+                        if let Some(id) = window_id(window) {
+                            focused_app_window_ids.push(id);
+                        }
+                    }
+                    CFRelease(windows);
+                }
+            }
+            // SAFETY: owned CFString no longer needed.
+            unsafe { CFRelease(windows_attr) };
+        }
+        // SAFETY: `app` is an owned AX element from CopyAttributeValue.
+        unsafe { CFRelease(app) };
+    }
+
+    AxDiagnostics {
+        trusted,
+        system_focused_window_id,
+        focused_app_pid,
+        focused_app_window_id,
+        focused_app_window_count,
+        focused_app_window_ids,
+    }
+}
+
+pub fn windows_for_pid(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    // SAFETY: creates an owned AX application element for `pid`, released below.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let windows = application_windows(app);
+    // SAFETY: `app` is an owned AX element from CreateApplication.
+    unsafe { CFRelease(app) };
+    Ok(windows)
+}
+
+pub fn windows_for_pid_diagnostics(pid: i32) -> AxPidDiagnostics {
+    let trusted = accessibility_trusted();
+    if !trusted {
+        return AxPidDiagnostics {
+            trusted,
+            app_created: false,
+            app_pid: None,
+            windows_error: None,
+            windows_count: None,
+            window_ids: Vec::new(),
+        };
+    }
+
+    // SAFETY: creates an owned AX application element for `pid`, released below.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return AxPidDiagnostics {
+            trusted,
+            app_created: false,
+            app_pid: None,
+            windows_error: None,
+            windows_count: None,
+            window_ids: Vec::new(),
+        };
+    }
+
+    let app_pid = ax_pid(app);
+    let (windows_error, windows_count, window_ids) = application_window_diagnostics(app);
+    // SAFETY: `app` is an owned AX element from CreateApplication.
+    unsafe { CFRelease(app) };
+
+    AxPidDiagnostics {
+        trusted,
+        app_created: true,
+        app_pid,
+        windows_error,
+        windows_count,
+        window_ids,
+    }
+}
+
+fn focused_application_window() -> CFTypeRef {
+    let app = system_attribute(b"AXFocusedApplication\0");
+    if app.is_null() {
+        return std::ptr::null();
+    }
+
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let focused_window_attr = unsafe { cfstring(b"AXFocusedWindow\0") };
+    if focused_window_attr.is_null() {
+        // SAFETY: `app` is an owned AX element returned by CopyAttributeValue.
+        unsafe { CFRelease(app) };
+        return std::ptr::null();
+    }
+
+    let window = copy_attribute(app as AXUIElementRef, focused_window_attr);
+    // SAFETY: both refs are owned and no longer needed.
+    unsafe {
+        CFRelease(app);
+        CFRelease(focused_window_attr);
+    }
+    window
+}
+
+fn focused_application_first_mappable_window() -> CFTypeRef {
+    let app = system_attribute(b"AXFocusedApplication\0");
+    if app.is_null() {
+        return std::ptr::null();
+    }
+
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let windows_attr = unsafe { cfstring(b"AXWindows\0") };
+    if windows_attr.is_null() {
+        // SAFETY: `app` is an owned AX element returned by CopyAttributeValue.
+        unsafe { CFRelease(app) };
+        return std::ptr::null();
+    }
+
+    let windows = copy_attribute(app as AXUIElementRef, windows_attr);
+    // SAFETY: no longer need the focused app or attribute string.
+    unsafe {
+        CFRelease(app);
+        CFRelease(windows_attr);
+    }
+    if windows.is_null() {
+        return std::ptr::null();
+    }
+
+    let mut result = std::ptr::null();
+    // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue.
+    unsafe {
+        let count = CFArrayGetCount(windows as CFArrayRef);
+        for idx in 0..count {
+            let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
+            if window.is_null() {
+                continue;
+            }
+            if window_id(window).is_some() {
+                result = CFRetain(window);
+                break;
+            }
+        }
+        CFRelease(windows);
+    }
+    result
+}
+
+fn application_windows(app: AXUIElementRef) -> Vec<DiscoveredAxWindow> {
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let windows_attr = unsafe { cfstring(b"AXWindows\0") };
+    if windows_attr.is_null() {
+        return Vec::new();
+    }
+
+    let windows = copy_attribute(app, windows_attr);
+    // SAFETY: owned CFString no longer needed.
+    unsafe { CFRelease(windows_attr) };
+    if windows.is_null() {
+        return Vec::new();
+    }
+
+    let mut result = Vec::new();
+    // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue.
+    unsafe {
+        let count = CFArrayGetCount(windows as CFArrayRef);
+        for idx in 0..count {
+            let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
+            let Some(id) = window_id(window) else {
+                continue;
+            };
+            let retained = CFRetain(window);
+            let window = AxWindow::from_raw(retained);
+            result.push(DiscoveredAxWindow { id, window });
+        }
+        CFRelease(windows);
+    }
+    result
+}
+
+fn application_window_diagnostics(app: AXUIElementRef) -> (Option<i32>, Option<usize>, Vec<u32>) {
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let windows_attr = unsafe { cfstring(b"AXWindows\0") };
+    if windows_attr.is_null() {
+        return (None, None, Vec::new());
+    }
+
+    let mut windows: CFTypeRef = std::ptr::null();
+    // SAFETY: `app` and `windows_attr` are valid refs, and `windows` is valid
+    // writable storage for the retained AXWindows attribute value.
+    let err = unsafe { AXUIElementCopyAttributeValue(app, windows_attr, &mut windows) };
+    // SAFETY: owned CFString no longer needed.
+    unsafe { CFRelease(windows_attr) };
+    if err != 0 || windows.is_null() {
+        return (Some(err), None, Vec::new());
+    }
+
+    let mut ids = Vec::new();
+    // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue.
+    let count = unsafe {
+        let count = CFArrayGetCount(windows as CFArrayRef);
+        for idx in 0..count {
+            let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
+            if let Some(id) = window_id(window) {
+                ids.push(id);
+            }
+        }
+        CFRelease(windows);
+        count.max(0) as usize
+    };
+
+    (Some(0), Some(count), ids)
+}
+
+fn system_attribute(attribute: &[u8]) -> CFTypeRef {
+    // SAFETY: creates owned AX/CF refs; each non-null ref is released below.
+    let (system, attr) = unsafe { (AXUIElementCreateSystemWide(), cfstring(attribute)) };
+    if system.is_null() || attr.is_null() {
+        // SAFETY: release only the owned refs that were actually created.
+        unsafe {
+            if !system.is_null() {
+                CFRelease(system);
+            }
+            if !attr.is_null() {
+                CFRelease(attr);
+            }
+        }
+        return std::ptr::null();
+    }
+
+    let value = copy_attribute(system, attr);
+    // SAFETY: these owned refs are no longer needed after the copy attempt.
+    unsafe {
+        CFRelease(system);
+        CFRelease(attr);
+    }
+    value
+}
+
+fn copy_attribute(element: AXUIElementRef, attribute: CFStringRef) -> CFTypeRef {
+    let mut value: CFTypeRef = std::ptr::null();
+    // SAFETY: `element` and `attribute` are valid refs, and `value` is valid
+    // writable storage for the retained attribute value.
+    let err = unsafe { AXUIElementCopyAttributeValue(element, attribute, &mut value) };
+    if err == 0 { value } else { std::ptr::null() }
+}
+
+fn adopt_window(value: CFTypeRef) -> io::Result<Option<DiscoveredAxWindow>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let Some(id) = window_id(value) else {
+        // SAFETY: `value` is still owned here because it was not adopted.
+        unsafe { CFRelease(value) };
+        return Ok(None);
+    };
+
+    // SAFETY: `value` is a retained AXUIElementRef from CopyAttributeValue;
+    // ownership transfers to `AxWindow`.
+    let window = unsafe { AxWindow::from_raw(value) };
+    Ok(Some(DiscoveredAxWindow { id, window }))
+}
+
+fn window_id(window: CFTypeRef) -> Option<u32> {
+    if window.is_null() {
+        return None;
+    }
+    let mut id = 0u32;
+    // SAFETY: `window` is expected to be an AX window element. The private helper
+    // writes the associated CoreGraphics window id when present.
+    let err = unsafe { _AXUIElementGetWindow(window as AXUIElementRef, &mut id) };
+    (err == 0 && id != 0).then_some(id)
+}
+
+fn ax_pid(element: CFTypeRef) -> Option<i32> {
+    if element.is_null() {
+        return None;
+    }
+    let mut pid = 0i32;
+    // SAFETY: `element` is expected to be an AX application/window element. The
+    // call writes a pid on success.
+    let err = unsafe { AXUIElementGetPid(element as AXUIElementRef, &mut pid) };
+    (err == 0).then_some(pid)
 }
 
 /// A [`LayoutSink`] that applies frames to real windows via the Accessibility
@@ -239,5 +694,12 @@ mod tests {
         assert!(sink.is_registered(3));
         sink.unregister(3);
         assert!(!sink.is_registered(3));
+    }
+
+    #[test]
+    fn focused_window_probe_does_not_panic_when_trusted() {
+        if accessibility_trusted() {
+            let _ = focused_window().unwrap();
+        }
     }
 }

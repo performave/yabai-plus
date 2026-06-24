@@ -3,7 +3,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
-use yabai_macos::active_displays;
+use yabai_macos::{
+    accessibility_trusted_with_prompt, active_displays, focused_window, focused_window_diagnostics,
+    windows_for_pid, windows_for_pid_diagnostics,
+};
 use yabai_runtime::{Actor, AppState, RecordingSink, Runtime};
 
 fn main() -> ExitCode {
@@ -20,6 +23,10 @@ fn main() -> ExitCode {
         }
         Some("--message") | Some("-m") => run_message(&args[1..]),
         Some("--experimental-rust-daemon") => run_experimental_daemon(&args[1..]),
+        Some("--experimental-ax-focused-window") => run_ax_focused_window_probe(),
+        Some("--experimental-ax-debug") => run_ax_debug_probe(),
+        Some("--experimental-ax-windows-for-pid") => run_ax_windows_for_pid(&args[1..]),
+        Some("--experimental-ax-pid-debug") => run_ax_pid_debug(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -138,6 +145,94 @@ fn serve_one(mut stream: UnixStream, actor: &Actor<RecordingSink>) {
     }
 }
 
+fn run_ax_focused_window_probe() -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+
+    match focused_window() {
+        Ok(Some(window)) => {
+            println!("{}", window.id);
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            eprintln!("yabai-rust: no focused AX window could be resolved");
+            ExitCode::from(1)
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: failed to resolve focused AX window: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_ax_pid_debug(args: &[String]) -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+    let Some(pid) = args.first().and_then(|arg| arg.parse::<i32>().ok()) else {
+        eprintln!("yabai-rust: --experimental-ax-pid-debug requires a pid");
+        return ExitCode::from(64);
+    };
+
+    let diag = windows_for_pid_diagnostics(pid);
+    println!("trusted={}", diag.trusted);
+    println!("app_created={}", diag.app_created);
+    println!("app_pid={:?}", diag.app_pid);
+    println!("windows_error={:?}", diag.windows_error);
+    println!("windows_count={:?}", diag.windows_count);
+    println!("window_ids={:?}", diag.window_ids);
+    ExitCode::SUCCESS
+}
+
+fn run_ax_windows_for_pid(args: &[String]) -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+    let Some(pid) = args.first().and_then(|arg| arg.parse::<i32>().ok()) else {
+        eprintln!("yabai-rust: --experimental-ax-windows-for-pid requires a pid");
+        return ExitCode::from(64);
+    };
+
+    match windows_for_pid(pid) {
+        Ok(windows) => {
+            for window in windows {
+                println!("{}", window.id);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: failed to list AX windows for pid {pid}: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_ax_debug_probe() -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+
+    let diag = focused_window_diagnostics();
+    println!("trusted={}", diag.trusted);
+    println!(
+        "system_focused_window_id={:?}",
+        diag.system_focused_window_id
+    );
+    println!("focused_app_pid={:?}", diag.focused_app_pid);
+    println!("focused_app_window_id={:?}", diag.focused_app_window_id);
+    println!(
+        "focused_app_window_count={:?}",
+        diag.focused_app_window_count
+    );
+    println!("focused_app_window_ids={:?}", diag.focused_app_window_ids);
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     println!(
         "Usage: yabai-rust [option]\n\
@@ -145,6 +240,14 @@ fn print_help() {
              --message, -m <msg>    Send message to a running yabai instance.\n\
              --experimental-rust-daemon <socket>\n\
                                      Run dry-run Rust daemon on an explicit socket.\n\
+             --experimental-ax-focused-window\n\
+                                     Print the focused AX window's CG window id.\n\
+             --experimental-ax-debug\n\
+                                     Print AX focused-window diagnostics.\n\
+             --experimental-ax-windows-for-pid <pid>\n\
+                                     Print CG ids for an app's AX windows.\n\
+             --experimental-ax-pid-debug <pid>\n\
+                                     Print AX diagnostics for an app pid.\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."
     );

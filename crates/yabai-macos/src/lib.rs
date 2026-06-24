@@ -9,7 +9,8 @@ pub mod display;
 pub use ax::{
     AxDiagnostics, AxPidDiagnostics, AxSink, AxWindow, DiscoveredAxWindow, accessibility_trusted,
     accessibility_trusted_with_prompt, focused_window, focused_window_diagnostics,
-    move_focused_window, move_pid_window, windows_for_pid, windows_for_pid_diagnostics,
+    move_focused_window, move_pid_window, tileable_pid_windows, windows_for_pid,
+    windows_for_pid_diagnostics,
 };
 #[cfg(target_os = "macos")]
 pub use display::{MacDisplay, active_displays};

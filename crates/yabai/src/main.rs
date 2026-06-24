@@ -5,10 +5,11 @@ use std::process::ExitCode;
 use yabai_core::Area;
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::{
-    accessibility_trusted_with_prompt, active_displays, focused_window, focused_window_diagnostics,
-    move_focused_window, move_pid_window, windows_for_pid, windows_for_pid_diagnostics,
+    AxSink, accessibility_trusted_with_prompt, active_displays, focused_window,
+    focused_window_diagnostics, move_focused_window, move_pid_window, tileable_pid_windows,
+    windows_for_pid, windows_for_pid_diagnostics,
 };
-use yabai_runtime::{Actor, AppState, RecordingSink, Runtime};
+use yabai_runtime::{Actor, AppState, RecordingSink, Runtime, StateEvent};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,6 +31,7 @@ fn main() -> ExitCode {
         Some("--experimental-ax-pid-debug") => run_ax_pid_debug(&args[1..]),
         Some("--experimental-ax-move-focused") => run_ax_move_focused(&args[1..]),
         Some("--experimental-ax-move-pid") => run_ax_move_pid(&args[1..]),
+        Some("--experimental-ax-tile-pid") => run_ax_tile_pid(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -288,6 +290,81 @@ fn run_ax_move_pid(args: &[String]) -> ExitCode {
     }
 }
 
+/// BSP-tile every real window of an application using the full pure control
+/// plane (`AppState` BSP `Tree`) driving the real `AxSink`. This is the first
+/// time `Runtime -> AppState -> AxSink` runs against live windows: window
+/// discovery and movement are macOS, but every placement decision is pure Rust.
+fn run_ax_tile_pid(args: &[String]) -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+    let Some(pid) = args.first().and_then(|arg| arg.parse::<i32>().ok()) else {
+        eprintln!("yabai-rust: --experimental-ax-tile-pid requires a pid [gap]");
+        return ExitCode::from(64);
+    };
+    let gap: i32 = args.get(1).and_then(|arg| arg.parse().ok()).unwrap_or(12);
+
+    let display = match active_displays() {
+        Ok(displays) => match displays.into_iter().next() {
+            Some(display) => display,
+            None => {
+                eprintln!("yabai-rust: no active displays found");
+                return ExitCode::from(1);
+            }
+        },
+        Err(error) => {
+            eprintln!("yabai-rust: failed to discover displays: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // Discover by settable-position rather than CG id, so apps whose windows
+    // don't resolve via `_AXUIElementGetWindow` still tile, and non-movable
+    // background/desktop windows are excluded.
+    let windows = match tileable_pid_windows(pid) {
+        Ok(windows) if !windows.is_empty() => windows,
+        Ok(_) => {
+            eprintln!("yabai-rust: pid {pid} has no tileable AX windows");
+            return ExitCode::from(1);
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: failed to list AX windows for pid {pid}: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut rt = Runtime::new(AppState::new(), AxSink::new());
+    rt.state.add_display(display.id, display.frame);
+    rt.state.add_space_to_display(1, display.id, display.frame);
+    rt.state.set_active_space(1);
+    // A non-zero gap makes the tiling visible at a glance.
+    let _ = rt.message(&["config", "window_gap", &gap.to_string()].map(String::from));
+
+    let count = windows.len();
+    for window in windows {
+        let id = window.id;
+        rt.sink.register(id, window.window);
+        if let Err(error) = rt.event(StateEvent::WindowCreated { window_id: id }) {
+            eprintln!("yabai-rust: failed to tile window {id}: {error}");
+            return ExitCode::from(1);
+        }
+    }
+
+    let frames = rt.state.flush_active().unwrap_or_default();
+    println!(
+        "tiled {count} window(s) of pid {pid} across display {} ({:.0}x{:.0}), gap {gap}:",
+        display.id, display.frame.w, display.frame.h
+    );
+    for frame in frames {
+        println!(
+            "  window {} -> x={:.1} y={:.1} w={:.1} h={:.1}",
+            frame.window_id, frame.area.x, frame.area.y, frame.area.w, frame.area.h
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 fn run_ax_debug_probe() -> ExitCode {
     if !accessibility_trusted_with_prompt() {
         eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
@@ -329,6 +406,8 @@ fn print_help() {
                                      Move/resize the focused AX window directly.\n\
              --experimental-ax-move-pid <pid> <index> <x> <y> <w> <h>\n\
                                      Move/resize an app's index-th AX window.\n\
+             --experimental-ax-tile-pid <pid> [gap]\n\
+                                     BSP-tile an app's windows via the Rust core.\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."
     );

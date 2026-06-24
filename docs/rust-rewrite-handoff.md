@@ -340,6 +340,29 @@ without macOS or a daemon.
   movers need a live window, so they have no unit tests; the existing `AxSink`
   no-op/tracking tests still cover the sink.)
 
+- **Tiled real windows with the full pure control plane** — the first time
+  `Runtime -> AppState (BSP Tree) -> AxSink` ran end-to-end against live windows.
+  Added `ax::tileable_pid_windows(pid)`: it discovers an app's windows and keeps
+  only the ones whose `kAXPosition` is settable (new `AXUIElementIsAttributeSettable`
+  FFI via `ax::is_position_settable`) with a readable frame — the precise "can the
+  layout engine move this" test. This deliberately does **not** depend on the
+  flaky `_AXUIElementGetWindow` CG-id mapping: ids are the CG id when it resolves,
+  else a stable synthetic id (`0xF000_0000 | index`) so the sink and the tree
+  agree on a handle. Exposed behind `--experimental-ax-tile-pid <pid> [gap]`,
+  which builds a `Runtime<AxSink>`, seeds the main display + one space, sets a
+  window gap, feeds each window as `StateEvent::WindowCreated`, and lets the
+  flush-after-mutate discipline place them.
+- Live verification on this machine: opened two extra Finder windows, then
+  `--experimental-ax-tile-pid 527 16` tiled **3** real Finder windows in a correct
+  BSP split with exact 16px gaps:
+  `3826 -> (0,0,1272,1440)`, `3825 -> (1288,0,1272,712)`,
+  `3582 -> (1288,728,1272,712)` where `1272 = (2560-16)/2` and `712 = (1440-16)/2`.
+  Every placement decision was pure Rust (`yabai-core` layout); only discovery and
+  the moves touched macOS. Note the AX window set is volatile (a stale probe saw
+  only the non-settable desktop window); discover-and-tile in one shot is reliable.
+- Whole workspace is still 105 passing tests; `cargo fmt --all`, `cargo test
+  --workspace`, and `cargo clippy --workspace --all-targets` are clean.
+
 Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight
 *callbacks* (app observers, window create/destroy/focus, space/display changes)
 into `StateEvent`s, including discovering each window's `AXUIElementRef` to
@@ -713,9 +736,11 @@ chronological log and may describe earlier states.
   - `ax.rs`: `AxSink` impl of `LayoutSink` moving windows via AX
     (`kAXPosition`/`kAXSize`); `AxWindow` RAII over `AXUIElementRef`; local
     CF/ApplicationServices FFI. Builds/links on macOS. Also AX diagnostics
-    probes and the direct movers `move_focused_window` / `move_pid_window`
-    (verified live moving a real Finder window) plus `set_window_frame` /
-    `read_window_frame` helpers.
+    probes, the direct movers `move_focused_window` / `move_pid_window`, and
+    `tileable_pid_windows` (settable-position discovery, CG-id-independent) —
+    used by `--experimental-ax-tile-pid` to BSP-tile a real app's windows
+    through `Runtime -> AppState -> AxSink` (verified live tiling 3 Finder
+    windows). Plus `set_window_frame` / `read_window_frame` helpers.
 - `crates/yabai-osax-common`, `-osax-legacy`, `-sa` — still scaffolding/constants.
 
 End-to-end today: `Actor -> Runtime -> AppState (Config + Tree) -> LayoutSink`

@@ -95,6 +95,11 @@ unsafe extern "C" {
         attribute: CFStringRef,
         value: CFTypeRef,
     ) -> i32;
+    fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut Boolean,
+    ) -> i32;
 }
 
 #[link(name = "SkyLight", kind = "framework")]
@@ -750,6 +755,88 @@ pub fn move_pid_window(pid: i32, index: usize, area: Area) -> io::Result<Area> {
     }
 
     Ok(read_window_frame(window.element).unwrap_or(area))
+}
+
+/// Discover an application's tileable windows without relying on the
+/// `_AXUIElementGetWindow` CG-id mapping (which is unreliable for many apps).
+/// A window is considered tileable when its `kAXPosition` is settable and its
+/// current frame is readable — exactly the windows the layout engine can move.
+/// Ids are the CG window id when one resolves, else a stable synthetic id so the
+/// sink and the layout tree agree on a handle.
+pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    // SAFETY: creates an owned AX application element for `pid`, released below.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Ok(Vec::new());
+    }
+
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let windows_attr = unsafe { cfstring(b"AXWindows\0") };
+    if windows_attr.is_null() {
+        // SAFETY: `app` is an owned AX element from CreateApplication.
+        unsafe { CFRelease(app) };
+        return Ok(Vec::new());
+    }
+    let windows = copy_attribute(app, windows_attr);
+    // SAFETY: both owned refs are no longer needed after the copy.
+    unsafe {
+        CFRelease(windows_attr);
+        CFRelease(app);
+    }
+    if windows.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut result = Vec::new();
+    // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue; each
+    // tileable element is retained before the array is released.
+    unsafe {
+        let count = CFArrayGetCount(windows as CFArrayRef);
+        for idx in 0..count {
+            let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
+            if window.is_null()
+                || !is_position_settable(window)
+                || read_window_frame(window).is_none()
+            {
+                continue;
+            }
+            // A synthetic id keyed on pid+index when the CG id will not resolve.
+            let id = window_id(window).unwrap_or(0xF000_0000 | (idx as u32 & 0x0FFF_FFFF));
+            let retained = CFRetain(window);
+            result.push(DiscoveredAxWindow {
+                id,
+                window: AxWindow::from_raw(retained),
+            });
+        }
+        CFRelease(windows);
+    }
+    Ok(result)
+}
+
+/// Whether an AX element's `kAXPosition` attribute is settable — the cleanest
+/// "can the layout engine move this window" test, independent of CG ids.
+fn is_position_settable(element: AXUIElementRef) -> bool {
+    // SAFETY: creates an owned CFString for the duration of the query.
+    let position_attr = unsafe { cfstring(b"AXPosition\0") };
+    if position_attr.is_null() {
+        return false;
+    }
+    let mut settable: Boolean = 0;
+    // SAFETY: `element` and `position_attr` are valid; `settable` is valid
+    // writable storage. The CFString is released immediately after.
+    let ok = unsafe {
+        let err = AXUIElementIsAttributeSettable(element, position_attr, &mut settable);
+        CFRelease(position_attr);
+        err == 0
+    };
+    ok && settable != 0
 }
 
 /// Retain and return the `index`-th `AXWindows` element of `app`, regardless of

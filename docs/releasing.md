@@ -12,7 +12,7 @@ version tag is pushed. You should rarely need to build a release by hand.
 
 ```bash
 # 1. Bump the upstream fallback version in src/yabai.c (MAJOR/MINOR/PATCH).
-# 2. Add a CHANGELOG.md entry.
+# 2. Review and update CHANGELOG.md; make sure the notes accurately describe this release.
 # 3. Commit, then tag and push:
 git tag v7.1.25-plus.1
 git push origin v7.1.25-plus.1
@@ -20,6 +20,11 @@ git push origin v7.1.25-plus.1
 
 Pushing the tag triggers the workflow, which builds, signs, notarizes, and
 creates a GitHub Release with the archive attached.
+
+Before tagging, confirm `CHANGELOG.md` has a heading matching the release tag
+without the leading `v` (for example, `## [7.1.25-plus.1]`) and that its notes
+are accurate for the commits included in the release. The workflow uses that
+section as the GitHub Release body when it exists.
 
 ## Versioning scheme
 

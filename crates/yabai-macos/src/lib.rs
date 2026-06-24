@@ -5,6 +5,8 @@ pub mod ax;
 #[cfg(target_os = "macos")]
 pub mod display;
 #[cfg(target_os = "macos")]
+pub mod objc;
+#[cfg(target_os = "macos")]
 pub mod screen;
 #[cfg(target_os = "macos")]
 pub mod workspace;

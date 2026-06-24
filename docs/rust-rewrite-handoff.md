@@ -425,18 +425,32 @@ without macOS or a daemon.
   a Finder window close — pure-AX destroys are unreliable (yabai uses private
   SkyLight events for these). Documented in `observe.rs`; the daemon integration
   must reconcile the live `AXWindows` set on each event to catch closes.
+- **Dynamic tiling WM daemon** (`--experimental-rust-wm-daemon <socket>
+  <pid|all> [gap] [padding]`) — the capstone that closes the "snapshot" gap. A
+  single-threaded event loop on the main thread owns `Runtime<AxSink>` (so all
+  sink registration stays single-threaded — no `Actor` needed here) and consumes
+  a unified `WmWork` channel fed by: (a) one `observe_pid` AX-observer thread per
+  app, and (b) a socket-acceptor thread. On every observer event it calls
+  `reconcile_pid`: re-discovers the app's tileable windows, registers newcomers
+  in the sink + tree (`WindowCreated`), drops any that vanished (`WindowDestroyed`
+  + `unregister`), and re-flows. Reconciliation makes closes robust *despite* the
+  unreliable AX destroy notification — a `FocusedWindowChanged` (which does fire
+  on close) triggers the reconcile that notices the missing window.
+- Live verification (Finder): daemon started tiling 6 windows; opening a new
+  Finder window auto-tiled it (`query --windows` count 6 → 7) with no manual
+  command; closing a window auto-reconciled it out (7 → 6); `space --rotate 90`
+  over the socket still rearranged windows (exit 0). Clean shutdown. This is the
+  first Rust build that behaves like a real tiling WM: tile on startup, track the
+  world live, and serve `-m` commands, all driven by the pure core.
 - Whole workspace is still 105 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
 
-Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight
-*callbacks* (app observers, window create/destroy/focus, space/display changes)
-into `StateEvent`s, so the daemon tracks the world automatically instead of the
-current one-shot discovery snapshot; each new window must get its
-`AXUIElementRef` discovered and `register`ed with the sink. This is now the main
-remaining gap: discovery and multi-app tiling work, but the daemon is still a
-snapshot — it won't react to windows opening/closing/focusing after startup, and
-the AX window set is volatile between snapshots. (2) Expand the Rust query
-serializer as live app/title/display/space metadata becomes available.
+Next (rest of Phase 5): (1) harden the WM daemon — observe app launch/terminate
+(`NSWorkspace` notifications) so apps started after the daemon are managed, and
+add SkyLight space/display change handling; consider periodic reconcile as a
+backstop. (2) Expand the Rust query serializer as live app/title/display/space
+metadata becomes available. (3) Multi-display: the daemon currently tiles only
+the first display's visible frame into one space.
 
 ### 2026-06-23 (session 2)
 

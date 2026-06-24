@@ -1,17 +1,20 @@
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
+use std::sync::mpsc::{Sender, SyncSender, channel, sync_channel};
+use std::thread;
 
 use yabai_core::Area;
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
-    AxSink, accessibility_trusted_with_prompt, active_displays, focused_window,
+    AxSink, ObservedEvent, accessibility_trusted_with_prompt, active_displays, focused_window,
     focused_window_diagnostics, main_visible_frame, move_focused_window, move_pid_window,
     observe_pid, regular_application_pids, tileable_pid_windows, windows_for_pid,
     windows_for_pid_diagnostics,
 };
-use yabai_runtime::{Actor, AppState, LayoutSink, RecordingSink, Runtime, StateEvent};
+use yabai_runtime::{Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -36,6 +39,7 @@ fn main() -> ExitCode {
         Some("--experimental-ax-tile-pid") => run_ax_tile_pid(&args[1..]),
         Some("--experimental-rust-tile-daemon") => run_rust_tile_daemon(&args[1..]),
         Some("--experimental-ax-observe-pid") => run_ax_observe_pid(&args[1..]),
+        Some("--experimental-rust-wm-daemon") => run_rust_wm_daemon(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -527,6 +531,230 @@ fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Unified work for the WM daemon's single-threaded event loop, mirroring the
+/// serialized queue in `src/event_loop.c`: AX observer events and socket `-m`
+/// messages funnel into one channel processed against one `Runtime<AxSink>`.
+enum WmWork {
+    Observed(ObservedEvent),
+    Message {
+        tokens: Vec<String>,
+        reply: SyncSender<Response>,
+    },
+}
+
+/// Reconcile the managed window set for one app against what AX currently
+/// reports, registering newcomers in the sink and dropping windows that vanished
+/// (which robustly handles closes despite unreliable AX destroy notifications),
+/// then re-flow the active layout.
+fn reconcile_pid(
+    runtime: &mut Runtime<AxSink>,
+    managed: &mut HashMap<i32, HashSet<u32>>,
+    pid: i32,
+) {
+    let Ok(discovered) = tileable_pid_windows(pid) else {
+        return;
+    };
+    let known = managed.entry(pid).or_default();
+    let mut current = HashSet::with_capacity(discovered.len());
+
+    for window in discovered {
+        let id = window.id;
+        current.insert(id);
+        if !known.contains(&id) {
+            // A genuinely new window: hand its element to the sink and tree.
+            runtime.sink.register(id, window.window);
+            let _ = runtime
+                .state
+                .handle_event(StateEvent::WindowCreated { window_id: id });
+        }
+        // Else it is already managed; the freshly discovered duplicate element
+        // drops here, leaving the existing registration intact.
+    }
+
+    for id in known.difference(&current).copied().collect::<Vec<_>>() {
+        runtime.sink.unregister(id);
+        let _ = runtime
+            .state
+            .handle_event(StateEvent::WindowDestroyed { window_id: id });
+    }
+    *known = current;
+
+    runtime.state.flush_active_to(&mut runtime.sink);
+}
+
+/// Read one framed `-m` request off a socket, route it through the WM event loop,
+/// and write the response back (same wire contract as `serve_one`).
+fn serve_via_channel(mut stream: UnixStream, tx: &Sender<WmWork>) {
+    let mut header = [0u8; size_of::<i32>()];
+    let response = match stream.read_exact(&mut header) {
+        Ok(()) => {
+            let size = i32::from_ne_bytes(header);
+            if size < 0 {
+                Err("negative IPC payload size".to_string())
+            } else {
+                let mut payload = vec![0; size as usize];
+                match stream.read_exact(&mut payload) {
+                    Ok(()) => match decode_client_payload(&payload) {
+                        Some(tokens) => {
+                            let tokens = tokens.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                            let (reply, rx) = sync_channel(0);
+                            match tx.send(WmWork::Message { tokens, reply }) {
+                                Ok(()) => rx
+                                    .recv()
+                                    .unwrap_or_else(|_| Err("event loop is gone".to_string())),
+                                Err(_) => Err("event loop is gone".to_string()),
+                            }
+                        }
+                        None => Err("invalid IPC payload".to_string()),
+                    },
+                    Err(error) => Err(format!("failed to read IPC payload: {error}")),
+                }
+            }
+        }
+        Err(error) => Err(format!("failed to read IPC header: {error}")),
+    };
+
+    match response {
+        Ok(Some(output)) => {
+            let _ = stream.write_all(output.as_bytes());
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = stream.write_all(&[FAILURE_MARKER]);
+            let _ = writeln!(stream, "{error}");
+        }
+    }
+}
+
+/// A dynamic Rust tiling WM: it tiles an app (or `all` regular apps) and then
+/// *stays in sync* with the world via AX observers — new windows tile in, closed
+/// windows are reconciled out — while serving live `-m` commands on the socket.
+///
+/// CRITICAL: binds only the caller-provided socket (never `/tmp/yabai_$USER`).
+fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
+    let Some(socket_path) = args.first() else {
+        eprintln!(
+            "yabai-rust: --experimental-rust-wm-daemon requires <socket> <pid|all> [gap] [padding]"
+        );
+        return ExitCode::from(64);
+    };
+    let Some(target) = args.get(1) else {
+        eprintln!("yabai-rust: --experimental-rust-wm-daemon requires a pid or 'all'");
+        return ExitCode::from(64);
+    };
+    let gap: i32 = args.get(2).and_then(|arg| arg.parse().ok()).unwrap_or(12);
+    let padding: i32 = args.get(3).and_then(|arg| arg.parse().ok()).unwrap_or(gap);
+
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+
+    let pids: Vec<i32> = if target == "all" {
+        regular_application_pids()
+    } else if let Ok(pid) = target.parse::<i32>() {
+        vec![pid]
+    } else {
+        eprintln!("yabai-rust: tile target must be a pid or 'all', got '{target}'");
+        return ExitCode::from(64);
+    };
+
+    let listener = match bind_experimental_daemon(socket_path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("yabai-rust: failed to bind daemon socket at {socket_path}: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let display = match active_displays() {
+        Ok(displays) => match displays.into_iter().next() {
+            Some(display) => display,
+            None => {
+                eprintln!("yabai-rust: no active displays found");
+                return ExitCode::from(1);
+            }
+        },
+        Err(error) => {
+            eprintln!("yabai-rust: failed to discover displays: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let usable = main_visible_frame().unwrap_or(display.frame);
+
+    let mut state = AppState::new();
+    state.add_display(display.id, display.frame);
+    state.add_space_to_display(1, display.id, usable);
+    state.set_active_space(1);
+    let _ = state.handle_tokens(&tile_config_tokens(gap, padding));
+    if let Err(error) = state.set_space_frame(1, usable) {
+        eprintln!("yabai-rust: failed to apply padding: {error}");
+        return ExitCode::from(1);
+    }
+
+    let mut runtime = Runtime::new(state, AxSink::new());
+    let mut managed: HashMap<i32, HashSet<u32>> = HashMap::new();
+
+    // Initial tile from the current world.
+    for pid in &pids {
+        reconcile_pid(&mut runtime, &mut managed, *pid);
+    }
+    let initial: usize = managed.values().map(HashSet::len).sum();
+
+    // Unified event loop: observers + socket feed one channel.
+    let (tx, rx) = channel::<WmWork>();
+
+    // One AX observer per app on its own run-loop thread, forwarding into `tx`.
+    for pid in &pids {
+        let (otx, orx) = channel::<ObservedEvent>();
+        let pid = *pid;
+        thread::spawn(move || {
+            let _ = observe_pid(pid, otx);
+        });
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for event in orx {
+                if tx.send(WmWork::Observed(event)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Socket acceptor thread.
+    {
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => serve_via_channel(stream, &tx),
+                    Err(error) => eprintln!("yabai-rust: failed to accept client: {error}"),
+                }
+            }
+        });
+    }
+    drop(tx);
+
+    eprintln!(
+        "yabai-rust: WM daemon up on {socket_path} — target {target}, {} app(s), {initial} window(s), gap {gap}, padding {padding}",
+        pids.len()
+    );
+    eprintln!(
+        "yabai-rust: tracking live window changes; send commands with a matching USER (e.g. USER=<name> yabai -m space --rotate 90)"
+    );
+
+    for work in rx {
+        match work {
+            WmWork::Observed(event) => reconcile_pid(&mut runtime, &mut managed, event.pid()),
+            WmWork::Message { tokens, reply } => {
+                let response = runtime.message(&tokens);
+                let _ = reply.send(response);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// Diagnostic: print AX window lifecycle events for an app as they happen.
 /// Proves the observer/run-loop callback path on a live app before the daemon
 /// consumes these events. Runs until interrupted (Ctrl-C).
@@ -604,6 +832,8 @@ fn print_help() {
                                      Persistent tiling daemon (serves -m commands).\n\
              --experimental-ax-observe-pid <pid>\n\
                                      Print live AX window lifecycle events.\n\
+             --experimental-rust-wm-daemon <socket> <pid|all> [gap] [padding]\n\
+                                     Dynamic tiling WM: tracks live window changes.\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."
     );

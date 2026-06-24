@@ -102,6 +102,17 @@ pub enum ObservedEvent {
     FocusedWindowChanged { pid: i32, window_id: Option<u32> },
 }
 
+impl ObservedEvent {
+    /// The pid of the application the event came from.
+    pub fn pid(&self) -> i32 {
+        match self {
+            ObservedEvent::WindowCreated { pid, .. }
+            | ObservedEvent::WindowDestroyed { pid, .. }
+            | ObservedEvent::FocusedWindowChanged { pid, .. } => *pid,
+        }
+    }
+}
+
 /// Create a CoreFoundation string from a NUL-terminated ASCII literal.
 unsafe fn cfstring(literal: &[u8]) -> CFStringRef {
     // SAFETY: `literal` is a valid NUL-terminated buffer; CF copies its contents.

@@ -15,6 +15,7 @@ use std::sync::{Mutex, Once, OnceLock};
 
 use crate::objc::{Class, Id, Sel, class, msg0, msg1, msg4, sel};
 
+type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFAllocatorRef = *const c_void;
 
@@ -27,6 +28,7 @@ static WORKSPACE_EVENT_SENDERS: OnceLock<Mutex<Vec<Sender<WorkspaceEvent>>>> = O
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CFRunLoopRun();
+    fn CFRelease(cf: CFTypeRef);
     fn CFStringCreateWithCString(
         alloc: CFAllocatorRef,
         c_str: *const c_char,
@@ -45,16 +47,69 @@ unsafe extern "C" {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceEvent {
     ActiveSpaceChanged,
+    ApplicationLaunched { pid: i32 },
+    ApplicationTerminated { pid: i32 },
 }
 
-extern "C" fn active_space_did_change(_this: Id, _cmd: Sel, _notification: Id) {
+fn send_workspace_event(event: WorkspaceEvent) {
     let Some(senders) = WORKSPACE_EVENT_SENDERS.get() else {
         return;
     };
     let Ok(mut senders) = senders.lock() else {
         return;
     };
-    senders.retain(|tx| tx.send(WorkspaceEvent::ActiveSpaceChanged).is_ok());
+    senders.retain(|tx| tx.send(event).is_ok());
+}
+
+fn notification_application_pid(notification: Id) -> Option<i32> {
+    if notification.is_null() {
+        return None;
+    }
+
+    // SAFETY: `notification` is an `NSNotification *` delivered by NSWorkspace.
+    // `userInfo`, `objectForKey:`, and `processIdentifier` are documented ObjC
+    // messages with the ABIs used here. The temporary CFString key is released
+    // immediately after dictionary lookup.
+    unsafe {
+        let user_info: Id = msg0(notification, sel(c"userInfo"));
+        if user_info.is_null() {
+            return None;
+        }
+        let key = cfstring(b"NSWorkspaceApplicationKey\0");
+        if key.is_null() {
+            return None;
+        }
+        let app: Id = msg1(user_info, sel(c"objectForKey:"), key as Id);
+        CFRelease(key);
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg0(app, sel(c"processIdentifier"));
+        (pid > 0).then_some(pid)
+    }
+}
+
+extern "C" fn active_space_did_change(_this: Id, _cmd: Sel, _notification: Id) {
+    send_workspace_event(WorkspaceEvent::ActiveSpaceChanged);
+}
+
+extern "C" fn application_did_launch(_this: Id, _cmd: Sel, notification: Id) {
+    if let Some(pid) = notification_application_pid(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationLaunched { pid });
+    }
+}
+
+extern "C" fn application_did_terminate(_this: Id, _cmd: Sel, notification: Id) {
+    if let Some(pid) = notification_application_pid(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationTerminated { pid });
+    }
+}
+
+fn add_observer_method(cls: Class, name: Sel, method: extern "C" fn(Id, Sel, Id)) -> bool {
+    // SAFETY: `cls` is being configured before registration. All observer
+    // methods take one object argument and return void (`v@:@`), matching
+    // `method`.
+    unsafe { class_addMethod(cls, name, method as *const c_void, c"v@:@".as_ptr()) }
 }
 
 fn workspace_observer_class() -> Option<Class> {
@@ -74,18 +129,17 @@ fn workspace_observer_class() -> Option<Class> {
                 return;
             }
 
-            let method: extern "C" fn(Id, Sel, Id) = active_space_did_change;
-            // SAFETY: `cls` is newly allocated; the selector takes one object
-            // argument and returns void (`v@:@`), matching `method`.
-            let added = unsafe {
-                class_addMethod(
-                    cls,
-                    sel(c"activeSpaceDidChange:"),
-                    method as *const c_void,
-                    c"v@:@".as_ptr(),
-                )
-            };
-            if !added {
+            if !add_observer_method(cls, sel(c"activeSpaceDidChange:"), active_space_did_change) {
+                return;
+            }
+            if !add_observer_method(cls, sel(c"applicationDidLaunch:"), application_did_launch) {
+                return;
+            }
+            if !add_observer_method(
+                cls,
+                sel(c"applicationDidTerminate:"),
+                application_did_terminate,
+            ) {
                 return;
             }
             // SAFETY: `cls` has been fully configured and can now be registered.
@@ -164,7 +218,7 @@ pub fn regular_application_pids() -> Vec<i32> {
 
 /// Observe active-space changes on the current thread, forwarding events to
 /// `tx`. This blocks in `CFRunLoopRun`; run it on a dedicated thread.
-pub fn observe_active_space(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
+pub fn observe_workspace(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
     let Some(observer_class) = workspace_observer_class() else {
         return Err("failed to create workspace observer class".to_string());
     };
@@ -192,27 +246,62 @@ pub fn observe_active_space(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
             return Err("NSWorkspace notificationCenter is unavailable".to_string());
         }
 
-        let name = cfstring(b"NSWorkspaceActiveSpaceDidChangeNotification\0") as Id;
-        if name.is_null() {
-            return Err("failed to create active-space notification name".to_string());
-        }
-
         WORKSPACE_EVENT_SENDERS
             .get_or_init(|| Mutex::new(Vec::new()))
             .lock()
             .map_err(|_| "workspace observer sender lock poisoned".to_string())?
             .push(tx);
 
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"activeSpaceDidChange:"),
+            b"NSWorkspaceActiveSpaceDidChangeNotification\0",
+        )?;
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"applicationDidLaunch:"),
+            b"NSWorkspaceDidLaunchApplicationNotification\0",
+        )?;
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"applicationDidTerminate:"),
+            b"NSWorkspaceDidTerminateApplicationNotification\0",
+        )?;
+
+        CFRunLoopRun();
+    }
+
+    Ok(())
+}
+
+unsafe fn add_workspace_observer(
+    center: Id,
+    observer: Id,
+    callback: Sel,
+    name: &[u8],
+) -> Result<(), String> {
+    // SAFETY: `name` is a caller-provided NUL-terminated notification-name
+    // literal; CoreFoundation copies it into an owned CFString.
+    let name = unsafe { cfstring(name) } as Id;
+    if name.is_null() {
+        return Err("failed to create workspace notification name".to_string());
+    }
+
+    // SAFETY: `center` is an `NSNotificationCenter *`, `observer` implements the
+    // callback selector, and `name` is an owned CFString intentionally kept alive
+    // for the run-loop duration.
+    unsafe {
         let _: () = msg4(
             center,
             sel(c"addObserver:selector:name:object:"),
             observer,
-            sel(c"activeSpaceDidChange:"),
+            callback,
             name,
             std::ptr::null_mut::<c_void>(),
         );
-
-        CFRunLoopRun();
     }
 
     Ok(())

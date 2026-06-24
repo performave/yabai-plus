@@ -35,7 +35,7 @@ pub use screen::main_visible_frame;
 #[cfg(target_os = "macos")]
 pub use space::{current_space_for_display, spaces_for_display, spaces_for_window};
 #[cfg(target_os = "macos")]
-pub use workspace::{WorkspaceEvent, observe_active_space, regular_application_pids};
+pub use workspace::{WorkspaceEvent, observe_workspace, regular_application_pids};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DisplayId(pub u32);

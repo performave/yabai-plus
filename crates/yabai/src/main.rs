@@ -13,7 +13,7 @@ use yabai_macos::{
     AxSink, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt, active_displays,
     application_pids_with_windows, current_space_for_display, focused_window,
     focused_window_diagnostics, main_visible_frame, move_focused_window, move_pid_window,
-    observe_active_space, observe_pid, regular_application_pids, spaces_for_display,
+    observe_pid, observe_workspace, regular_application_pids, spaces_for_display,
     spaces_for_window, tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
 };
 use yabai_runtime::{
@@ -540,7 +540,7 @@ fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
 /// messages funnel into one channel processed against one `Runtime<AxSink>`.
 enum WmWork {
     Observed(ObservedEvent),
-    ActiveSpaceChanged,
+    Workspace(WorkspaceEvent),
     /// Periodic self-heal: re-reconcile known apps and (in `all` mode) discover
     /// apps launched after startup.
     Tick,
@@ -567,15 +567,15 @@ fn spawn_observer(pid: i32, tx: &Sender<WmWork>) {
     });
 }
 
-fn spawn_active_space_observer(tx: &Sender<WmWork>) {
+fn spawn_workspace_observer(tx: &Sender<WmWork>) {
     let (otx, orx) = channel::<WorkspaceEvent>();
     thread::spawn(move || {
-        let _ = observe_active_space(otx);
+        let _ = observe_workspace(otx);
     });
     let tx = tx.clone();
     thread::spawn(move || {
-        for _event in orx {
-            if tx.send(WmWork::ActiveSpaceChanged).is_err() {
+        for event in orx {
+            if tx.send(WmWork::Workspace(event)).is_err() {
                 break;
             }
         }
@@ -684,6 +684,20 @@ fn reconcile_pid(
     }
     *known = current;
 
+    runtime.state.flush_active_to(&mut runtime.sink);
+}
+
+fn drop_pid(runtime: &mut Runtime<AxSink>, managed: &mut HashMap<i32, HashSet<u32>>, pid: i32) {
+    let Some(ids) = managed.remove(&pid) else {
+        return;
+    };
+    for id in ids {
+        runtime.sink.unregister(id);
+        runtime.state.remove_window_meta(id);
+        let _ = runtime
+            .state
+            .handle_event(StateEvent::WindowDestroyed { window_id: id });
+    }
     runtime.state.flush_active_to(&mut runtime.sink);
 }
 
@@ -839,7 +853,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
         observed.insert(*pid);
         spawn_observer(*pid, &tx);
     }
-    spawn_active_space_observer(&tx);
+    spawn_workspace_observer(&tx);
 
     // Periodic self-heal tick (also picks up newly launched apps in `all` mode).
     {
@@ -885,13 +899,28 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 refresh_active_space(&mut runtime, display.id);
                 reconcile_pid(&mut runtime, &mut managed, event.pid());
             }
-            WmWork::ActiveSpaceChanged => {
-                refresh_display_spaces(&mut runtime, display.id, usable);
-                refresh_active_space(&mut runtime, display.id);
-                for pid in observed.iter().copied().collect::<Vec<_>>() {
-                    reconcile_pid(&mut runtime, &mut managed, pid);
+            WmWork::Workspace(event) => match event {
+                WorkspaceEvent::ActiveSpaceChanged => {
+                    refresh_display_spaces(&mut runtime, display.id, usable);
+                    refresh_active_space(&mut runtime, display.id);
+                    for pid in observed.iter().copied().collect::<Vec<_>>() {
+                        reconcile_pid(&mut runtime, &mut managed, pid);
+                    }
                 }
-            }
+                WorkspaceEvent::ApplicationLaunched { pid } => {
+                    if is_all && observed.insert(pid) {
+                        spawn_observer(pid, &tx);
+                        refresh_display_spaces(&mut runtime, display.id, usable);
+                        refresh_active_space(&mut runtime, display.id);
+                        reconcile_pid(&mut runtime, &mut managed, pid);
+                    }
+                }
+                WorkspaceEvent::ApplicationTerminated { pid } => {
+                    if observed.remove(&pid) {
+                        drop_pid(&mut runtime, &mut managed, pid);
+                    }
+                }
+            },
             WmWork::Tick => {
                 refresh_display_spaces(&mut runtime, display.id, usable);
                 refresh_active_space(&mut runtime, display.id);

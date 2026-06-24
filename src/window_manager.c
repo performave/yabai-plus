@@ -2209,6 +2209,7 @@ void window_manager_send_window_to_space(struct space_manager *sm, struct window
     }
 
     struct view *view = window_manager_find_managed_window(wm, window);
+    bool was_managed = view != NULL;
     if (view) {
         space_manager_untile_window(view, window);
         window_manager_remove_managed_window(wm, window->id);
@@ -2218,9 +2219,18 @@ void window_manager_send_window_to_space(struct space_manager *sm, struct window
     space_manager_move_window_to_space(dst_sid, window);
     SLSSpaceSetFrontPSN(g_connection, dst_sid, window->application->psn);
 
-    if (window_manager_should_manage_window(window)) {
-        struct view *view = space_manager_tile_window_on_space(sm, window, dst_sid);
-        window_manager_add_managed_window(wm, window, view);
+    //
+    // NOTE(yabai-plus): a window that was tiled before the move must stay tiled on the
+    // destination, even under `config manage off`. window_manager_should_manage_window
+    // honors the global manage default and has no WINDOW_RULE_MANAGED flag for windows
+    // tiled on demand via `--toggle float`, so re-deciding management here would orphan
+    // such a window -- untiled from the source space but refused on the destination,
+    // leaving it managed-looking (WINDOW_FLOAT clear) yet absent from any tree. Preserve
+    // the existing managed state instead of re-querying it.
+    //
+    if (was_managed || window_manager_should_manage_window(window)) {
+        struct view *dst_view = space_manager_tile_window_on_space(sm, window, dst_sid);
+        window_manager_add_managed_window(wm, window, dst_view);
     }
 }
 
@@ -2683,7 +2693,16 @@ static void window_manager_check_for_windows_on_space(struct window_manager *wm,
 {
     for (int i = 0; i < window_count; ++i) {
         struct window *window = window_manager_find_window(wm, window_list[i]);
-        if (!window || !window_manager_should_manage_window(window)) continue;
+        if (!window) continue;
+
+        //
+        // NOTE(yabai-plus): re-home a window that is already managed even when
+        // should_manage_window would now refuse it (e.g. it was tiled on demand via
+        // `--toggle float` under `config manage off`, so it carries no WINDOW_RULE_MANAGED
+        // flag). Without this, dragging such a window to another space in Mission Control
+        // drops it from the tree on arrival and leaves it overlapping the tiles there.
+        //
+        if (!window_manager_should_manage_window(window) && !window_manager_find_managed_window(wm, window)) continue;
 
         //
         // NOTE(plus): space_window_list() can transiently report a window that is mid-move

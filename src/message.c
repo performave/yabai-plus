@@ -2296,8 +2296,17 @@ static void handle_domain_window(FILE *rsp, struct token domain, char *message)
             if (token_equals(value, ARGUMENT_WINDOW_TOGGLE_FLOAT)) {
                 if (acting_window) {
                     if (window_check_flag(acting_window, WINDOW_FLOAT)) {
+                        //
+                        // NOTE(yabai-plus): mark the window WINDOW_RULE_MANAGED, mirroring
+                        // window_manager_apply_manage_rule_effects_to_window. Without it a window
+                        // tiled on demand under `config manage off` is managed but unmarked, so
+                        // every path that rebuilds the tree through should_manage_window (layout
+                        // switch, global layout, cross-space moves) drops it back out of the layout.
+                        //
+                        window_set_rule_flag(acting_window, WINDOW_RULE_MANAGED);
                         window_manager_make_window_managed(&g_space_manager, &g_window_manager, acting_window);
                     } else {
+                        window_clear_rule_flag(acting_window, WINDOW_RULE_MANAGED);
                         window_manager_make_window_floating(&g_space_manager, &g_window_manager, acting_window, true, false);
                     }
                 } else {

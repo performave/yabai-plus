@@ -15,7 +15,9 @@ use yabai_macos::{
     move_focused_window, move_pid_window, observe_pid, regular_application_pids,
     tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
 };
-use yabai_runtime::{Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent};
+use yabai_runtime::{
+    Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -581,6 +583,15 @@ fn reconcile_pid(
     for window in discovered {
         let id = window.id;
         current.insert(id);
+        // Refresh metadata every pass so titles stay current.
+        runtime.state.set_window_meta(
+            id,
+            WindowMeta {
+                app: window.app,
+                title: window.title,
+                pid: window.pid,
+            },
+        );
         if !known.contains(&id) {
             // A genuinely new window: hand its element to the sink and tree.
             runtime.sink.register(id, window.window);
@@ -594,6 +605,7 @@ fn reconcile_pid(
 
     for id in known.difference(&current).copied().collect::<Vec<_>>() {
         runtime.sink.unregister(id);
+        runtime.state.remove_window_meta(id);
         let _ = runtime
             .state
             .handle_event(StateEvent::WindowDestroyed { window_id: id });

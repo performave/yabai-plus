@@ -94,6 +94,16 @@ pub struct AppState {
     spaces: HashMap<u64, Tree>,
     active_space: Option<u64>,
     focused_window: Option<u32>,
+    window_meta: HashMap<u32, WindowMeta>,
+}
+
+/// Lightweight per-window metadata the macOS layer supplies for queries
+/// (`app`/`title`/`pid`). The pure layer only stores and serializes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowMeta {
+    pub app: String,
+    pub title: String,
+    pub pid: i32,
 }
 
 impl AppState {
@@ -133,6 +143,16 @@ impl AppState {
 
     pub fn set_focused_window(&mut self, window_id: Option<u32>) {
         self.focused_window = window_id;
+    }
+
+    /// Record (or replace) a window's macOS metadata for queries.
+    pub fn set_window_meta(&mut self, window_id: u32, meta: WindowMeta) {
+        self.window_meta.insert(window_id, meta);
+    }
+
+    /// Forget a window's metadata (e.g. when it is destroyed).
+    pub fn remove_window_meta(&mut self, window_id: u32) {
+        self.window_meta.remove(&window_id);
     }
 
     pub fn space(&self, sid: u64) -> Option<&Tree> {
@@ -499,8 +519,11 @@ impl AppState {
     }
 
     fn query_windows(&self, cmd: &QueryCommand) -> Response {
-        let properties =
-            query_properties(&cmd.properties, &["id", "frame", "has-focus"], "window")?;
+        let properties = query_properties(
+            &cmd.properties,
+            &["id", "pid", "app", "title", "frame", "has-focus"],
+            "window",
+        )?;
 
         match &cmd.scope {
             Some((QueryScopeKind::Window, selector)) => {
@@ -618,8 +641,18 @@ impl AppState {
     fn serialize_window(&self, frame: WindowFrame, properties: &[&str]) -> String {
         let mut fields = Vec::new();
         for property in properties {
+            let meta = self.window_meta.get(&frame.window_id);
             match *property {
                 "id" => fields.push(format!("\t\"id\":{}", frame.window_id)),
+                "pid" => fields.push(format!("\t\"pid\":{}", meta.map(|m| m.pid).unwrap_or(0))),
+                "app" => fields.push(format!(
+                    "\t\"app\":\"{}\"",
+                    json_escape(meta.map(|m| m.app.as_str()).unwrap_or(""))
+                )),
+                "title" => fields.push(format!(
+                    "\t\"title\":\"{}\"",
+                    json_escape(meta.map(|m| m.title.as_str()).unwrap_or(""))
+                )),
                 "frame" => fields.push(format_area("frame", frame.area)),
                 "has-focus" => fields.push(format!(
                     "\t\"has-focus\":{}",
@@ -830,6 +863,24 @@ fn format_area(name: &str, area: Area) -> String {
 
 fn json_bool(value: bool) -> &'static str {
     if value { "true" } else { "false" }
+}
+
+/// Escape a string for embedding in a JSON string literal (quotes, backslashes,
+/// and control characters) — app names and titles are arbitrary user text.
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1180,8 +1231,30 @@ mod tests {
     fn query_unsupported_property_reports() {
         let mut state = state_with_space();
         assert_eq!(
-            state.handle_tokens(&toks(&["query", "--windows", "app"])),
-            Err("'app' is not available from pure window state".to_string())
+            state.handle_tokens(&toks(&["query", "--windows", "role"])),
+            Err("'role' is not available from pure window state".to_string())
+        );
+    }
+
+    #[test]
+    fn query_windows_serializes_metadata() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_window_meta(
+            1,
+            WindowMeta {
+                app: "Finder".to_string(),
+                title: "Downloads \"x\"".to_string(),
+                pid: 527,
+            },
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--windows", "id,pid,app,title"])),
+            Ok(Some(
+                "[{\n\t\"id\":1,\n\t\"pid\":527,\n\t\"app\":\"Finder\",\n\t\"title\":\"Downloads \\\"x\\\"\"\n},{\n\t\"id\":2,\n\t\"pid\":0,\n\t\"app\":\"\",\n\t\"title\":\"\"\n}]\n"
+                    .to_string()
+            ))
         );
     }
 

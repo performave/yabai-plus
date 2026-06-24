@@ -467,14 +467,24 @@ without macOS or a daemon.
   windows, 8 windows), launched Calculator, and within one 3s tick the count rose
   to 9 with Calculator tiled (its window moved to the computed slot, clamped to
   its fixed 198×350 size). Confirms live app pickup works.
-- Whole workspace is still 105 passing tests; `cargo fmt`/`test`/`clippy` clean.
+- **Window metadata in queries** (`app`/`title`/`pid`). `AppState` gained a
+  `window_meta: HashMap<u32, WindowMeta>` (pure: just stored + serialized);
+  `query --windows` now accepts `pid`/`app`/`title` and emits them (with a new
+  `json_escape` for arbitrary title text). `yabai-macos` reads them via a new
+  `ax_string_attribute` (`CFStringGetCString`): `DiscoveredAxWindow` now carries
+  `pid`/`app`/`title` (app = the app element's `AXTitle`, title = the window's
+  `AXTitle`). The WM daemon calls `set_window_meta` during `reconcile_pid` (and
+  `remove_window_meta` on destroy), refreshing every pass so titles stay current.
+- Live verification: `query --windows id,app,title` against the WM daemon
+  returned real values — `app:"Finder"`, `title:"DIRECT-67-HP LaserJet 250"` /
+  `"Downloads"` per window. Added a `WindowMeta` serializer golden test.
+- Whole workspace is now 106 passing tests; `cargo fmt`/`test`/`clippy` clean.
 
-Next (rest of Phase 5): (1) Expand the Rust query serializer as live
-app/title/display/space metadata becomes available (app name/title need an AX
-read per window; CG ids already resolve). (2) Multi-display: the daemon currently
-tiles only the first display's visible frame into one space. (3) Observe app
-*termination* to drop a whole app's windows promptly (the tick reconcile already
-catches it within 3s as a backstop).
+Next (rest of Phase 5): (1) Multi-display: the daemon currently tiles only the
+first display's visible frame into one space. (2) Observe app *termination* to
+drop a whole app's windows promptly (the tick reconcile already catches it within
+3s as a backstop). (3) `space`/`window` selectors and focus operations that need
+live z-order/SkyLight (`recent`, `mouse`, `stack[.N]`, label selectors).
 
 ### 2026-06-23 (session 2)
 

@@ -70,6 +70,12 @@ unsafe extern "C" {
     ) -> CFDictionaryRef;
     fn CFArrayGetCount(the_array: CFArrayRef) -> CFIndex;
     fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: CFIndex) -> CFTypeRef;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut c_char,
+        buffer_size: CFIndex,
+        encoding: u32,
+    ) -> Boolean;
     fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFRelease(cf: CFTypeRef);
 }
@@ -149,10 +155,14 @@ impl Drop for AxWindow {
     }
 }
 
-/// A discovered Accessibility window plus its CoreGraphics window id.
+/// A discovered Accessibility window plus its CoreGraphics window id and, when
+/// known, lightweight metadata (owning pid, app name, window title).
 pub struct DiscoveredAxWindow {
     pub id: u32,
     pub window: AxWindow,
+    pub pid: i32,
+    pub app: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,7 +466,13 @@ fn application_windows(app: AXUIElementRef) -> Vec<DiscoveredAxWindow> {
             };
             let retained = CFRetain(window);
             let window = AxWindow::from_raw(retained);
-            result.push(DiscoveredAxWindow { id, window });
+            result.push(DiscoveredAxWindow {
+                id,
+                window,
+                pid: 0,
+                app: String::new(),
+                title: String::new(),
+            });
         }
         CFRelease(windows);
     }
@@ -541,10 +557,59 @@ fn adopt_window(value: CFTypeRef) -> io::Result<Option<DiscoveredAxWindow>> {
         return Ok(None);
     };
 
+    let pid = ax_pid(value).unwrap_or(0);
+    let title = ax_string_attribute(value, b"AXTitle\0").unwrap_or_default();
     // SAFETY: `value` is a retained AXUIElementRef from CopyAttributeValue;
     // ownership transfers to `AxWindow`.
     let window = unsafe { AxWindow::from_raw(value) };
-    Ok(Some(DiscoveredAxWindow { id, window }))
+    Ok(Some(DiscoveredAxWindow {
+        id,
+        window,
+        pid,
+        app: String::new(),
+        title,
+    }))
+}
+
+/// Read a string AX attribute (e.g. `AXTitle`) off an element as a Rust `String`.
+fn ax_string_attribute(element: AXUIElementRef, attribute: &[u8]) -> Option<String> {
+    if element.is_null() {
+        return None;
+    }
+    // SAFETY: creates an owned CFString attribute name for the copy attempt.
+    let attr = unsafe { cfstring(attribute) };
+    if attr.is_null() {
+        return None;
+    }
+    let value = copy_attribute(element, attr);
+    // SAFETY: owned attribute-name string no longer needed.
+    unsafe { CFRelease(attr) };
+    if value.is_null() {
+        return None;
+    }
+
+    let mut buf = [0i8; 512];
+    // SAFETY: `value` is a CFString from CopyAttributeValue; `buf` is valid
+    // writable storage and CFStringGetCString NUL-terminates on success.
+    let ok = unsafe {
+        CFStringGetCString(
+            value,
+            buf.as_mut_ptr(),
+            buf.len() as CFIndex,
+            K_CF_STRING_ENCODING_UTF8,
+        )
+    };
+    // SAFETY: `value` is owned by us and no longer needed.
+    unsafe { CFRelease(value) };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: `buf` is NUL-terminated by the successful call above.
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    cstr.to_str()
+        .ok()
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
 }
 
 fn window_id(window: CFTypeRef) -> Option<u32> {
@@ -785,6 +850,8 @@ pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
         return Ok(Vec::new());
     }
     let windows = copy_attribute(app, windows_attr);
+    // The app element's AXTitle is the application name (e.g. "Finder").
+    let app_name = ax_string_attribute(app, b"AXTitle\0").unwrap_or_default();
     // SAFETY: both owned refs are no longer needed after the copy.
     unsafe {
         CFRelease(windows_attr);
@@ -812,10 +879,14 @@ pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
             // in keeps synthetic ids unique across apps (for multi-app tiling).
             let synthetic = 0x8000_0000 | ((pid as u32 & 0x7FFF) << 16) | (idx as u32 & 0xFFFF);
             let id = window_id(window).unwrap_or(synthetic);
+            let title = ax_string_attribute(window, b"AXTitle\0").unwrap_or_default();
             let retained = CFRetain(window);
             result.push(DiscoveredAxWindow {
                 id,
                 window: AxWindow::from_raw(retained),
+                pid,
+                app: app_name.clone(),
+                title,
             });
         }
         CFRelease(windows);

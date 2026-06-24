@@ -4,7 +4,7 @@ pub mod config;
 pub mod runtime;
 
 pub use actor::Actor;
-pub use app_state::{AppState, LayoutSink, RecordingSink, Response, StateEvent};
+pub use app_state::{AppState, LayoutSink, RecordingSink, Response, StateEvent, WindowMeta};
 pub use config::Config;
 pub use runtime::Runtime;
 

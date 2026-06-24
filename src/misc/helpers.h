@@ -486,6 +486,56 @@ static void exec_config_file(char *config_file, int config_file_size)
     }
 }
 
+static bool read_config_manage_setting(char *config_file, int config_file_size, bool *manage)
+{
+    if (config_file[0] == '\0' && !get_config_file("yabairc", config_file, config_file_size)) {
+        return false;
+    }
+
+    if (!file_exists(config_file)) {
+        return false;
+    }
+
+    FILE *handle = fopen(config_file, "r");
+    if (!handle) return false;
+
+    bool found = false;
+    char line[4096];
+    while (fgets(line, sizeof(line), handle)) {
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+
+        bool found_config = false;
+        bool found_manage = false;
+
+        char *save;
+        for (char *token = strtok_r(line, " \t\r\n", &save); token; token = strtok_r(NULL, " \t\r\n", &save)) {
+            if (!found_config) {
+                found_config = string_equals(token, "config");
+            } else if (!found_manage) {
+                if (string_equals(token, "manage")) {
+                    found_manage = true;
+                } else {
+                    break;
+                }
+            } else {
+                if (string_equals(token, "off")) {
+                    *manage = false;
+                    found = true;
+                } else if (string_equals(token, "on")) {
+                    *manage = true;
+                    found = true;
+                }
+
+                break;
+            }
+        }
+    }
+
+    fclose(handle);
+    return found;
+}
+
 static inline bool ax_privilege(void)
 {
     const void *keys[] = { kAXTrustedCheckOptionPrompt };

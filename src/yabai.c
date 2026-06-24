@@ -356,6 +356,14 @@ int main(int argc, char **argv)
     }
 
     window_manager_init(&g_window_manager);
+
+    // Bootstrap this one setting before the async config run, so startup layout
+    // validation does not tile existing windows before `config manage off` lands.
+    bool manage;
+    if (read_config_manage_setting(g_config_file, sizeof(g_config_file), &manage)) {
+        g_window_manager.manage = manage;
+    }
+
     space_manager_begin(&g_space_manager);
     window_manager_begin(&g_space_manager, &g_window_manager);
 

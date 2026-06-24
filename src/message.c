@@ -2295,7 +2295,11 @@ static void handle_domain_window(FILE *rsp, struct token domain, char *message)
             struct token value = get_token(&message);
             if (token_equals(value, ARGUMENT_WINDOW_TOGGLE_FLOAT)) {
                 if (acting_window) {
-                    window_manager_make_window_floating(&g_space_manager, &g_window_manager, acting_window, !window_check_flag(acting_window, WINDOW_FLOAT), false);
+                    if (window_check_flag(acting_window, WINDOW_FLOAT)) {
+                        window_manager_make_window_managed(&g_space_manager, &g_window_manager, acting_window);
+                    } else {
+                        window_manager_make_window_floating(&g_space_manager, &g_window_manager, acting_window, true, false);
+                    }
                 } else {
                     daemon_fail(rsp, "could not locate the window to act on!\n");
                 }

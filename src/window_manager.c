@@ -302,10 +302,10 @@ void window_manager_center_mouse(struct window_manager *wm, struct window *windo
     CGWarpMouseCursorPosition(center);
 }
 
-bool window_manager_should_manage_window(struct window *window)
+static bool window_manager_should_manage_window_internal(struct window *window, bool ignore_manage, bool ignore_float)
 {
     if (!window->is_root)                           return false;
-    if (window_check_flag(window, WINDOW_FLOAT))    return false;
+    if (!ignore_float && window_check_flag(window, WINDOW_FLOAT)) return false;
     if (window_is_sticky(window->id))               return false;
     if (window_check_flag(window, WINDOW_MINIMIZE)) return false;
     if (window->application->is_hidden)             return false;
@@ -320,9 +320,26 @@ bool window_manager_should_manage_window(struct window *window)
     //
     if (window->frame.size.width <= 0.0f || window->frame.size.height <= 0.0f) return false;
 
-    if (!g_window_manager.manage && !window_check_rule_flag(window, WINDOW_RULE_MANAGED)) return false;
+    if (!ignore_manage && !g_window_manager.manage && !window_check_rule_flag(window, WINDOW_RULE_MANAGED)) return false;
 
     return (window_is_standard(window) && window_level_is_standard(window) && window_can_move(window)) || window_check_rule_flag(window, WINDOW_RULE_MANAGED);
+}
+
+bool window_manager_should_manage_window(struct window *window)
+{
+    return window_manager_should_manage_window_internal(window, false, false);
+}
+
+void window_manager_make_window_managed(struct space_manager *sm, struct window_manager *wm, struct window *window)
+{
+    if (!window_manager_should_manage_window_internal(window, true, true)) return;
+
+    window_clear_flag(window, WINDOW_FLOAT);
+
+    if (!window_check_flag(window, WINDOW_STICKY) && !window_manager_find_managed_window(wm, window)) {
+        struct view *view = space_manager_tile_window_on_space(sm, window, space_manager_active_space());
+        window_manager_add_managed_window(wm, window, view);
+    }
 }
 
 struct view *window_manager_find_managed_window(struct window_manager *wm, struct window *window)

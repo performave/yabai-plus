@@ -2,10 +2,11 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
 
+use yabai_core::Area;
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::{
     accessibility_trusted_with_prompt, active_displays, focused_window, focused_window_diagnostics,
-    windows_for_pid, windows_for_pid_diagnostics,
+    move_focused_window, move_pid_window, windows_for_pid, windows_for_pid_diagnostics,
 };
 use yabai_runtime::{Actor, AppState, RecordingSink, Runtime};
 
@@ -27,6 +28,8 @@ fn main() -> ExitCode {
         Some("--experimental-ax-debug") => run_ax_debug_probe(),
         Some("--experimental-ax-windows-for-pid") => run_ax_windows_for_pid(&args[1..]),
         Some("--experimental-ax-pid-debug") => run_ax_pid_debug(&args[1..]),
+        Some("--experimental-ax-move-focused") => run_ax_move_focused(&args[1..]),
+        Some("--experimental-ax-move-pid") => run_ax_move_pid(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -211,6 +214,80 @@ fn run_ax_windows_for_pid(args: &[String]) -> ExitCode {
     }
 }
 
+fn run_ax_move_focused(args: &[String]) -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+
+    let coords: Option<Vec<f32>> = (args.len() == 4)
+        .then(|| args.iter().map(|arg| arg.parse::<f32>().ok()).collect())
+        .flatten();
+    let Some(coords) = coords else {
+        eprintln!("yabai-rust: --experimental-ax-move-focused requires <x> <y> <w> <h>");
+        return ExitCode::from(64);
+    };
+
+    let area = Area::new(coords[0], coords[1], coords[2], coords[3]);
+    match move_focused_window(area) {
+        Ok(result) => {
+            println!(
+                "moved focused window to x={:.1} y={:.1} w={:.1} h={:.1}",
+                result.x, result.y, result.w, result.h
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: failed to move focused AX window: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_ax_move_pid(args: &[String]) -> ExitCode {
+    if !accessibility_trusted_with_prompt() {
+        eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
+        return ExitCode::from(1);
+    }
+
+    // <pid> <index> <x> <y> <w> <h>
+    if args.len() != 6 {
+        eprintln!("yabai-rust: --experimental-ax-move-pid requires <pid> <index> <x> <y> <w> <h>");
+        return ExitCode::from(64);
+    }
+    let Some(pid) = args[0].parse::<i32>().ok() else {
+        eprintln!("yabai-rust: invalid pid '{}'", args[0]);
+        return ExitCode::from(64);
+    };
+    let Some(index) = args[1].parse::<usize>().ok() else {
+        eprintln!("yabai-rust: invalid window index '{}'", args[1]);
+        return ExitCode::from(64);
+    };
+    let coords: Option<Vec<f32>> = args[2..]
+        .iter()
+        .map(|arg| arg.parse::<f32>().ok())
+        .collect();
+    let Some(coords) = coords else {
+        eprintln!("yabai-rust: invalid x/y/w/h coordinates");
+        return ExitCode::from(64);
+    };
+
+    let area = Area::new(coords[0], coords[1], coords[2], coords[3]);
+    match move_pid_window(pid, index, area) {
+        Ok(result) => {
+            println!(
+                "moved pid {pid} window {index} to x={:.1} y={:.1} w={:.1} h={:.1}",
+                result.x, result.y, result.w, result.h
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: failed to move pid {pid} AX window: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_ax_debug_probe() -> ExitCode {
     if !accessibility_trusted_with_prompt() {
         eprintln!("yabai-rust: Accessibility permission is not granted; grant it and rerun");
@@ -248,6 +325,10 @@ fn print_help() {
                                      Print CG ids for an app's AX windows.\n\
              --experimental-ax-pid-debug <pid>\n\
                                      Print AX diagnostics for an app pid.\n\
+             --experimental-ax-move-focused <x> <y> <w> <h>\n\
+                                     Move/resize the focused AX window directly.\n\
+             --experimental-ax-move-pid <pid> <index> <x> <y> <w> <h>\n\
+                                     Move/resize an app's index-th AX window.\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."
     );

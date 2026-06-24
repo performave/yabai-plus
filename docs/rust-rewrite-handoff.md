@@ -308,13 +308,37 @@ without macOS or a daemon.
   separate CGWindow/AX matching strategy for stable ids.
 - Whole workspace is now 105 passing tests; `cargo fmt --all`, `cargo test
   --workspace`, and `cargo clippy --workspace --all-targets` are clean.
-- Commit status: this AX diagnostics slice is currently staged but **not
-  committed** because `git commit` failed twice with `1Password: failed to fill
-  whole buffer` while writing the signed commit object. Files staged for the
-  eventual commit are `crates/yabai-macos/build.rs`,
-  `crates/yabai-macos/src/ax.rs`, `crates/yabai-macos/src/lib.rs`,
-  `crates/yabai/src/main.rs`, and this handoff doc. Intended commit message:
-  `feat(rust-port): add AX window diagnostics`.
+- Commit status: the AX diagnostics slice was committed as
+  `feat(rust-port): add AX window diagnostics` (`1224cc9`); the earlier
+  `1Password: failed to fill whole buffer` signing error did not recur.
+
+- Proved the live window-move path end-to-end (Phase 5 boundary). Factored the
+  `AxSink` position/size set into `ax::set_window_frame` and added
+  `ax::read_window_frame` (reads `kAXPosition`/`kAXSize` back via the new
+  `AXValueGetValue` FFI) so a move can be verified by reading the OS-accepted
+  frame. Two new public movers operate **directly on retained AX elements**,
+  deliberately bypassing the still-flaky `_AXUIElementGetWindow` CG-id mapping:
+  - `ax::move_focused_window(area)` — resolves the system-wide `AXFocusedWindow`
+    (then the focused app's `AXFocusedWindow`) and applies a frame.
+  - `ax::move_pid_window(pid, index, area)` — retains the `index`-th `AXWindows`
+    entry of an app and applies a frame regardless of CG-id resolvability.
+  Exposed behind `--experimental-ax-move-focused <x> <y> <w> <h>` and
+  `--experimental-ax-move-pid <pid> <index> <x> <y> <w> <h>`.
+- Live verification on this machine (yabai service stopped, so nothing re-tiled):
+  - `--experimental-ax-move-focused` failed with "no focused AX window could be
+    resolved" — the same launch-context limitation noted for
+    `--experimental-ax-debug` (system-wide focused attrs return nothing when the
+    Rust binary is run from a non-GUI terminal context). Kept it for when the
+    Rust daemon owns a real focus context.
+  - `--experimental-ax-move-pid 527 0 200 150 800 500` (Finder) **succeeded**:
+    the read-back reported exactly `x=200 y=150 w=800 h=500`, confirming the OS
+    accepted the AX move. Index 1 is Finder's non-movable desktop window and
+    stayed full-screen, as expected. Notably Finder's `window_ids` now resolved
+    one CG id (`3582`) where the prior session saw `[]`.
+- Whole workspace is still 105 passing tests; `cargo fmt --all`, `cargo test
+  --workspace`, and `cargo clippy --workspace --all-targets` are clean. (The new
+  movers need a live window, so they have no unit tests; the existing `AxSink`
+  no-op/tracking tests still cover the sink.)
 
 Next (rest of Phase 5): (1) the harder half — translate raw AX/SkyLight
 *callbacks* (app observers, window create/destroy/focus, space/display changes)
@@ -685,10 +709,13 @@ chronological log and may describe earlier states.
     mutation.
   - `actor.rs`: `Actor<S>` = a thread owning a `Runtime`, fed serialized work
     (`post_event`, blocking `message`, `shutdown` returns the `Runtime`).
-- `crates/yabai-macos` (2 tests) — Phase 5 boundary, depends on runtime+core:
+- `crates/yabai-macos` (4 tests) — Phase 5 boundary, depends on runtime+core:
   - `ax.rs`: `AxSink` impl of `LayoutSink` moving windows via AX
     (`kAXPosition`/`kAXSize`); `AxWindow` RAII over `AXUIElementRef`; local
-    CF/ApplicationServices FFI. Builds/links on macOS.
+    CF/ApplicationServices FFI. Builds/links on macOS. Also AX diagnostics
+    probes and the direct movers `move_focused_window` / `move_pid_window`
+    (verified live moving a real Finder window) plus `set_window_frame` /
+    `read_window_frame` helpers.
 - `crates/yabai-osax-common`, `-osax-legacy`, `-sa` — still scaffolding/constants.
 
 End-to-end today: `Actor -> Runtime -> AppState (Config + Tree) -> LayoutSink`

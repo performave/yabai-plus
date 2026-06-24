@@ -16,7 +16,7 @@ use std::ffi::c_void;
 use std::io;
 use std::os::raw::c_char;
 
-use yabai_core::WindowFrame;
+use yabai_core::{Area, WindowFrame};
 use yabai_runtime::LayoutSink;
 
 // --- minimal CoreFoundation / ApplicationServices FFI ---
@@ -89,6 +89,7 @@ unsafe extern "C" {
     ) -> i32;
     fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
     fn AXValueCreate(the_type: u32, value_ptr: *const c_void) -> AXValueRef;
+    fn AXValueGetValue(value: AXValueRef, the_type: u32, value_ptr: *mut c_void) -> Boolean;
     fn AXUIElementSetAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
@@ -552,6 +553,245 @@ fn window_id(window: CFTypeRef) -> Option<u32> {
     (err == 0 && id != 0).then_some(id)
 }
 
+/// Apply a frame to an AX window element by setting `kAXPosition` then `kAXSize`,
+/// a faithful port of `window_manager_move_window` / `_resize_window`. The caller
+/// owns `element`, `position_attr`, and `size_attr` for the duration of the call.
+fn set_window_frame(
+    element: AXUIElementRef,
+    position_attr: CFStringRef,
+    size_attr: CFStringRef,
+    area: Area,
+) {
+    if element.is_null() {
+        return;
+    }
+    let position = CGPoint {
+        x: area.x as f64,
+        y: area.y as f64,
+    };
+    let size = CGSize {
+        width: area.w as f64,
+        height: area.h as f64,
+    };
+
+    // SAFETY: `element` is a live AX ref and the attribute strings are valid.
+    // AXValueCreate copies the point/size; each value is released after the set,
+    // matching window_manager_move/resize_window.
+    unsafe {
+        let position_ref = AXValueCreate(
+            K_AX_VALUE_TYPE_CG_POINT,
+            &position as *const _ as *const c_void,
+        );
+        if !position_ref.is_null() {
+            AXUIElementSetAttributeValue(element, position_attr, position_ref);
+            CFRelease(position_ref);
+        }
+
+        let size_ref = AXValueCreate(K_AX_VALUE_TYPE_CG_SIZE, &size as *const _ as *const c_void);
+        if !size_ref.is_null() {
+            AXUIElementSetAttributeValue(element, size_attr, size_ref);
+            CFRelease(size_ref);
+        }
+    }
+}
+
+/// Read an AX window element's current `kAXPosition`/`kAXSize` back into an `Area`.
+/// Returns `None` if either attribute is missing or not a CGPoint/CGSize value.
+fn read_window_frame(element: AXUIElementRef) -> Option<Area> {
+    if element.is_null() {
+        return None;
+    }
+    // SAFETY: both literals are NUL-terminated; the CFStrings are released below.
+    let (position_attr, size_attr) = unsafe { (cfstring(b"AXPosition\0"), cfstring(b"AXSize\0")) };
+
+    let position = copy_attribute(element, position_attr);
+    let size = copy_attribute(element, size_attr);
+
+    let mut point = CGPoint { x: 0.0, y: 0.0 };
+    let mut dims = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    // SAFETY: `position`/`size` (when non-null) are AXValueRefs returned by
+    // CopyAttributeValue; AXValueGetValue unpacks the CGPoint/CGSize into the
+    // local storage and reports whether the value matched the requested type.
+    let ok = unsafe {
+        let got_point = !position.is_null()
+            && AXValueGetValue(
+                position,
+                K_AX_VALUE_TYPE_CG_POINT,
+                &mut point as *mut _ as *mut c_void,
+            ) != 0;
+        let got_size = !size.is_null()
+            && AXValueGetValue(
+                size,
+                K_AX_VALUE_TYPE_CG_SIZE,
+                &mut dims as *mut _ as *mut c_void,
+            ) != 0;
+        got_point && got_size
+    };
+
+    // SAFETY: release the owned attribute values and CFStrings (null is skipped).
+    unsafe {
+        if !position.is_null() {
+            CFRelease(position);
+        }
+        if !size.is_null() {
+            CFRelease(size);
+        }
+        if !position_attr.is_null() {
+            CFRelease(position_attr);
+        }
+        if !size_attr.is_null() {
+            CFRelease(size_attr);
+        }
+    }
+
+    ok.then(|| {
+        Area::new(
+            point.x as f32,
+            point.y as f32,
+            dims.width as f32,
+            dims.height as f32,
+        )
+    })
+}
+
+/// Resolve the system-wide focused window's AX element directly (without going
+/// through the `_AXUIElementGetWindow` CG-id mapping) and apply `area` to it.
+///
+/// This is the live, end-to-end exercise of the move path: it proves `AxSink`'s
+/// position/size logic works on a real window even while the CG-id discovery is
+/// still unresolved. Returns the window's frame as read back after the move.
+pub fn move_focused_window(area: Area) -> io::Result<Area> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    let window = system_attribute(b"AXFocusedWindow\0");
+    let window = if window.is_null() {
+        focused_application_window()
+    } else {
+        window
+    };
+    if window.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no focused AX window could be resolved",
+        ));
+    }
+
+    // SAFETY: both literals are NUL-terminated; the CFStrings are released below.
+    let (position_attr, size_attr) = unsafe { (cfstring(b"AXPosition\0"), cfstring(b"AXSize\0")) };
+    set_window_frame(window, position_attr, size_attr, area);
+    // SAFETY: owned CFStrings no longer needed after the set.
+    unsafe {
+        if !position_attr.is_null() {
+            CFRelease(position_attr);
+        }
+        if !size_attr.is_null() {
+            CFRelease(size_attr);
+        }
+    }
+
+    let result = read_window_frame(window).unwrap_or(area);
+    // SAFETY: `window` is an owned AX element from CopyAttributeValue / CFRetain.
+    unsafe { CFRelease(window) };
+    Ok(result)
+}
+
+/// Move/resize the `index`-th `AXWindows` entry of the application with `pid`,
+/// operating directly on the retained AX element without requiring its
+/// CoreGraphics window id. This is the reliable live-movement path while the
+/// `_AXUIElementGetWindow` CG-id mapping is still unresolved (see handoff).
+/// Returns the window's frame as read back after the move.
+pub fn move_pid_window(pid: i32, index: usize, area: Area) -> io::Result<Area> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    // SAFETY: creates an owned AX application element for `pid`, released below.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no AX application element for pid {pid}"),
+        ));
+    }
+
+    let window = retained_application_window(app, index);
+    // SAFETY: `app` is an owned AX element from CreateApplication.
+    unsafe { CFRelease(app) };
+
+    let Some(window) = window else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("pid {pid} has no AX window at index {index}"),
+        ));
+    };
+
+    // SAFETY: both literals are NUL-terminated; the CFStrings are released below.
+    let (position_attr, size_attr) = unsafe { (cfstring(b"AXPosition\0"), cfstring(b"AXSize\0")) };
+    set_window_frame(window.element, position_attr, size_attr, area);
+    // SAFETY: owned CFStrings no longer needed after the set.
+    unsafe {
+        if !position_attr.is_null() {
+            CFRelease(position_attr);
+        }
+        if !size_attr.is_null() {
+            CFRelease(size_attr);
+        }
+    }
+
+    Ok(read_window_frame(window.element).unwrap_or(area))
+}
+
+/// Retain and return the `index`-th `AXWindows` element of `app`, regardless of
+/// whether it has a resolvable CG window id.
+fn retained_application_window(app: AXUIElementRef, index: usize) -> Option<AxWindow> {
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let windows_attr = unsafe { cfstring(b"AXWindows\0") };
+    if windows_attr.is_null() {
+        return None;
+    }
+    let windows = copy_attribute(app, windows_attr);
+    // SAFETY: owned CFString no longer needed.
+    unsafe { CFRelease(windows_attr) };
+    if windows.is_null() {
+        return None;
+    }
+
+    // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue; the
+    // element at `index` is borrowed, so retain it before the array is released.
+    let element = unsafe {
+        let count = CFArrayGetCount(windows as CFArrayRef);
+        let result = if (index as CFIndex) < count {
+            let window = CFArrayGetValueAtIndex(windows as CFArrayRef, index as CFIndex);
+            if window.is_null() {
+                std::ptr::null()
+            } else {
+                CFRetain(window)
+            }
+        } else {
+            std::ptr::null()
+        };
+        CFRelease(windows);
+        result
+    };
+
+    if element.is_null() {
+        return None;
+    }
+    // SAFETY: `element` was just retained; ownership transfers to `AxWindow`.
+    Some(unsafe { AxWindow::from_raw(element) })
+}
+
 fn ax_pid(element: CFTypeRef) -> Option<i32> {
     if element.is_null() {
         return None;
@@ -616,40 +856,12 @@ impl LayoutSink for AxSink {
             // Not yet known to the sink; nothing to move.
             return;
         };
-        let element = window.element;
-        if element.is_null() {
-            return;
-        }
-
-        let position = CGPoint {
-            x: frame.area.x as f64,
-            y: frame.area.y as f64,
-        };
-        let size = CGSize {
-            width: frame.area.w as f64,
-            height: frame.area.h as f64,
-        };
-
-        // SAFETY: `element` is a live, owned AX ref; the attribute strings are
-        // valid; AXValueCreate copies the point/size, and we release each value
-        // after setting it — matching window_manager_move/resize_window.
-        unsafe {
-            let position_ref = AXValueCreate(
-                K_AX_VALUE_TYPE_CG_POINT,
-                &position as *const _ as *const c_void,
-            );
-            if !position_ref.is_null() {
-                AXUIElementSetAttributeValue(element, self.position_attr, position_ref);
-                CFRelease(position_ref);
-            }
-
-            let size_ref =
-                AXValueCreate(K_AX_VALUE_TYPE_CG_SIZE, &size as *const _ as *const c_void);
-            if !size_ref.is_null() {
-                AXUIElementSetAttributeValue(element, self.size_attr, size_ref);
-                CFRelease(size_ref);
-            }
-        }
+        set_window_frame(
+            window.element,
+            self.position_attr,
+            self.size_attr,
+            frame.area,
+        );
     }
 }
 
@@ -671,7 +883,6 @@ impl Drop for AxSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yabai_core::Area;
 
     #[test]
     fn move_unregistered_window_is_a_noop() {

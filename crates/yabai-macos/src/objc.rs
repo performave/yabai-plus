@@ -65,3 +65,22 @@ pub unsafe fn msg1<A, R>(receiver: *mut c_void, selector: Sel, arg: A) -> R {
         unsafe { transmute(objc_msgSend as *const ()) };
     f(receiver, selector, arg)
 }
+
+/// Send a four-argument message, returning `R` by the C ABI.
+///
+/// # Safety
+/// As [`msg0`], and each argument type must match the selector's real ABI.
+pub unsafe fn msg4<A, B, C, D, R>(
+    receiver: *mut c_void,
+    selector: Sel,
+    a: A,
+    b: B,
+    c: C,
+    d: D,
+) -> R {
+    // SAFETY: reinterpret with the concrete `(id, SEL, A, B, C, D) -> R` ABI;
+    // the caller guarantees the receiver/selector/argument/return types match.
+    let f: extern "C" fn(*mut c_void, Sel, A, B, C, D) -> R =
+        unsafe { transmute(objc_msgSend as *const ()) };
+    f(receiver, selector, a, b, c, d)
+}

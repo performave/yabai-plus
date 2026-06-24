@@ -860,9 +860,11 @@ chronological log and may describe earlier states.
     windows). Plus `set_window_frame` / `read_window_frame` helpers.
   - `screen.rs`: `main_visible_frame()` (`NSScreen.visibleFrame`, menu bar +
     Dock excluded, flipped to top-left CG coords) via shared objc FFI.
-  - `objc.rs`: shared Objective-C glue (`class`/`sel`, generic `msg0`/`msg1`).
+  - `objc.rs`: shared Objective-C glue (`class`/`sel`, generic
+    `msg0`/`msg1`/`msg4`).
   - `workspace.rs`: `regular_application_pids()` (`NSWorkspace`; NOTE: does not
-    refresh without a pumped run loop — see below).
+    refresh without a pumped run loop — see below) and `observe_active_space()`
+    (`NSWorkspaceActiveSpaceDidChangeNotification` on a dedicated run loop).
   - `cgwindow.rs`: `on_screen_windows()` / `application_pids_with_windows()`
     (`CGWindowListCopyWindowInfo`) — live app/window discovery that DOES refresh
     without a run loop; no Screen Recording perm (reads pid/number/layer only).
@@ -882,16 +884,17 @@ THE LIVE WM DAEMON (in `crates/yabai/src/main.rs`):
 dynamic tiling WM. A single-threaded event loop on the main thread owns
 `Runtime<AxSink>` (so all sink registration stays single-threaded) and consumes a
 unified `WmWork` channel fed by (a) one `observe_pid` thread per app, (b) a 3s
-self-heal `Tick`, (c) a socket-acceptor thread. `reconcile_pid` re-discovers an
+self-heal `Tick`, (c) a socket-acceptor thread, (d) an NSWorkspace active-space
+observer. `reconcile_pid` re-discovers an
 app's tileable windows on each event, registers newcomers / drops vanished ones
 (robust to the unreliable AX destroy), sets `app`/`title`/`pid` metadata, and
 re-flows. Verified live: auto-tile on open, auto-reconcile on close, new-app
 pickup via CGWindowList, real active-space id discovery at startup, per-space
 trees for the first display's discovered spaces, window-to-space assignment
 routing during reconciliation, first-display space add/remove reconciliation,
-active-space refresh from SkyLight before observed events/ticks/socket messages,
-`space --rotate/--balance` over the socket, and `query --windows id,app,title`
-returning real values.
+active-space notification handling with SkyLight re-read, `space --rotate`/
+`--balance` over the socket, and `query --windows id,app,title` returning real
+values.
 
 Other experimental flags in `main.rs`: `--experimental-ax-{focused-window,debug,
 windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
@@ -900,17 +903,17 @@ snapshot-only `Actor<AxSink>` version; the wm-daemon supersedes it).
 
 End-to-end today: a real dynamic tiling WM for the first display / active space,
 driven entirely by the pure core. It seeds real space ids for the first display
-and routes discovered windows to their reported spaces. It polls the first
-display's space list and current space before daemon work; subscribed live
-space-change events are not wired yet. Single-display, active-space tiling only.
+and routes discovered windows to their reported spaces. Active-space changes are
+notified through NSWorkspace; first-display space add/remove is still refreshed by
+polling before daemon work. Single-display, active-space tiling only.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
 1. Multi-space + Mission Control: space discovery, startup per-space trees, and
    window-to-space assignment/routing now exist for the first display; space
-   add/remove and active space are refreshed by polling before daemon work. Next
-   add subscribed live space-change events and implement `--space` focus/move/
-   create/destroy commands.
+   add/remove is refreshed by polling and active-space changes are notified.
+   Next implement `--space` focus/move/create/destroy commands and, later, SLS
+   create/destroy notifications.
 2. Multi-display: the WM daemon tiles only `active_displays().next()` today; add
    per-display spaces and route windows to the display they're on.
 3. App-termination handling (drop a whole app's windows promptly; the 3s tick is

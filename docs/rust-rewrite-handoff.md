@@ -16,8 +16,9 @@ reconstructing context.
   first pure query serializer for windows/spaces/displays; and `yabai-macos` has
   the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API
   plus live CoreGraphics display discovery, display/space topology reconciliation,
-  and AX window diagnostics. 122 workspace tests pass. The shipped C `make` flow
-  is unchanged.
+  and AX window diagnostics. Live `window --deminimize` works for numeric window
+  ids restored from the daemon's minimized-window AX registry. 123 workspace
+  tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-25.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -62,6 +63,52 @@ reconstructing context.
 - Verification: `cargo fmt --all`; `cargo test --workspace` (122 tests);
   `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
+### 2026-06-25 (session 6) — window deminimize
+
+- `window <id> --deminimize` now works in the Rust WM daemon for numeric window
+  ids. Minimized windows intentionally leave the pure BSP trees, so `AxSink` now
+  keeps a separate minimized AX-element registry when `window --minimize` succeeds
+  instead of dropping the element during reconcile. The daemon also records the
+  minimized window's pid so deminimize can clear `AXMinimized` and reconcile that
+  app back into the tiled layout.
+- The pure layout model is unchanged: minimized windows are absent from
+  `query --windows` and space window lists until AX reports them tileable again.
+  Non-numeric deminimize selectors are still deferred because minimized windows do
+  not have enough live query state outside the sink registry yet.
+- Live remote verification on macOS 26.2: started `--experimental-rust-wm-daemon`
+  on isolated socket `/tmp/yabai_rtest.socket`, focused Finder window id 186 via
+  the daemon, ran `window --minimize` and confirmed id 186 disappeared from
+  `query --windows`, then ran `window 186 --deminimize` and confirmed id 186
+  returned to the tiled query with focus. A repeated deminimize correctly reports
+  `window with id '186' is not minimized.`
+- Verification: `cargo fmt --all`; `cargo test --workspace` (123 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
+### 2026-06-25 (session 5) — cross-display space focus
+
+- `space --focus <sel>` now handles cross-display focus in the Rust path. Added
+  `yabai-macos` display primitives for cursor display lookup, cursor warp to a
+  display center, and active-menu-bar display activation, plus `display_for_space`
+  (`SLSCopyManagedDisplayForSpace` + `CGDisplayGetDisplayIDFromUUID`). The daemon
+  and `--experimental-space-probe --focus` share `focus_space_by_gesture`, which
+  mirrors the C fallback more closely: compute swipe steps from the target
+  display's current space, warp the cursor before posting the dock-swipe gesture
+  when the target is on another display, and activate that display afterward.
+- Fixed two active-space bookkeeping issues found during live testing: the probe
+  now uses the cursor display as its current space instead of always marking the
+  first display, and the WM daemon seeds command-active space from the cursor
+  display at startup (falling back to first display when the cursor cannot be
+  resolved). After a daemon-handled `space --focus`, `AppState.active_space` is set
+  to the target so later commands/query `has-focus` match the focused display.
+- Live remote verification on two displays: `--experimental-space-probe --focus 1`
+  and `--focus 3` moved current focus between the external display's sid 1 and the
+  built-in display-local sid 71 with 0 swipe steps (display focus only). Through
+  `--experimental-rust-wm-daemon`, query `--spaces id,has-focus,is-visible`
+  started on sid 71 when the cursor was on the built-in display, then flipped to
+  sid 1 after `space --focus 1`, then back to sid 71 after `space --focus 3`.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (122 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-06-25 (session 3) — multi-display
 
 - The WM daemon now tiles **every display at once**, not just the first. New
@@ -97,9 +144,8 @@ reconstructing context.
   as settable, so without this it kept a phantom tree slot. `AppState::window_pid`
   getter added; the pure `Minimize` dispatch just validates a focused window.
   Verified live: minimizing a window sent it to the Dock and re-tiled the rest.
-  `--deminimize` is deferred — restoring a minimized window needs its AX element /
-  a global window registry incl. minimized windows for selector resolution, which
-  the tree-only model doesn't have yet. 120 workspace tests, clippy clean.
+  `--deminimize` was deferred here; session 6 added the minimized AX registry for
+  numeric-id restore. 120 workspace tests, clippy clean.
 - `window --toggle float`: new `AppState.floating: HashSet<u32>`. Floating drops
   the window from its tree (others re-tile) and keeps it focused and put;
   unfloating re-tiles it into the active space. The key correctness piece is that
@@ -1060,31 +1106,31 @@ own usable frame), tiles each display's current space simultaneously, and routes
 discovered windows to the display/space they're physically on. Active-space
 changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
-focus (raise), swap, warp, minimize, toggle float/zoom; space focus (gesture) and
-rotate/balance/mirror/layout.
+focus (raise), swap, warp, minimize/deminimize, toggle float/zoom; space focus
+(gesture) and rotate/balance/mirror/layout.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
 1. Multi-space + Mission Control: space discovery, startup per-space trees, and
    window-to-space assignment/routing now exist for the first display; space
    add/remove is refreshed by polling and active-space changes are notified.
-   `space --focus <sel>` now works (gesture-based, single-display). Still to do:
-   `--switch`/`--move`/`--create`/`--destroy`/`--swap`/`--display` (need the
-   scripting addition, Phase 8); cross-display cursor warp in the focus gesture;
-   and, later, SLS create/destroy notifications.
+   `space --focus <sel>` now works (gesture-based, including cross-display cursor
+   warp/display activation). Still to do: `--switch`/`--move`/`--create`/
+   `--destroy`/`--swap`/`--display` (need the scripting addition, Phase 8), and,
+   later, SLS create/destroy notifications.
 2. Multi-display: done — the daemon tiles every display's current space at once,
    each in its own usable frame, routing windows to the display they're on.
    Display hot-plug is handled by polling/reconcile before daemon work and on the
    3s tick (physically verified unplug/replug). Still to do: cross-display
    window/space moves (`window --display` / `space --display`, need the scripting
-   addition), and the cross-display cursor warp in the space-focus gesture.
+   addition).
 3. App launch/termination are now observed directly through NSWorkspace; the 3s
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise
    (`AxSink::focus_window`), `--warp`, `--toggle float`, `--toggle
-   zoom-fullscreen`/`zoom-parent`, `--minimize`; `--swap` already worked. Still to
-   do: `--deminimize` (needs a minimized-window registry), focus without-raise,
-   native fullscreen, sticky/scratchpad, opacity/layer; mouse drag
+   zoom-fullscreen`/`zoom-parent`, `--minimize`, numeric-id `--deminimize`;
+   `--swap` already worked. Still to do: non-numeric deminimize selectors, focus
+   without-raise, native fullscreen, sticky/scratchpad, opacity/layer; mouse drag
    move/resize/swap; rules + signals execution.
 5. Then Phases 7-9: scripting addition (`yabai-sa`, currently empty — required
    for space management / cross-space moves on modern macOS), OSAX spike, and
@@ -1103,7 +1149,7 @@ rotate/balance/mirror/layout.
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 110 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 123 tests, clippy clean.
 - The live WM daemon binds only a caller-supplied socket; to message it use a
   socket named `/tmp/yabai_<name>.socket` and query with `USER=<name>`. Always
   `pkill -f experimental-rust-wm-daemon` to stop it (each shell call is a fresh

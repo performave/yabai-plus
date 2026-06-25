@@ -74,6 +74,7 @@ const K_CG_SESSION_EVENT_TAP: u32 = 1;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
+    fn CGDisplayGetDisplayIDFromUUID(uuid: CFUUIDRef) -> u32;
     fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> CFUUIDRef;
     fn CGEventCreate(source: *const c_void) -> CGEventRef;
     fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
@@ -105,6 +106,7 @@ unsafe extern "C" {
         c_str: *const c_char,
         encoding: u32,
     ) -> CFStringRef;
+    fn CFUUIDCreateFromString(alloc: CFAllocatorRef, uuid_str: CFStringRef) -> CFUUIDRef;
     fn CFUUIDCreateString(alloc: CFAllocatorRef, uuid: CFUUIDRef) -> CFStringRef;
 }
 
@@ -114,6 +116,7 @@ unsafe extern "C" {
     fn SLSCopyBestManagedDisplayForRect(cid: i32, rect: CGRect) -> CFStringRef;
     fn SLSCopyManagedDisplayForWindow(cid: i32, wid: u32) -> CFStringRef;
     fn SLSManagedDisplayGetCurrentSpace(cid: i32, uuid: CFStringRef) -> u64;
+    fn SLSCopyManagedDisplayForSpace(cid: i32, sid: u64) -> CFStringRef;
     fn SLSCopyManagedDisplaySpaces(cid: i32) -> CFArrayRef;
     fn SLSCopySpacesForWindows(cid: i32, selector: i32, window_list: CFArrayRef) -> CFArrayRef;
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
@@ -259,6 +262,44 @@ pub fn current_space_for_display(display_id: u32) -> io::Result<u64> {
         )))
     } else {
         Ok(sid)
+    }
+}
+
+/// Return the CoreGraphics display id that currently owns `sid`.
+pub fn display_for_space(sid: u64) -> io::Result<u32> {
+    // SAFETY: `SLSMainConnectionID` returns the process' SkyLight connection;
+    // the returned display identifier string, if any, is owned by the caller.
+    let uuid_string = unsafe { SLSCopyManagedDisplayForSpace(SLSMainConnectionID(), sid) };
+    if uuid_string.is_null() {
+        return Err(io::Error::other(format!(
+            "failed to discover display for space {sid}"
+        )));
+    }
+    let uuid_string = OwnedCf(uuid_string);
+
+    // SAFETY: `uuid_string` is a valid CFString display UUID for the duration of
+    // the call; the returned UUID, if non-null, is owned and released below.
+    let uuid =
+        unsafe { CFUUIDCreateFromString(std::ptr::null(), uuid_string.as_ptr() as CFStringRef) };
+    if uuid.is_null() {
+        return Err(io::Error::other(format!(
+            "failed to parse display UUID for space {sid}"
+        )));
+    }
+
+    // SAFETY: `uuid` is a valid CFUUID. CoreGraphics returns 0 if no active
+    // display matches it; `CFRelease` balances `CFUUIDCreateFromString`.
+    let display_id = unsafe {
+        let display_id = CGDisplayGetDisplayIDFromUUID(uuid);
+        CFRelease(uuid);
+        display_id
+    };
+    if display_id == 0 {
+        Err(io::Error::other(format!(
+            "space {sid} is not on an active display"
+        )))
+    } else {
+        Ok(display_id)
     }
 }
 

@@ -27,15 +27,18 @@ pub use ax::{
 #[cfg(target_os = "macos")]
 pub use cgwindow::{CgWindow, application_pids_with_windows, on_screen_windows};
 #[cfg(target_os = "macos")]
-pub use display::{MacDisplay, active_displays};
+pub use display::{
+    MacDisplay, active_displays, cursor_display_id, set_active_display,
+    warp_cursor_to_display_center,
+};
 #[cfg(target_os = "macos")]
 pub use observe::{ObservedEvent, observe_pid};
 #[cfg(target_os = "macos")]
 pub use screen::{main_visible_frame, visible_frame_for_display};
 #[cfg(target_os = "macos")]
 pub use space::{
-    current_space_for_display, mission_control_spaces, spaces_for_display, spaces_for_window,
-    switch_space_by_gesture,
+    current_space_for_display, display_for_space, mission_control_spaces, spaces_for_display,
+    spaces_for_window, switch_space_by_gesture,
 };
 #[cfg(target_os = "macos")]
 pub use workspace::{WorkspaceEvent, observe_workspace, regular_application_pids};

@@ -13,10 +13,11 @@ use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
     AxSink, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt, active_displays,
-    application_pids_with_windows, current_space_for_display, focused_window,
-    focused_window_diagnostics, main_visible_frame, mission_control_spaces, move_focused_window,
-    move_pid_window, observe_pid, observe_workspace, regular_application_pids, spaces_for_display,
-    spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
+    application_pids_with_windows, current_space_for_display, cursor_display_id, display_for_space,
+    focused_window, focused_window_diagnostics, main_visible_frame, mission_control_spaces,
+    move_focused_window, move_pid_window, observe_pid, observe_workspace, regular_application_pids,
+    set_active_display, spaces_for_display, spaces_for_window, switch_space_by_gesture,
+    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
     windows_for_pid, windows_for_pid_diagnostics,
 };
 use yabai_runtime::{
@@ -711,6 +712,46 @@ fn refresh_live_display_state(
     }
 }
 
+fn focus_space_by_gesture(
+    spaces: &[u64],
+    fallback_active: Option<u64>,
+    target: u64,
+) -> Result<Option<i32>, String> {
+    let target_display = display_for_space(target).ok();
+    let base = target_display
+        .and_then(|display_id| current_space_for_display(display_id).ok())
+        .or(fallback_active);
+    let cur = base.and_then(|sid| spaces.iter().position(|&s| s == sid));
+    let new = spaces.iter().position(|&s| s == target);
+
+    let Some((cur, new)) = cur.zip(new) else {
+        return Ok(None);
+    };
+
+    let focus_display = if let Some(display_id) = target_display {
+        let focus_display = cursor_display_id().map_or(true, |cursor| cursor != display_id);
+        if focus_display {
+            warp_cursor_to_display_center(display_id).map_err(|error| error.to_string())?;
+        }
+        focus_display
+    } else {
+        false
+    };
+
+    let steps = new as i32 - cur as i32;
+    if steps != 0 {
+        switch_space_by_gesture(steps).map_err(|error| error.to_string())?;
+    }
+
+    if focus_display {
+        if let Some(display_id) = target_display {
+            set_active_display(display_id).map_err(|error| error.to_string())?;
+        }
+    }
+
+    Ok(Some(steps))
+}
+
 /// Diagnostic: dump the Mission Control space layout (global desktop order with
 /// 1-based indices, marking the current space) and, with `--focus <selector>`,
 /// resolve the selector and switch to it via the dock-swipe gesture. Proves the
@@ -740,7 +781,10 @@ fn run_space_probe(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let current = current_space_for_display(display.id).ok();
+    let current = cursor_display_id()
+        .ok()
+        .and_then(|display_id| current_space_for_display(display_id).ok())
+        .or_else(|| current_space_for_display(display.id).ok());
 
     // Per-display summary: full bounds, usable (visible) frame, current space.
     for display in &displays {
@@ -755,7 +799,7 @@ fn run_space_probe(args: &[String]) -> ExitCode {
     println!("mission-control order:");
     for (index, sid) in spaces.iter().enumerate() {
         let marker = if Some(*sid) == current {
-            " <- current (first display)"
+            " <- current"
         } else {
             ""
         };
@@ -779,14 +823,10 @@ fn run_space_probe(args: &[String]) -> ExitCode {
             eprintln!("yabai-rust: cannot focus an already focused space.");
             return ExitCode::from(1);
         }
-        let cur = current.and_then(|sid| spaces.iter().position(|&s| s == sid));
-        let new = spaces.iter().position(|&s| s == target);
-        if let (Some(cur), Some(new)) = (cur, new) {
-            println!(
-                "focusing sid {target} ({} step(s))",
-                new as i32 - cur as i32
-            );
-            if let Err(error) = switch_space_by_gesture(new as i32 - cur as i32) {
+        match focus_space_by_gesture(&spaces, current, target) {
+            Ok(Some(steps)) => println!("focusing sid {target} ({steps} step(s))"),
+            Ok(None) => println!("focusing sid {target}"),
+            Err(error) => {
                 eprintln!("yabai-rust: gesture failed: {error}");
                 return ExitCode::from(1);
             }
@@ -815,6 +855,60 @@ fn is_window_minimize(tokens: &[String]) -> bool {
         Ok(Message::Window(cmd))
             if cmd.actions.iter().any(|action| matches!(action, WindowAction::Minimize))
     )
+}
+
+/// Extract the numeric target from a standalone `window <id> --deminimize`.
+/// Minimized windows are no longer in the layout tree, so non-id selectors cannot
+/// be resolved without a broader live window registry.
+fn window_deminimize_target(tokens: &[String]) -> Option<Result<u32, String>> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Deminimize] = cmd.actions.as_slice() else {
+        return None;
+    };
+
+    Some(match cmd.target {
+        Some(Selector::Index(id)) => Ok(id),
+        Some(_) => Err("window --deminimize currently requires a numeric window id.".to_string()),
+        None => Err("window --deminimize requires a window id.".to_string()),
+    })
+}
+
+/// Intercept `window <id> --deminimize`: the pure core intentionally drops
+/// minimized windows from BSP trees, while the macOS sink keeps their AX element
+/// so this path can restore the window and re-reconcile its app.
+fn try_window_deminimize(
+    runtime: &mut Runtime<AxSink>,
+    managed: &mut HashMap<i32, HashSet<u32>>,
+    minimized_pids: &mut HashMap<u32, i32>,
+    tokens: &[String],
+) -> Option<Response> {
+    let window_id = match window_deminimize_target(tokens)? {
+        Ok(window_id) => window_id,
+        Err(error) => return Some(Err(error)),
+    };
+
+    if !runtime.sink.is_minimized_registered(window_id) {
+        return Some(Err(format!(
+            "window with id '{window_id}' is not minimized."
+        )));
+    }
+    let Some(pid) = minimized_pids.remove(&window_id) else {
+        runtime.sink.unregister_minimized(window_id);
+        return Some(Err(format!(
+            "could not deminimize window with id '{window_id}'."
+        )));
+    };
+    if !runtime.sink.set_minimized(window_id, false) {
+        minimized_pids.insert(window_id, pid);
+        return Some(Err(format!(
+            "could not deminimize window with id '{window_id}'."
+        )));
+    }
+
+    reconcile_pid(runtime, managed, pid);
+    Some(Ok(None))
 }
 
 /// Intercept a standalone `space --focus <selector>` and enact the active-space
@@ -852,15 +946,12 @@ fn try_space_focus(
         return Some(Err("cannot focus an already focused space.".to_string()));
     }
 
-    let cur = active.and_then(|sid| spaces.iter().position(|&s| s == sid));
-    let new = spaces.iter().position(|&s| s == target);
-    if let (Some(cur), Some(new)) = (cur, new) {
-        if let Err(error) = switch_space_by_gesture(new as i32 - cur as i32) {
-            return Some(Err(error.to_string()));
-        }
+    if let Err(error) = focus_space_by_gesture(&spaces, active, target) {
+        return Some(Err(error));
     }
 
     refresh_all_active_spaces(runtime, display_frames);
+    runtime.state.set_active_space(target);
     Some(Ok(None))
 }
 
@@ -1113,18 +1204,26 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     }
-    // Command dispatch targets the focused display's space; seed it from the
-    // first display and let focus events refine it.
-    if let Some((display_id, _)) = display_frames.first() {
-        if let Some(sid) = state.display_active_space_id(*display_id) {
-            state.set_active_space(sid);
-        }
+    // Command dispatch targets the focused display's space. Prefer the display
+    // containing the cursor, then fall back to the first display if the cursor
+    // cannot be resolved (e.g. a non-GUI SSH session before wake).
+    let initial_active = cursor_display_id()
+        .ok()
+        .and_then(|display_id| state.display_active_space_id(display_id))
+        .or_else(|| {
+            display_frames
+                .first()
+                .and_then(|(display_id, _)| state.display_active_space_id(*display_id))
+        });
+    if let Some(sid) = initial_active {
+        state.set_active_space(sid);
     }
     let space_count = seeded.len();
     let active_sid = state.active_space_id();
 
     let mut runtime = Runtime::new(state, AxSink::new());
     let mut managed: HashMap<i32, HashSet<u32>> = HashMap::new();
+    let mut minimized_pids: HashMap<u32, i32> = HashMap::new();
 
     // Initial tile from the current world.
     for pid in &pids {
@@ -1220,6 +1319,16 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 }
                 WorkspaceEvent::ApplicationTerminated { pid } => {
                     if observed.remove(&pid) {
+                        for window_id in minimized_pids
+                            .iter()
+                            .filter_map(|(&window_id, &window_pid)| {
+                                (window_pid == pid).then_some(window_id)
+                            })
+                            .collect::<Vec<_>>()
+                        {
+                            minimized_pids.remove(&window_id);
+                            runtime.sink.unregister_minimized(window_id);
+                        }
                         drop_pid(&mut runtime, &mut managed, pid);
                     }
                 }
@@ -1243,11 +1352,19 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
             }
             WmWork::Message { tokens, reply } => {
                 refresh_live_display_state(&mut runtime, &mut display_frames);
-                // A lone `space --focus <sel>` needs a macOS-layer space switch the
-                // pure core can't perform; handle it here, otherwise fall through.
-                let response = match try_space_focus(&mut runtime, &display_frames, &tokens) {
+                // Some commands need macOS-layer state/effects the pure core can't
+                // perform; handle those here, otherwise fall through.
+                let response = match try_window_deminimize(
+                    &mut runtime,
+                    &mut managed,
+                    &mut minimized_pids,
+                    &tokens,
+                ) {
                     Some(response) => response,
-                    None => runtime.message(&tokens),
+                    None => match try_space_focus(&mut runtime, &display_frames, &tokens) {
+                        Some(response) => response,
+                        None => runtime.message(&tokens),
+                    },
                 };
                 // A successful `window --focus` updated the pure focus target;
                 // now enact it on the real window (raise + make key).
@@ -1261,8 +1378,10 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 // and the rest re-tile.
                 if response.is_ok() && is_window_minimize(&tokens) {
                     if let Some(window_id) = runtime.state.focused_window_id() {
+                        let pid = runtime.state.window_pid(window_id);
                         if runtime.sink.set_minimized(window_id, true) {
-                            if let Some(pid) = runtime.state.window_pid(window_id) {
+                            if let Some(pid) = pid {
+                                minimized_pids.insert(window_id, pid);
                                 reconcile_pid(&mut runtime, &mut managed, pid);
                             }
                         }
@@ -1441,5 +1560,21 @@ mod tests {
         assert!(resolve_space_target(&spaces, Some(20), &Selector::Recent).is_err());
         assert!(resolve_space_target(&spaces, Some(20), &Selector::Mouse).is_err());
         assert!(resolve_space_target(&spaces, None, &Selector::Next).is_err());
+    }
+
+    #[test]
+    fn window_deminimize_target_requires_numeric_target() {
+        let target =
+            window_deminimize_target(&["window".into(), "42".into(), "--deminimize".into()])
+                .unwrap();
+        assert_eq!(target, Ok(42));
+
+        let missing = window_deminimize_target(&["window".into(), "--deminimize".into()]).unwrap();
+        assert!(missing.unwrap_err().contains("requires a window id"));
+
+        let non_numeric =
+            window_deminimize_target(&["window".into(), "first".into(), "--deminimize".into()])
+                .unwrap();
+        assert!(non_numeric.unwrap_err().contains("numeric window id"));
     }
 }

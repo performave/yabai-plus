@@ -1014,6 +1014,7 @@ fn ax_pid(element: CFTypeRef) -> Option<i32> {
 /// API. Holds the window-id -> `AXUIElementRef` map the control plane lacks.
 pub struct AxSink {
     windows: HashMap<u32, AxWindow>,
+    minimized: HashMap<u32, AxWindow>,
     position_attr: CFStringRef,
     size_attr: CFStringRef,
 }
@@ -1037,6 +1038,7 @@ impl AxSink {
             unsafe { (cfstring(b"AXPosition\0"), cfstring(b"AXSize\0")) };
         Self {
             windows: HashMap::new(),
+            minimized: HashMap::new(),
             position_attr,
             size_attr,
         }
@@ -1044,16 +1046,26 @@ impl AxSink {
 
     /// Register a window's accessibility element so frames can be applied to it.
     pub fn register(&mut self, window_id: u32, window: AxWindow) {
+        self.minimized.remove(&window_id);
         self.windows.insert(window_id, window);
     }
 
-    /// Forget a window (e.g. on `WINDOW_DESTROYED`), releasing its element.
+    /// Forget an active/tileable window, releasing its element.
     pub fn unregister(&mut self, window_id: u32) {
         self.windows.remove(&window_id);
     }
 
+    /// Forget a minimized window, releasing its held element.
+    pub fn unregister_minimized(&mut self, window_id: u32) {
+        self.minimized.remove(&window_id);
+    }
+
     pub fn is_registered(&self, window_id: u32) -> bool {
         self.windows.contains_key(&window_id)
+    }
+
+    pub fn is_minimized_registered(&self, window_id: u32) -> bool {
+        self.minimized.contains_key(&window_id)
     }
 
     /// Focus a managed window: bring its app to the front with this window key,
@@ -1092,27 +1104,51 @@ impl AxSink {
     /// `AXMinimized` attribute, like `window_manager_{minimize,deminimize}_window`.
     /// Returns `false` if the window is not registered. A minimized window is no
     /// longer position-settable, so the next reconcile drops it from the tree.
-    pub fn set_minimized(&self, window_id: u32, minimized: bool) -> bool {
-        let Some(window) = self.windows.get(&window_id) else {
-            return false;
-        };
-        // SAFETY: `element` is a retained AX window element owned by the sink;
-        // `kCFBoolean*` are immortal CoreFoundation singletons. A fresh CFString
-        // attribute name is created and released around the set.
-        unsafe {
-            let attr = cfstring(b"AXMinimized\0");
-            if attr.is_null() {
+    pub fn set_minimized(&mut self, window_id: u32, minimized: bool) -> bool {
+        if minimized {
+            let Some(window) = self.windows.remove(&window_id) else {
                 return false;
-            }
-            let value = if minimized {
-                kCFBooleanTrue
-            } else {
-                kCFBooleanFalse
             };
-            let err = AXUIElementSetAttributeValue(window.element, attr, value);
-            CFRelease(attr);
-            err == 0
+            if set_ax_minimized(window.element, true) {
+                self.minimized.insert(window_id, window);
+                true
+            } else {
+                self.windows.insert(window_id, window);
+                false
+            }
+        } else if let Some(window) = self.minimized.remove(&window_id) {
+            if set_ax_minimized(window.element, false) {
+                self.windows.insert(window_id, window);
+                true
+            } else {
+                self.minimized.insert(window_id, window);
+                false
+            }
+        } else if let Some(window) = self.windows.get(&window_id) {
+            set_ax_minimized(window.element, false)
+        } else {
+            false
         }
+    }
+}
+
+fn set_ax_minimized(element: AXUIElementRef, minimized: bool) -> bool {
+    // SAFETY: `element` is a retained AX window element owned by the sink;
+    // `kCFBoolean*` are immortal CoreFoundation singletons. A fresh CFString
+    // attribute name is created and released around the set.
+    unsafe {
+        let attr = cfstring(b"AXMinimized\0");
+        if attr.is_null() {
+            return false;
+        }
+        let value = if minimized {
+            kCFBooleanTrue
+        } else {
+            kCFBooleanFalse
+        };
+        let err = AXUIElementSetAttributeValue(element, attr, value);
+        CFRelease(attr);
+        err == 0
     }
 }
 

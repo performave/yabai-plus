@@ -724,6 +724,15 @@ fn is_window_focus(tokens: &[String]) -> bool {
     )
 }
 
+/// True if `tokens` is a `window --minimize` command.
+fn is_window_minimize(tokens: &[String]) -> bool {
+    matches!(
+        parse_message(tokens),
+        Ok(Message::Window(cmd))
+            if cmd.actions.iter().any(|action| matches!(action, WindowAction::Minimize))
+    )
+}
+
 /// Intercept a standalone `space --focus <selector>` and enact the active-space
 /// switch through the macOS layer, returning `Some(response)`. Any other message
 /// (including a `--focus` mixed with other actions) returns `None` so the caller
@@ -1146,6 +1155,18 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 if response.is_ok() && is_window_focus(&tokens) {
                     if let Some(window_id) = runtime.state.focused_window_id() {
                         runtime.sink.focus_window(window_id);
+                    }
+                }
+                // `window --minimize`: AX-minimize the focused window, then
+                // reconcile its app so the now-untileable window leaves the tree
+                // and the rest re-tile.
+                if response.is_ok() && is_window_minimize(&tokens) {
+                    if let Some(window_id) = runtime.state.focused_window_id() {
+                        if runtime.sink.set_minimized(window_id, true) {
+                            if let Some(pid) = runtime.state.window_pid(window_id) {
+                                reconcile_pid(&mut runtime, &mut managed, pid);
+                            }
+                        }
                     }
                 }
                 let _ = reply.send(response);

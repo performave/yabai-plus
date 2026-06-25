@@ -183,6 +183,11 @@ impl AppState {
         self.focused_window
     }
 
+    /// The owning process id for a window, from its stored metadata.
+    pub fn window_pid(&self, window_id: u32) -> Option<i32> {
+        self.window_meta.get(&window_id).map(|meta| meta.pid)
+    }
+
     /// Record (or replace) a window's macOS metadata for queries.
     pub fn set_window_meta(&mut self, window_id: u32, meta: WindowMeta) {
         self.window_meta.insert(window_id, meta);
@@ -421,6 +426,11 @@ impl AppState {
                     let target = self.resolve_window(sel)?;
                     let focused = self.require_focused()?;
                     self.active_tree_mut()?.warp_window(focused, target);
+                }
+                WindowAction::Minimize => {
+                    // Validate a window is focused; the macOS layer (daemon) sets
+                    // AXMinimized and reconcile drops it from the tree.
+                    self.require_focused()?;
                 }
                 WindowAction::Toggle(name) => match name.as_str() {
                     "zoom-fullscreen" => {
@@ -1058,6 +1068,26 @@ mod tests {
         let mut list = state.space(1).unwrap().window_list();
         list.sort_unstable();
         assert_eq!(list, vec![1, 2]);
+    }
+
+    #[test]
+    fn minimize_requires_a_focused_window() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        // Focused after add: minimize validates and succeeds (macOS effect is the
+        // daemon's job, so the pure layer is a no-op that leaves the tree intact).
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--minimize"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+        // With nothing focused, it reports the same error as other window ops.
+        state.set_focused_window(None);
+        assert!(
+            state
+                .handle_tokens(&toks(&["window", "--minimize"]))
+                .is_err()
+        );
     }
 
     #[test]

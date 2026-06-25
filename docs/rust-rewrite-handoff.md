@@ -30,6 +30,16 @@ reconstructing context.
 
 ### 2026-06-25 (session 2)
 
+- `window --minimize`: `AxSink::set_minimized` toggles `AXMinimized`; the daemon
+  minimizes the focused window then `reconcile_pid`s its app. Key fix:
+  `tileable_pid_windows` now also excludes minimized windows (`is_minimized` via
+  `AXMinimized`) — on modern macOS a minimized window still reports `AXPosition`
+  as settable, so without this it kept a phantom tree slot. `AppState::window_pid`
+  getter added; the pure `Minimize` dispatch just validates a focused window.
+  Verified live: minimizing a window sent it to the Dock and re-tiled the rest.
+  `--deminimize` is deferred — restoring a minimized window needs its AX element /
+  a global window registry incl. minimized windows for selector resolution, which
+  the tree-only model doesn't have yet. 120 workspace tests, clippy clean.
 - `window --toggle float`: new `AppState.floating: HashSet<u32>`. Floating drops
   the window from its tree (others re-tile) and keeps it focused and put;
   unfloating re-tiles it into the active space. The key correctness piece is that
@@ -1006,9 +1016,10 @@ Single-display, active-space tiling only.
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise
    (`AxSink::focus_window`), `--warp`, `--toggle float`, `--toggle
-   zoom-fullscreen`/`zoom-parent`; `--swap` already worked. Still to do: focus
-   without-raise, minimize/deminimize, native fullscreen, sticky/scratchpad,
-   opacity/layer; mouse drag move/resize/swap; rules + signals execution.
+   zoom-fullscreen`/`zoom-parent`, `--minimize`; `--swap` already worked. Still to
+   do: `--deminimize` (needs a minimized-window registry), focus without-raise,
+   native fullscreen, sticky/scratchpad, opacity/layer; mouse drag
+   move/resize/swap; rules + signals execution.
 5. Then Phases 7-9: scripting addition (`yabai-sa`, currently empty — required
    for space management / cross-space moves on modern macOS), OSAX spike, and
    production packaging (wire the Rust binary into `make`, signing, notarization,

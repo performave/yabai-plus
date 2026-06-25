@@ -54,6 +54,9 @@ const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFBooleanTrue: CFTypeRef;
+    static kCFBooleanFalse: CFTypeRef;
+
+    fn CFBooleanGetValue(boolean: CFTypeRef) -> Boolean;
 
     fn CFStringCreateWithCString(
         alloc: CFAllocatorRef,
@@ -889,6 +892,7 @@ pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
         for idx in 0..count {
             let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
             if window.is_null()
+                || is_minimized(window)
                 || !is_position_settable(window)
                 || read_window_frame(window).is_none()
             {
@@ -931,6 +935,28 @@ fn is_position_settable(element: AXUIElementRef) -> bool {
         err == 0
     };
     ok && settable != 0
+}
+
+/// Whether an AX window is minimized (in the Dock). Minimized windows still
+/// report `AXPosition` as settable on modern macOS, so they must be filtered out
+/// of tile discovery explicitly, or they keep a phantom slot in the tree.
+fn is_minimized(element: AXUIElementRef) -> bool {
+    // SAFETY: owned CFString attribute name, released after the copy.
+    let attr = unsafe { cfstring(b"AXMinimized\0") };
+    if attr.is_null() {
+        return false;
+    }
+    let value = copy_attribute(element, attr);
+    // SAFETY: `attr` is owned; `value` (if any) is a retained CFBoolean.
+    unsafe {
+        CFRelease(attr);
+        if value.is_null() {
+            return false;
+        }
+        let minimized = CFBooleanGetValue(value) != 0;
+        CFRelease(value);
+        minimized
+    }
 }
 
 /// Retain and return the `index`-th `AXWindows` element of `app`, regardless of
@@ -1060,6 +1086,33 @@ impl AxSink {
             AXUIElementPerformAction(element, AX_RAISE_ACTION.with(|a| *a));
         }
         true
+    }
+
+    /// Minimize or de-minimize a managed window by toggling its
+    /// `AXMinimized` attribute, like `window_manager_{minimize,deminimize}_window`.
+    /// Returns `false` if the window is not registered. A minimized window is no
+    /// longer position-settable, so the next reconcile drops it from the tree.
+    pub fn set_minimized(&self, window_id: u32, minimized: bool) -> bool {
+        let Some(window) = self.windows.get(&window_id) else {
+            return false;
+        };
+        // SAFETY: `element` is a retained AX window element owned by the sink;
+        // `kCFBoolean*` are immortal CoreFoundation singletons. A fresh CFString
+        // attribute name is created and released around the set.
+        unsafe {
+            let attr = cfstring(b"AXMinimized\0");
+            if attr.is_null() {
+                return false;
+            }
+            let value = if minimized {
+                kCFBooleanTrue
+            } else {
+                kCFBooleanFalse
+            };
+            let err = AXUIElementSetAttributeValue(window.element, attr, value);
+            CFRelease(attr);
+            err == 0
+        }
     }
 }
 

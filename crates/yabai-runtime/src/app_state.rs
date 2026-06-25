@@ -402,6 +402,11 @@ impl AppState {
                     let focused = self.require_focused()?;
                     self.active_tree_mut()?.swap_windows(focused, other);
                 }
+                WindowAction::Warp(sel) => {
+                    let target = self.resolve_window(sel)?;
+                    let focused = self.require_focused()?;
+                    self.active_tree_mut()?.warp_window(focused, target);
+                }
                 WindowAction::Resize { handle, dw, dh } => {
                     let focused = self.require_focused()?;
                     self.active_tree_mut()?

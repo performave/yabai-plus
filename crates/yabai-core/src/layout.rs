@@ -821,6 +821,33 @@ impl Tree {
         true
     }
 
+    /// `window_manager_warp_window` (single-space BSP core): move `src` to
+    /// `target`'s position by removing it and re-inserting it at the target's
+    /// node, restructuring the tree (unlike [`Self::swap_windows`], which only
+    /// exchanges leaf contents). Insertion follows the tree's normal split policy;
+    /// the C daemon's `:NaturalWarp` child-distance heuristic and cross-space warp
+    /// are deferred (they need live geometry / multi-view state). Returns `false`
+    /// if either window is missing, they are the same, they share a leaf, or the
+    /// view is not BSP.
+    pub fn warp_window(&mut self, src: u32, target: u32) -> bool {
+        if src == target || self.layout != ViewType::Bsp {
+            return false;
+        }
+        let (Some(src_node), Some(target_node)) =
+            (self.find_window_node(src), self.find_window_node(target))
+        else {
+            return false;
+        };
+        if src_node == target_node {
+            return false;
+        }
+
+        self.remove_window(src);
+        self.add_window(src, Some(target));
+        self.update(self.root);
+        true
+    }
+
     // --- directional neighbor (view_find_window_node_in_direction) ---
 
     /// `view_find_window_node_in_direction`: closest leaf to `source` in
@@ -1020,6 +1047,36 @@ mod tests {
         tree.add_window(1, None);
         assert!(!tree.swap_windows(1, 1));
         assert!(!tree.swap_windows(1, 99));
+    }
+
+    #[test]
+    fn warp_window_restructures_next_to_target() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        tree.add_window(2, Some(1));
+        tree.add_window(3, Some(2));
+        // 1 is root's left child; 2 and 3 share the right subtree.
+        assert!(tree.warp_window(1, 3));
+        let mut list = tree.window_list();
+        list.sort_unstable();
+        assert_eq!(list, vec![1, 2, 3]);
+        // 1 was removed from its old leaf and re-inserted as 3's new sibling.
+        let n1 = tree.find_window_node(1).unwrap();
+        let n3 = tree.find_window_node(3).unwrap();
+        assert_eq!(tree.node(n1).parent, tree.node(n3).parent);
+        assert!(tree.node(n1).parent.is_some());
+    }
+
+    #[test]
+    fn warp_same_shared_or_non_bsp_is_noop() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        assert!(!tree.warp_window(1, 1)); // same window
+        assert!(!tree.warp_window(1, 99)); // unmanaged target
+        let mut stack = Tree::new(ViewType::Stack, LayoutConfig::default(), SCREEN);
+        stack.add_window(1, None);
+        stack.add_window(2, None);
+        assert!(!stack.warp_window(1, 2)); // warp is BSP-only
     }
 
     #[test]

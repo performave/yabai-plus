@@ -28,6 +28,22 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-06-25 (session 2)
+
+- `window --warp <selector>`: new `Tree::warp_window` removes the focused window
+  and re-inserts it at the target window's node, restructuring the BSP tree (vs
+  `swap_windows`, which only exchanges leaf contents). Wired into `dispatch_window`
+  next to `--swap`. The C `:NaturalWarp` child-distance heuristic and cross-space
+  warp stay deferred (need live geometry / multi-view). `window --swap` already
+  worked (pure swap + reflush). Both verified live on the remote: `--warp west`
+  moved the bottom-right window into the left column and grew the right window to
+  full height; `--swap east` traded two windows' slots. 115 workspace tests,
+  clippy clean.
+- Remote gotcha worth remembering: `active_displays()` returns empty when the
+  MacBook display has slept, so the WM daemon aborts with "no active displays
+  found" — keep `caffeinate -d -u` running before launching it (added to the
+  runbook mentally; see `REMOTE_TESTING.local.md`).
+
 ### 2026-06-25
 
 - Real `window --focus <selector>`: the pure core already resolves the target
@@ -1010,5 +1026,5 @@ Single-display, active-space tiling only.
 - `rotate 180` swaps children, so leaf/`window_list` order flips — expected.
 - Deferred in the pure layer (need live state): zoom persistence, insert
   feedback, the z-order rank tie-break in `find_node_in_direction`, cross-space
-  warp/swap, the `:NaturalWarp` heuristic, and `recent`/`mouse`/`stack[.N]`/
-  label selector resolution.
+  warp/swap and the `:NaturalWarp` heuristic (single-space `warp_window` is
+  done), and `recent`/`mouse`/`stack[.N]`/label selector resolution.

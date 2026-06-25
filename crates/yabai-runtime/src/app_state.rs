@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use yabai_core::{
     Area, ConfigOp, Message, NodeSplit, QueryCommand, QueryScopeKind, QueryTarget, Selector,
-    SpaceAction, Tree, ViewType, WindowAction, WindowFrame, parse_message,
+    SpaceAction, Tree, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -406,6 +406,17 @@ impl AppState {
                     let target = self.resolve_window(sel)?;
                     let focused = self.require_focused()?;
                     self.active_tree_mut()?.warp_window(focused, target);
+                }
+                WindowAction::Toggle(name) => {
+                    let kind = match name.as_str() {
+                        "zoom-fullscreen" => ZoomKind::Fullscreen,
+                        "zoom-parent" => ZoomKind::Parent,
+                        // Other toggles (float/sticky/split/shadow) need state the
+                        // pure layer / macOS layers don't model yet.
+                        _ => return Err(format!("window toggle '{name}' not yet handled")),
+                    };
+                    let focused = self.require_focused()?;
+                    self.active_tree_mut()?.toggle_zoom(focused, kind);
                 }
                 WindowAction::Resize { handle, dw, dh } => {
                     let focused = self.require_focused()?;

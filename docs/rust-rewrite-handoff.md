@@ -30,6 +30,15 @@ reconstructing context.
 
 ### 2026-06-25 (session 2)
 
+- `window --toggle zoom-fullscreen` / `zoom-parent`: new `Tree::toggle_zoom` +
+  `ZoomKind`. Zoom is a capture-time frame override (the window keeps its tree
+  slot; `capture()` returns the root area for fullscreen, the parent-node area for
+  zoom-parent, others stay tiled underneath), so toggling off restores the tiled
+  frame with no reflow. Persists across flushes/reconciles until toggled off or
+  the window leaves the tree. Wired into `dispatch_window::Toggle`; other toggles
+  (float/sticky/split/shadow) still error. Verified live: zoom-fullscreen grew the
+  focused window to fill the space and toggling off restored it exactly.
+  117 workspace tests, clippy clean.
 - `window --warp <selector>`: new `Tree::warp_window` removes the focused window
   and re-inserts it at the target window's node, restructuring the BSP tree (vs
   `swap_windows`, which only exchanges leaf contents). Wired into `dispatch_window`

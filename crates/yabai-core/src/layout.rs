@@ -165,6 +165,17 @@ pub struct WindowFrame {
     pub area: Area,
 }
 
+/// A temporary, non-structural fullscreen state for one window (`window
+/// --toggle zoom-*`). The window keeps its place in the tree; only its captured
+/// frame is overridden, so toggling back restores tiling with no reflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomKind {
+    /// `zoom-fullscreen`: fill the whole space (root) area.
+    Fullscreen,
+    /// `zoom-parent`: fill the window's parent node area.
+    Parent,
+}
+
 /// A BSP/stack/float layout tree for one space.
 #[derive(Debug, Clone)]
 pub struct Tree {
@@ -175,6 +186,9 @@ pub struct Tree {
     pub config: LayoutConfig,
     /// Window id the next insert prefers to split next to (`None` = unset).
     pub insertion_point: Option<u32>,
+    /// The window currently zoomed (and how), if any. Overrides only its own
+    /// captured frame; cleared on toggle-off or when the window leaves the tree.
+    zoom: Option<(u32, ZoomKind)>,
 }
 
 impl Tree {
@@ -189,7 +203,29 @@ impl Tree {
             layout,
             config,
             insertion_point: None,
+            zoom: None,
         }
+    }
+
+    /// `window --toggle zoom-fullscreen|zoom-parent`: zoom `window_id` with
+    /// `kind`, or un-zoom if it is already zoomed the same way. Returns `false`
+    /// if the window is not in the tree. Purely a capture-time override — no tree
+    /// restructuring — so toggling off restores the tiled frame exactly.
+    pub fn toggle_zoom(&mut self, window_id: u32, kind: ZoomKind) -> bool {
+        if self.find_window_node(window_id).is_none() {
+            return false;
+        }
+        self.zoom = if self.zoom == Some((window_id, kind)) {
+            None
+        } else {
+            Some((window_id, kind))
+        };
+        true
+    }
+
+    /// The window currently zoomed, and how (`None` if no window is zoomed).
+    pub fn zoomed(&self) -> Option<(u32, ZoomKind)> {
+        self.zoom
     }
 
     pub fn root(&self) -> NodeId {
@@ -369,10 +405,28 @@ impl Tree {
     /// first leaf to last. Each window in a stacked leaf shares the leaf's area.
     /// This is what the macOS layer turns into window-move operations.
     pub fn capture(&self) -> Vec<WindowFrame> {
+        // A zoomed window's captured frame is overridden to its zoom area; the
+        // rest stay tiled (underneath it).
+        let zoom = self.zoom.and_then(|(zid, kind)| {
+            let leaf = self.find_window_node(zid)?;
+            let area = match kind {
+                ZoomKind::Fullscreen => self.nodes[self.root].area,
+                ZoomKind::Parent => {
+                    let parent = self.nodes[leaf].parent.unwrap_or(self.root);
+                    self.nodes[parent].area
+                }
+            };
+            Some((zid, area))
+        });
+
         let mut out = Vec::new();
         for id in self.leaves() {
             let area = self.nodes[id].area;
             for &window_id in &self.nodes[id].window_list {
+                let area = match zoom {
+                    Some((zid, zoom_area)) if zid == window_id => zoom_area,
+                    _ => area,
+                };
                 out.push(WindowFrame { window_id, area });
             }
         }
@@ -1065,6 +1119,40 @@ mod tests {
         let n3 = tree.find_window_node(3).unwrap();
         assert_eq!(tree.node(n1).parent, tree.node(n3).parent);
         assert!(tree.node(n1).parent.is_some());
+    }
+
+    #[test]
+    fn zoom_fullscreen_overrides_only_its_own_frame() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        tree.add_window(2, Some(1));
+        let root_area = tree.node(tree.root()).area;
+
+        assert!(tree.toggle_zoom(1, ZoomKind::Fullscreen));
+        assert_eq!(tree.zoomed(), Some((1, ZoomKind::Fullscreen)));
+        let frames = tree.capture();
+        let f1 = frames.iter().find(|f| f.window_id == 1).unwrap();
+        let f2 = frames.iter().find(|f| f.window_id == 2).unwrap();
+        assert_eq!(f1.area, root_area); // zoomed window fills the space
+        assert_ne!(f2.area, root_area); // the other stays tiled
+
+        // Toggling the same kind again un-zooms and restores the tiled frame.
+        assert!(tree.toggle_zoom(1, ZoomKind::Fullscreen));
+        assert!(tree.zoomed().is_none());
+        let f1b = tree
+            .capture()
+            .into_iter()
+            .find(|f| f.window_id == 1)
+            .unwrap();
+        assert_ne!(f1b.area, root_area);
+    }
+
+    #[test]
+    fn zoom_unmanaged_window_is_noop() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        assert!(!tree.toggle_zoom(99, ZoomKind::Fullscreen));
+        assert!(tree.zoomed().is_none());
     }
 
     #[test]

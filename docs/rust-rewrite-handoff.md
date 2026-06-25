@@ -28,6 +28,32 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-06-25 (session 3) — multi-display
+
+- The WM daemon now tiles **every display at once**, not just the first. New
+  `screen::visible_frame_for_display` resolves each display's usable frame
+  (per-display menu bar/Dock insets) by walking `[NSScreen screens]` and matching
+  `NSScreenNumber`. `AppState` gained `display_active_space: HashMap<did,sid>` and
+  `flush_all_active(_to)` (flush every display's visible space; falls back to the
+  single active space when unset, so the tile daemon still works). The daemon
+  seeds spaces for all displays, refreshes/flushes all displays on every event
+  (`refresh_all_display_spaces` / `refresh_all_active_spaces`), and routes windows
+  to the display they're physically on via the existing `spaces_for_window`
+  lookup. Focus moving to another display repoints the command-active space at the
+  focused window's space.
+- Verified live on two displays (external 1080p main + built-in Retina): each
+  display tiled its own current space simultaneously — two windows split across
+  the main display, one window filling the built-in display's usable frame (which
+  correctly excluded that display's menu bar). Screenshots per display via
+  `screencapture -D`.
+- Known limitation: moving a window across displays *while the daemon runs* fights
+  the daemon (it re-tiles before macOS reassigns the window's space); routing is
+  correct when a window's space is discovered at startup/reconcile. A real
+  `window --display` / `space --display` move needs the scripting addition
+  (Phase 8). Display hot-plug isn't handled yet (displays are enumerated once at
+  startup). The `--experimental-space-probe` now prints every display's
+  bounds/usable/current-space.
+
 ### 2026-06-25 (session 2)
 
 - `window --minimize`: `AxSink::set_minimized` toggles `AXMinimized`; the daemon
@@ -994,12 +1020,14 @@ windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
 `--experimental-rust-{daemon,tile-daemon}` (the tile-daemon is the older
 snapshot-only `Actor<AxSink>` version; the wm-daemon supersedes it).
 
-End-to-end today: a real dynamic tiling WM for the first display / active space,
-driven entirely by the pure core. It seeds real space ids for the first display
-and routes discovered windows to their reported spaces. Active-space changes are
-notified through NSWorkspace; app launch/termination are notified too;
-first-display space add/remove is still refreshed by polling before daemon work.
-Single-display, active-space tiling only.
+End-to-end today: a real dynamic tiling WM across **all displays**, driven
+entirely by the pure core. It seeds real space ids for every display (each in its
+own usable frame), tiles each display's current space simultaneously, and routes
+discovered windows to the display/space they're physically on. Active-space
+changes are notified through NSWorkspace; app launch/termination are notified
+too; space add/remove is refreshed by polling before daemon work. Window ops:
+focus (raise), swap, warp, minimize, toggle float/zoom; space focus (gesture) and
+rotate/balance/mirror/layout.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
@@ -1010,8 +1038,11 @@ Single-display, active-space tiling only.
    `--switch`/`--move`/`--create`/`--destroy`/`--swap`/`--display` (need the
    scripting addition, Phase 8); cross-display cursor warp in the focus gesture;
    and, later, SLS create/destroy notifications.
-2. Multi-display: the WM daemon tiles only `active_displays().next()` today; add
-   per-display spaces and route windows to the display they're on.
+2. Multi-display: done — the daemon tiles every display's current space at once,
+   each in its own usable frame, routing windows to the display they're on. Still
+   to do: display hot-plug (re-enumerate on change), cross-display window/space
+   moves (`window --display` / `space --display`, need the scripting addition),
+   and the cross-display cursor warp in the space-focus gesture.
 3. App launch/termination are now observed directly through NSWorkspace; the 3s
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise

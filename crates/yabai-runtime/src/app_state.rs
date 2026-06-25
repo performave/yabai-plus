@@ -102,6 +102,10 @@ pub struct AppState {
     /// Windows the user floated (`window --toggle float`): kept out of every tree
     /// so they are never tiled, and skipped by reconcile's space assignment.
     floating: HashSet<u32>,
+    /// Each display's currently visible space. Every display tiles its own
+    /// current space simultaneously, so the daemon flushes all of these, while
+    /// `active_space` (the focused display's space) drives command dispatch.
+    display_active_space: HashMap<u32, u64>,
 }
 
 /// Lightweight per-window metadata the macOS layer supplies for queries
@@ -173,6 +177,16 @@ impl AppState {
 
     pub fn active_space_id(&self) -> Option<u64> {
         self.active_space
+    }
+
+    /// Record `display_id`'s currently visible space (for multi-display flush).
+    pub fn set_display_active_space(&mut self, display_id: u32, sid: u64) {
+        self.display_active_space.insert(display_id, sid);
+    }
+
+    /// The currently visible space on `display_id`, if known.
+    pub fn display_active_space_id(&self, display_id: u32) -> Option<u64> {
+        self.display_active_space.get(&display_id).copied()
     }
 
     pub fn set_focused_window(&mut self, window_id: Option<u32>) {
@@ -305,6 +319,34 @@ impl AppState {
     /// were placed. This is the call the daemon makes after any state change.
     pub fn flush_active_to(&self, sink: &mut impl LayoutSink) -> usize {
         let frames = self.flush_active().unwrap_or_default();
+        let count = frames.len();
+        for frame in frames {
+            sink.move_window(frame);
+        }
+        count
+    }
+
+    /// The target frames for every display's currently visible space — what a
+    /// multi-display daemon flushes so all screens tile at once.
+    pub fn flush_all_active(&self) -> Vec<WindowFrame> {
+        let mut frames = Vec::new();
+        for sid in self.display_active_space.values() {
+            if let Some(tree) = self.spaces.get(sid) {
+                frames.extend(tree.capture());
+            }
+        }
+        frames
+    }
+
+    /// Push every display's visible-space layout through `sink`. Falls back to the
+    /// single active space when no per-display spaces are recorded (so a
+    /// single-display caller that never calls [`Self::set_display_active_space`]
+    /// keeps working).
+    pub fn flush_all_active_to(&self, sink: &mut impl LayoutSink) -> usize {
+        if self.display_active_space.is_empty() {
+            return self.flush_active_to(sink);
+        }
+        let frames = self.flush_all_active();
         let count = frames.len();
         for frame in frames {
             sink.move_window(frame);

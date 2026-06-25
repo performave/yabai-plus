@@ -31,7 +31,7 @@ pub use display::{MacDisplay, active_displays};
 #[cfg(target_os = "macos")]
 pub use observe::{ObservedEvent, observe_pid};
 #[cfg(target_os = "macos")]
-pub use screen::main_visible_frame;
+pub use screen::{main_visible_frame, visible_frame_for_display};
 #[cfg(target_os = "macos")]
 pub use space::{
     current_space_for_display, mission_control_spaces, spaces_for_display, spaces_for_window,

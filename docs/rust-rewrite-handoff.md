@@ -23,10 +23,10 @@ reconstructing context.
   attribute with a fullscreen AX registry mirroring minimize. The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
   `window_created`, `window_destroyed`, `window_focused`, `window_minimized`,
-  `window_deminimized`, `application_launched/terminated`, and `space_changed`
-  actions, with `app`/`title` regex filters now honored for the event categories
-  that carry that metadata. `mouse_follows_focus` warps the cursor to the focused
-  window on focus.
+  `window_deminimized`, `window_title_changed`, `application_launched/terminated`,
+  and `space_changed` actions, with `app`/`title` regex filters now honored for
+  the event categories that carry that metadata. `mouse_follows_focus` warps the
+  cursor to the focused window on focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
@@ -41,6 +41,28 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-25 (session 15) — title-change signals
+
+- The Rust WM daemon now fires live `window_title_changed` signals. The AX
+  observer registers `AXTitleChanged` on existing windows and newly-created
+  windows, forwarding a typed `ObservedEvent::WindowTitleChanged`; the existing
+  reconciliation path then diffs the full AX window metadata and fires
+  `SIGNAL_WINDOW_TITLE_CHANGED` only when an already-known window's title changes.
+  New-window initial titles still fire only `window_created`, avoiding a false
+  title-change signal during first discovery.
+- Signal context matches the C event category for title changes: actions receive
+  `YABAI_WINDOW_ID`, and `app`/`title`/`active=yes|no` filters evaluate against
+  the updated title and the current focused-window state. Added a pure runtime
+  regression covering `window_title_changed` app/title/active filtering.
+- Live remote verification on `ssh student@student` with the WM daemon on socket
+  `/tmp/yabai_title.socket`: registered a Finder-filtered
+  `window_title_changed` signal with `title='^Documents$'`, created a temporary
+  Finder window, changed its target to `Documents`, and `/tmp/title.log` recorded
+  `title:1051`. The temporary window, daemon, socket, log files, and deployed
+  `/tmp/yabai-title-1782413837` binary were cleaned up.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (145 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-25 (session 14) — minimize/deminimize signals
 
@@ -1366,8 +1388,8 @@ changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
 float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/layout;
-`signal` add/list/remove with live firing on focus/app/space/minimize/deminimize
-events and app/title filters for focused-window/application events;
+`signal` add/list/remove with live firing on focus/app/space/minimize/deminimize/
+title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
@@ -1401,9 +1423,9 @@ events and app/title filters for focused-window/application events;
    Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters
    (including `!=` exclusion), and live firing of `window_created`,
    `window_destroyed`, `window_focused`, `application_launched/terminated`,
-   `space_changed`, `window_minimized`, and `window_deminimized` (with `YABAI_*`
-   env vars). Still to do: remaining signal event categories
-   (`window_moved/resized/title_changed`, application
+   `space_changed`, `window_minimized`, `window_deminimized`, and
+   `window_title_changed` (with `YABAI_*` env vars). Still to do: remaining signal
+   event categories (`window_moved/resized`, application
    activated/deactivated/hidden/visible/front-switched, space/display/
    Mission Control/system events) and more live verification of app-filtered
    launch/terminate events from a GUI-launched daemon session.

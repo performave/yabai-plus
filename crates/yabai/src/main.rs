@@ -1240,6 +1240,16 @@ fn sync_window_lifecycle_signals(
                 Some(meta.title.as_str()),
                 None,
             );
+        } else if known.get(&id).is_some_and(|old| old.title != meta.title) {
+            let active = runtime.state.focused_window_id() == Some(id);
+            fire_signals(
+                runtime,
+                SignalEvent::WindowTitleChanged,
+                &[("YABAI_WINDOW_ID", id.to_string())],
+                Some(meta.app.as_str()),
+                Some(meta.title.as_str()),
+                Some(active),
+            );
         }
         current.insert(id, meta);
     }

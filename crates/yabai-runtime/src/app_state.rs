@@ -2675,6 +2675,17 @@ mod tests {
                 "action=echo demin",
             ]))
             .unwrap();
+        state
+            .handle_tokens(&toks(&[
+                "signal",
+                "--add",
+                "event=window_title_changed",
+                "app=^Finder$",
+                "title=Renamed",
+                "active=no",
+                "action=echo title",
+            ]))
+            .unwrap();
 
         assert_eq!(
             state.signal_actions_for_context(
@@ -2731,6 +2742,25 @@ mod tests {
                 Some(false),
             ),
             vec!["echo demin".to_string()]
+        );
+        assert_eq!(
+            state.signal_actions_for_context(
+                SignalEvent::WindowTitleChanged,
+                Some("Finder"),
+                Some("Renamed"),
+                Some(false),
+            ),
+            vec!["echo title".to_string()]
+        );
+        assert!(
+            state
+                .signal_actions_for_context(
+                    SignalEvent::WindowTitleChanged,
+                    Some("Finder"),
+                    Some("Renamed"),
+                    Some(true),
+                )
+                .is_empty()
         );
         assert!(
             state

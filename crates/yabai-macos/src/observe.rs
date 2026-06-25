@@ -2,8 +2,9 @@
 //!
 //! `ax.rs` *reads and writes* window state on demand; this module *listens* for
 //! the system telling us state changed: an app opened a window, a window was
-//! destroyed, focus moved. It wraps `AXObserver` (create + add-notification +
-//! run-loop source) and turns each callback into a typed [`ObservedEvent`].
+//! destroyed, focus moved, or a title changed. It wraps `AXObserver` (create +
+//! add-notification + run-loop source) and turns each callback into a typed
+//! [`ObservedEvent`].
 //!
 //! The C daemon runs these observers on its single event-loop thread; here a
 //! caller pumps a `CFRunLoop` (typically on a dedicated thread) and receives
@@ -100,6 +101,8 @@ pub enum ObservedEvent {
     WindowDestroyed { pid: i32, window_id: Option<u32> },
     /// The app's focused window changed.
     FocusedWindowChanged { pid: i32, window_id: Option<u32> },
+    /// A window's AXTitle changed.
+    WindowTitleChanged { pid: i32, window_id: Option<u32> },
 }
 
 impl ObservedEvent {
@@ -108,7 +111,8 @@ impl ObservedEvent {
         match self {
             ObservedEvent::WindowCreated { pid, .. }
             | ObservedEvent::WindowDestroyed { pid, .. }
-            | ObservedEvent::FocusedWindowChanged { pid, .. } => *pid,
+            | ObservedEvent::FocusedWindowChanged { pid, .. }
+            | ObservedEvent::WindowTitleChanged { pid, .. } => *pid,
         }
     }
 }
@@ -167,6 +171,7 @@ struct ObserverCtx {
     tx: Sender<ObservedEvent>,
     observer: AXObserverRef,
     destroyed_note: CFStringRef,
+    title_note: CFStringRef,
 }
 
 /// The single C callback: classifies the notification and forwards an event.
@@ -190,11 +195,12 @@ extern "C" fn observer_callback(
 
     let event = match name.as_str() {
         "AXWindowCreated" => {
-            // Start watching the new window for destruction too.
-            // SAFETY: `ctx.observer` and `ctx.destroyed_note` are live; `element`
-            // is the newly created window; `refcon` is the same shared context.
+            // Start watching the new window for destruction and title changes too.
+            // SAFETY: `ctx.observer` and notification names are live; `element` is
+            // the newly created window; `refcon` is the same shared context.
             unsafe {
                 AXObserverAddNotification(ctx.observer, element, ctx.destroyed_note, refcon);
+                AXObserverAddNotification(ctx.observer, element, ctx.title_note, refcon);
             }
             ObservedEvent::WindowCreated {
                 pid: ctx.pid,
@@ -209,6 +215,10 @@ extern "C" fn observer_callback(
             pid: ctx.pid,
             window_id: id,
         },
+        "AXTitleChanged" => ObservedEvent::WindowTitleChanged {
+            pid: ctx.pid,
+            window_id: id,
+        },
         _ => return,
     };
     let _ = ctx.tx.send(event);
@@ -219,7 +229,7 @@ extern "C" fn observer_callback(
 /// the observer could not be created; run it on a dedicated thread.
 ///
 /// Watches app-level window-created and focused-window-changed, and per-window
-/// destruction (for windows present at start and any created later).
+/// destruction/title changes (for windows present at start and any created later).
 pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
     // SAFETY: standard AX observer setup. `AXObserverCreate` returns 0 on
     // success and writes the observer; every CF/AX ref created here is released
@@ -240,6 +250,7 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
         let created_note = cfstring(b"AXWindowCreated\0");
         let destroyed_note = cfstring(b"AXUIElementDestroyed\0");
         let focus_note = cfstring(b"AXFocusedWindowChanged\0");
+        let title_note = cfstring(b"AXTitleChanged\0");
 
         // The context must outlive the run loop; it stays on this stack frame,
         // which blocks in CFRunLoopRun below and never returns on success.
@@ -248,6 +259,7 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
             tx,
             observer,
             destroyed_note,
+            title_note,
         });
         let refcon = (&*ctx as *const ObserverCtx) as *mut c_void;
 
@@ -255,7 +267,7 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
         AXObserverAddNotification(observer, app, created_note, refcon);
         AXObserverAddNotification(observer, app, focus_note, refcon);
 
-        // Watch the windows that already exist for destruction.
+        // Watch the windows that already exist for destruction and title changes.
         let windows_attr = cfstring(b"AXWindows\0");
         let mut windows: CFTypeRef = std::ptr::null();
         if AXUIElementCopyAttributeValue(app, windows_attr, &mut windows) == 0 && !windows.is_null()
@@ -265,6 +277,7 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
                 let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
                 if !window.is_null() {
                     AXObserverAddNotification(observer, window, destroyed_note, refcon);
+                    AXObserverAddNotification(observer, window, title_note, refcon);
                 }
             }
             CFRelease(windows);
@@ -273,8 +286,9 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
         CFRelease(created_note);
         CFRelease(focus_note);
 
-        // Pump notifications. `ctx` (owning `tx`/`destroyed_note`) and `app` stay
-        // alive because they are owned by this stack frame, which blocks here.
+        // Pump notifications. `ctx` (owning `tx` and per-window notification
+        // names) and `app` stay alive because they are owned by this stack frame,
+        // which blocks here.
         let run_loop = CFRunLoopGetCurrent();
         let source = AXObserverGetRunLoopSource(observer);
         CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
@@ -282,6 +296,7 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
 
         // Only reached if the run loop is stopped externally; tidy up.
         CFRelease(ctx.destroyed_note);
+        CFRelease(ctx.title_note);
         CFRelease(app);
         drop(ctx);
         Ok(())

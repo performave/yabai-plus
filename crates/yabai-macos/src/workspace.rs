@@ -7,7 +7,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::ffi::c_void;
+use std::ffi::{CStr, c_void};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::mpsc::Sender;
@@ -44,11 +44,11 @@ unsafe extern "C" {
 }
 
 /// A typed `NSWorkspace` notification for the daemon event loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceEvent {
     ActiveSpaceChanged,
-    ApplicationLaunched { pid: i32 },
-    ApplicationTerminated { pid: i32 },
+    ApplicationLaunched { pid: i32, app: String },
+    ApplicationTerminated { pid: i32, app: String },
 }
 
 fn send_workspace_event(event: WorkspaceEvent) {
@@ -58,10 +58,10 @@ fn send_workspace_event(event: WorkspaceEvent) {
     let Ok(mut senders) = senders.lock() else {
         return;
     };
-    senders.retain(|tx| tx.send(event).is_ok());
+    senders.retain(|tx| tx.send(event.clone()).is_ok());
 }
 
-fn notification_application_pid(notification: Id) -> Option<i32> {
+fn notification_application(notification: Id) -> Option<(i32, String)> {
     if notification.is_null() {
         return None;
     }
@@ -85,8 +85,29 @@ fn notification_application_pid(notification: Id) -> Option<i32> {
             return None;
         }
         let pid: i32 = msg0(app, sel(c"processIdentifier"));
-        (pid > 0).then_some(pid)
+        if pid <= 0 {
+            return None;
+        }
+        let name = nsstring_to_string(msg0(app, sel(c"localizedName"))).unwrap_or_default();
+        Some((pid, name))
     }
+}
+
+unsafe fn nsstring_to_string(value: Id) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: `value` is an NSString from NSRunningApplication; UTF8String returns
+    // a borrowed NUL-terminated pointer valid while the NSString lives.
+    let ptr: *const c_char = unsafe { msg0(value, sel(c"UTF8String")) };
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `UTF8String` returned a valid NUL-terminated C string.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 extern "C" fn active_space_did_change(_this: Id, _cmd: Sel, _notification: Id) {
@@ -94,14 +115,14 @@ extern "C" fn active_space_did_change(_this: Id, _cmd: Sel, _notification: Id) {
 }
 
 extern "C" fn application_did_launch(_this: Id, _cmd: Sel, notification: Id) {
-    if let Some(pid) = notification_application_pid(notification) {
-        send_workspace_event(WorkspaceEvent::ApplicationLaunched { pid });
+    if let Some((pid, app)) = notification_application(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationLaunched { pid, app });
     }
 }
 
 extern "C" fn application_did_terminate(_this: Id, _cmd: Sel, notification: Id) {
-    if let Some(pid) = notification_application_pid(notification) {
-        send_workspace_event(WorkspaceEvent::ApplicationTerminated { pid });
+    if let Some((pid, app)) = notification_application(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationTerminated { pid, app });
     }
 }
 

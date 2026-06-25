@@ -23,11 +23,13 @@ reconstructing context.
   attribute with a fullscreen AX registry mirroring minimize. The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
   `window_focused`, `application_launched/terminated`, and `space_changed`
-  actions. `mouse_follows_focus` warps the cursor to the focused window on focus.
+  actions, with `app`/`title` regex filters now honored for the event categories
+  that carry that metadata. `mouse_follows_focus` warps the cursor to the focused
+  window on focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 143 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 145 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-25.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -38,6 +40,35 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-25 (session 12) — signal app/title filters
+
+- The Rust `signal` runtime now honors `app`/`title` regex filters instead of only
+  storing them. `yabai-core::Signal` preserves `app!=` / `title!=` exclusion
+  flags; `yabai-runtime` compiles signal regexes at `signal --add` time with the
+  C-style error text (`invalid regex pattern '...' for key '...'`) and evaluates
+  them by the same event categories as `event_signal_filter` in
+  `src/event_signal.c`. Events without app/title/active metadata still use the
+  no-context path.
+- The WM daemon passes focused-window metadata into `window_focused` signal
+  dispatch, so live `signal --add event=window_focused app=... title=...` filters
+  work against the `WindowMeta` captured during reconcile. `WorkspaceEvent` now
+  carries the `NSRunningApplication.localizedName` for launch/terminate events so
+  app-filtered application signals have the needed context when those
+  notifications arrive.
+- Live remote verification on `ssh student@student` with the WM daemon on isolated
+  socket `/tmp/yabai_rsig.socket`: after the remote was unlocked, the daemon saw
+  10 Finder windows. A focused-window signal with `app='^Finder$' title='MacBook
+  Air'` fired on `window 766 --focus`; negative filters `app='^Safari$'` and
+  `title='NoSuchTitle'` did not; exclusion filters `app!='^Safari$'
+  title!='NoSuchTitle'` fired, while `app!='^Finder$'` and `title!='MacBook Air'`
+  did not. An `env>/tmp/rsig-env` action confirmed `YABAI_WINDOW_ID=766` was
+  exported. Application-launch filter verification was attempted with Calculator
+  and TextEdit, but the SSH-launched daemon did not receive NSWorkspace launch
+  notifications in that run even though TextEdit started; treat that as an
+  observer/environment caveat, not a filter failure.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (145 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-25 (session 11) — rule domain manage effects
 
@@ -1203,8 +1234,9 @@ chronological log and may describe earlier states.
     `Message`. `ParseError` `Display` text matches the C `daemon_fail` strings.
   - `signal.rs`: `SignalEvent` (all `enum signal_type` variants in order) +
     `Signal` + `Signal::from_key_values` (faithful `handle_domain_signal`
-    validation). The runtime stores/serializes/fires these; `app`/`title` regex
-    matching is deferred.
+    validation, including `app!=`/`title!=` exclusion flags). The runtime
+    stores/serializes/fires these and applies `app`/`title` regex filters for the
+    event categories that carry that metadata.
 - `crates/yabai-ipc` (6 tests) — client wire framing + `send_message`; the
   `crates/yabai` binary `-m` path uses it and talks to the live C daemon.
 - `crates/yabai-runtime` (31 tests) — the control plane, depends on `yabai-core`:
@@ -1283,8 +1315,9 @@ changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
 float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/layout;
-`signal` add/list/remove with live firing on focus/app/space events;
-`mouse_follows_focus` cursor centering on focus.
+`signal` add/list/remove with live firing on focus/app/space events and app/title
+filters for focused-window/application events; `mouse_follows_focus` cursor
+centering on focus.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
@@ -1314,12 +1347,12 @@ float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/la
    mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    still needs a CGEventTap.
-   Signals: done — `signal --add/--list/--remove` and live firing of
-   `window_focused`, `application_launched/terminated`, `space_changed` (with
-   `YABAI_*` env vars). Still to do: signal `app`/`title` regex filters (needs a
-   regex engine), the remaining signal events (`window_created/destroyed` etc.,
-   blocked on disambiguating reconcile churn), and `rule` execution (also wants
-   regex for app/title matching).
+   Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters
+   (including `!=` exclusion), and live firing of `window_focused`,
+   `application_launched/terminated`, `space_changed` (with `YABAI_*` env vars).
+   Still to do: the remaining signal events (`window_created/destroyed` etc.,
+   blocked on disambiguating reconcile churn) and more live verification of
+   app-filtered launch/terminate events from a GUI-launched daemon session.
 5. Then Phases 7-9: scripting addition (`yabai-sa`, currently empty — required
    for space management / cross-space moves on modern macOS), OSAX spike, and
    production packaging (wire the Rust binary into `make`, signing, notarization,

@@ -1133,8 +1133,18 @@ fn resolve_space_target(
 /// `/usr/bin/env sh -c <action>` with the given `YABAI_*` env vars set, mirroring
 /// the C `event_signal_flush` (`fork` + `execvp`). Fire-and-forget: a child is
 /// spawned and not awaited, and spawn failures are ignored, like the daemon.
-fn fire_signals(runtime: &Runtime<AxSink>, event: SignalEvent, env: &[(&str, String)]) {
-    for action in runtime.state.signal_actions_for(event) {
+fn fire_signals(
+    runtime: &Runtime<AxSink>,
+    event: SignalEvent,
+    env: &[(&str, String)],
+    app: Option<&str>,
+    title: Option<&str>,
+    active: Option<bool>,
+) {
+    for action in runtime
+        .state
+        .signal_actions_for_context(event, app, title, active)
+    {
         let mut cmd = std::process::Command::new("/usr/bin/env");
         cmd.arg("sh").arg("-c").arg(&action);
         for (key, value) in env {
@@ -1504,10 +1514,14 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // click). De-duplicated against the command path below.
                     if last_focus_signal != Some(window_id) {
                         last_focus_signal = Some(window_id);
+                        let meta = runtime.state.window_meta(window_id);
                         fire_signals(
                             &runtime,
                             SignalEvent::WindowFocused,
                             &[("YABAI_WINDOW_ID", window_id.to_string())],
+                            meta.map(|m| m.app.as_str()),
+                            meta.map(|m| m.title.as_str()),
+                            None,
                         );
                     }
                 }
@@ -1523,16 +1537,22 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             &runtime,
                             SignalEvent::SpaceChanged,
                             &[("YABAI_SPACE_ID", sid.to_string())],
+                            None,
+                            None,
+                            None,
                         );
                     }
                 }
-                WorkspaceEvent::ApplicationLaunched { pid } => {
+                WorkspaceEvent::ApplicationLaunched { pid, app } => {
                     // Fire the signal regardless of tiling mode; it is about the
                     // event, not whether this daemon manages the app.
                     fire_signals(
                         &runtime,
                         SignalEvent::ApplicationLaunched,
                         &[("YABAI_PROCESS_ID", pid.to_string())],
+                        Some(&app),
+                        None,
+                        None,
                     );
                     if is_all && observed.insert(pid) {
                         spawn_observer(pid, &tx);
@@ -1540,11 +1560,14 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         reconcile_pid(&mut runtime, &mut managed, pid);
                     }
                 }
-                WorkspaceEvent::ApplicationTerminated { pid } => {
+                WorkspaceEvent::ApplicationTerminated { pid, app } => {
                     fire_signals(
                         &runtime,
                         SignalEvent::ApplicationTerminated,
                         &[("YABAI_PROCESS_ID", pid.to_string())],
+                        Some(&app),
+                        None,
+                        None,
                     );
                     if observed.remove(&pid) {
                         for window_id in minimized_pids
@@ -1625,10 +1648,14 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         // with the observer path via `last_focus_signal`.
                         if last_focus_signal != Some(window_id) {
                             last_focus_signal = Some(window_id);
+                            let meta = runtime.state.window_meta(window_id);
                             fire_signals(
                                 &runtime,
                                 SignalEvent::WindowFocused,
                                 &[("YABAI_WINDOW_ID", window_id.to_string())],
+                                meta.map(|m| m.app.as_str()),
+                                meta.map(|m| m.title.as_str()),
+                                None,
                             );
                         }
                     }

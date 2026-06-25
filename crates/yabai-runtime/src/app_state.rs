@@ -109,9 +109,9 @@ pub struct AppState {
     /// current space simultaneously, so the daemon flushes all of these, while
     /// `active_space` (the focused display's space) drives command dispatch.
     display_active_space: HashMap<u32, u64>,
-    /// Registered `signal`s in insertion order. The pure layer stores them and
-    /// resolves which fire for an event; the daemon runs the action commands.
-    signals: Vec<Signal>,
+    /// Registered `signal`s in insertion order, with optional app/title regexes
+    /// pre-compiled. The daemon runs the matching action commands.
+    signals: Vec<CompiledSignal>,
     /// Registered window `rule`s in insertion order, each with its filter
     /// patterns pre-compiled. The daemon evaluates these against new windows.
     rules: Vec<CompiledRule>,
@@ -127,6 +127,65 @@ struct CompiledRule {
     title: Option<Regex>,
     role: Option<Regex>,
     subrole: Option<Regex>,
+}
+
+#[derive(Debug)]
+struct CompiledSignal {
+    signal: Signal,
+    app: Option<Regex>,
+    title: Option<Regex>,
+}
+
+impl CompiledSignal {
+    fn matches(
+        &self,
+        event: SignalEvent,
+        app: Option<&str>,
+        title: Option<&str>,
+        active: Option<bool>,
+    ) -> bool {
+        match event {
+            SignalEvent::ApplicationLaunched
+            | SignalEvent::ApplicationActivated
+            | SignalEvent::ApplicationDeactivated
+            | SignalEvent::ApplicationVisible => self.app_matches(app),
+            SignalEvent::ApplicationTerminated
+            | SignalEvent::ApplicationHidden
+            | SignalEvent::WindowDestroyed => self.app_matches(app) && self.active_matches(active),
+            SignalEvent::WindowCreated
+            | SignalEvent::WindowFocused
+            | SignalEvent::WindowDeminimized => self.app_matches(app) && self.title_matches(title),
+            SignalEvent::WindowMoved
+            | SignalEvent::WindowResized
+            | SignalEvent::WindowMinimized
+            | SignalEvent::WindowTitleChanged => {
+                self.app_matches(app) && self.title_matches(title) && self.active_matches(active)
+            }
+            _ => true,
+        }
+    }
+
+    fn app_matches(&self, value: Option<&str>) -> bool {
+        signal_filter_ok(self.app.as_ref(), self.signal.app_exclude, value)
+    }
+
+    fn title_matches(&self, value: Option<&str>) -> bool {
+        signal_filter_ok(self.title.as_ref(), self.signal.title_exclude, value)
+    }
+
+    fn active_matches(&self, active: Option<bool>) -> bool {
+        match self.signal.active {
+            None => true,
+            Some(expected) => active == Some(expected),
+        }
+    }
+}
+
+fn signal_filter_ok(pattern: Option<&Regex>, exclude: bool, value: Option<&str>) -> bool {
+    match pattern {
+        None => true,
+        Some(re) => re.is_match(value.unwrap_or_default()) != exclude,
+    }
 }
 
 impl CompiledRule {
@@ -150,6 +209,21 @@ fn filter_ok(pattern: Option<&Regex>, exclude: bool, value: &str) -> bool {
         None => true,
         Some(re) => re.is_match(value) != exclude,
     }
+}
+
+fn compile_signal(signal: Signal) -> Result<CompiledSignal, String> {
+    let app = compile_signal_regex(signal.app.as_deref(), "app")?;
+    let title = compile_signal_regex(signal.title.as_deref(), "title")?;
+    Ok(CompiledSignal { signal, app, title })
+}
+
+fn compile_signal_regex(pattern: Option<&str>, key: &str) -> Result<Option<Regex>, String> {
+    pattern
+        .map(|pattern| {
+            Regex::new(pattern)
+                .map_err(|_| format!("invalid regex pattern '{pattern}' for key '{key}'\n"))
+        })
+        .transpose()
 }
 
 /// Lightweight per-window metadata the macOS layer supplies for queries
@@ -284,6 +358,10 @@ impl AppState {
     /// The owning process id for a window, from its stored metadata.
     pub fn window_pid(&self, window_id: u32) -> Option<i32> {
         self.window_meta.get(&window_id).map(|meta| meta.pid)
+    }
+
+    pub fn window_meta(&self, window_id: u32) -> Option<&WindowMeta> {
+        self.window_meta.get(&window_id)
     }
 
     /// Record (or replace) a window's macOS metadata for queries.
@@ -677,11 +755,13 @@ impl AppState {
         match cmd {
             SignalCommand::Add(pairs) => {
                 let signal = Signal::from_key_values(&pairs)?;
+                let compiled = compile_signal(signal)?;
                 // `event_signal_add` drops any prior signal with the same label.
-                if let Some(label) = &signal.label {
-                    self.signals.retain(|s| s.label.as_ref() != Some(label));
+                if let Some(label) = &compiled.signal.label {
+                    self.signals
+                        .retain(|s| s.signal.label.as_ref() != Some(label));
                 }
-                self.signals.push(signal);
+                self.signals.push(compiled);
                 Ok(None)
             }
             SignalCommand::Remove(selector) => self.remove_signal(selector.as_ref()),
@@ -707,7 +787,7 @@ impl AppState {
                 match self
                     .signals
                     .iter()
-                    .position(|s| s.label.as_deref() == Some(label))
+                    .position(|s| s.signal.label.as_deref() == Some(label))
                 {
                     Some(pos) => {
                         self.signals.remove(pos);
@@ -727,7 +807,7 @@ impl AppState {
         let mut order = Vec::with_capacity(self.signals.len());
         for event in SignalEvent::ALL {
             for (pos, signal) in self.signals.iter().enumerate() {
-                if signal.event == event {
+                if signal.signal.event == event {
                     order.push(pos);
                 }
             }
@@ -744,7 +824,7 @@ impl AppState {
             if index > 0 {
                 out.push(',');
             }
-            let s = &self.signals[pos];
+            let s = &self.signals[pos].signal;
             let active = match s.active {
                 None => "null",
                 Some(true) => "true",
@@ -764,13 +844,26 @@ impl AppState {
     }
 
     /// The action commands of every signal subscribed to `event`, in registration
-    /// order. The daemon runs each with the appropriate `YABAI_*` env vars. The
-    /// `app`/`title` regex filters are not applied yet (see [`Signal`]).
+    /// order. This no-context form is correct for events whose C signal filter
+    /// ignores app/title/active fields (e.g. `space_changed`).
     pub fn signal_actions_for(&self, event: SignalEvent) -> Vec<String> {
+        self.signal_actions_for_context(event, None, None, None)
+    }
+
+    /// The action commands of every signal subscribed to `event` whose filters
+    /// match the supplied event context. Event categories mirror
+    /// `event_signal_filter` in the C daemon.
+    pub fn signal_actions_for_context(
+        &self,
+        event: SignalEvent,
+        app: Option<&str>,
+        title: Option<&str>,
+        active: Option<bool>,
+    ) -> Vec<String> {
         self.signals
             .iter()
-            .filter(|s| s.event == event)
-            .map(|s| s.action.clone())
+            .filter(|s| s.signal.event == event && s.matches(event, app, title, active))
+            .map(|s| s.signal.action.clone())
             .collect()
     }
 
@@ -2536,5 +2629,83 @@ mod tests {
                 .unwrap_err()
                 .contains("signal with index '9' not found")
         );
+    }
+
+    #[test]
+    fn signal_filters_match_c_event_categories() {
+        let mut state = AppState::new();
+        state
+            .handle_tokens(&toks(&[
+                "signal",
+                "--add",
+                "event=window_focused",
+                "app=^Finder$",
+                "title!=Scratch",
+                "action=echo focus",
+            ]))
+            .unwrap();
+        state
+            .handle_tokens(&toks(&[
+                "signal",
+                "--add",
+                "event=application_launched",
+                "app=^Finder$",
+                "action=echo app",
+            ]))
+            .unwrap();
+
+        assert_eq!(
+            state.signal_actions_for_context(
+                SignalEvent::WindowFocused,
+                Some("Finder"),
+                Some("Downloads"),
+                None,
+            ),
+            vec!["echo focus".to_string()]
+        );
+        assert!(
+            state
+                .signal_actions_for_context(
+                    SignalEvent::WindowFocused,
+                    Some("Finder"),
+                    Some("Scratch"),
+                    None,
+                )
+                .is_empty()
+        );
+        assert_eq!(
+            state.signal_actions_for_context(
+                SignalEvent::ApplicationLaunched,
+                Some("Finder"),
+                None,
+                None,
+            ),
+            vec!["echo app".to_string()]
+        );
+        assert!(
+            state
+                .signal_actions_for_context(
+                    SignalEvent::ApplicationLaunched,
+                    Some("Safari"),
+                    None,
+                    None,
+                )
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn signal_add_rejects_invalid_regex() {
+        let mut state = AppState::new();
+        let error = state
+            .handle_tokens(&toks(&[
+                "signal",
+                "--add",
+                "event=window_focused",
+                "app=(",
+                "action=echo nope",
+            ]))
+            .unwrap_err();
+        assert!(error.contains("invalid regex pattern '(' for key 'app'"));
     }
 }

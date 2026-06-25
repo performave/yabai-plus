@@ -857,10 +857,13 @@ fn is_window_minimize(tokens: &[String]) -> bool {
     )
 }
 
-/// Extract the numeric target from a standalone `window <id> --deminimize`.
-/// Minimized windows are no longer in the layout tree, so non-id selectors cannot
-/// be resolved without a broader live window registry.
-fn window_deminimize_target(tokens: &[String]) -> Option<Result<u32, String>> {
+/// Extract the target from a standalone `window <sel> --deminimize`. Minimized
+/// windows are no longer in the layout tree, so only numeric ids and registry
+/// order selectors are resolved here.
+fn window_deminimize_target(
+    tokens: &[String],
+    minimized_ids: &[u32],
+) -> Option<Result<u32, String>> {
     let Ok(Message::Window(cmd)) = parse_message(tokens) else {
         return None;
     };
@@ -868,11 +871,29 @@ fn window_deminimize_target(tokens: &[String]) -> Option<Result<u32, String>> {
         return None;
     };
 
-    Some(match cmd.target {
-        Some(Selector::Index(id)) => Ok(id),
-        Some(_) => Err("window --deminimize currently requires a numeric window id.".to_string()),
+    Some(resolve_deminimize_target(
+        cmd.target.as_ref(),
+        minimized_ids,
+    ))
+}
+
+fn resolve_deminimize_target(
+    target: Option<&Selector>,
+    minimized_ids: &[u32],
+) -> Result<u32, String> {
+    match target {
+        Some(Selector::Index(id)) => Ok(*id),
+        Some(Selector::First) => minimized_ids
+            .first()
+            .copied()
+            .ok_or_else(|| "could not locate a minimized window.".to_string()),
+        Some(Selector::Last) => minimized_ids
+            .last()
+            .copied()
+            .ok_or_else(|| "could not locate a minimized window.".to_string()),
+        Some(_) => Err("window --deminimize selector is not yet supported.".to_string()),
         None => Err("window --deminimize requires a window id.".to_string()),
-    })
+    }
 }
 
 /// Intercept `window <id> --deminimize`: the pure core intentionally drops
@@ -884,7 +905,8 @@ fn try_window_deminimize(
     minimized_pids: &mut HashMap<u32, i32>,
     tokens: &[String],
 ) -> Option<Response> {
-    let window_id = match window_deminimize_target(tokens)? {
+    let minimized_ids = runtime.sink.minimized_window_ids();
+    let window_id = match window_deminimize_target(tokens, &minimized_ids)? {
         Ok(window_id) => window_id,
         Err(error) => return Some(Err(error)),
     };
@@ -1563,18 +1585,44 @@ mod tests {
     }
 
     #[test]
-    fn window_deminimize_target_requires_numeric_target() {
-        let target =
-            window_deminimize_target(&["window".into(), "42".into(), "--deminimize".into()])
-                .unwrap();
+    fn window_deminimize_target_resolves_supported_selectors() {
+        let target = window_deminimize_target(
+            &["window".into(), "42".into(), "--deminimize".into()],
+            &[7, 9],
+        )
+        .unwrap();
         assert_eq!(target, Ok(42));
 
-        let missing = window_deminimize_target(&["window".into(), "--deminimize".into()]).unwrap();
+        let first = window_deminimize_target(
+            &["window".into(), "first".into(), "--deminimize".into()],
+            &[7, 9],
+        )
+        .unwrap();
+        assert_eq!(first, Ok(7));
+
+        let last = window_deminimize_target(
+            &["window".into(), "last".into(), "--deminimize".into()],
+            &[7, 9],
+        )
+        .unwrap();
+        assert_eq!(last, Ok(9));
+
+        let missing =
+            window_deminimize_target(&["window".into(), "--deminimize".into()], &[]).unwrap();
         assert!(missing.unwrap_err().contains("requires a window id"));
 
-        let non_numeric =
-            window_deminimize_target(&["window".into(), "first".into(), "--deminimize".into()])
-                .unwrap();
-        assert!(non_numeric.unwrap_err().contains("numeric window id"));
+        let empty_first = window_deminimize_target(
+            &["window".into(), "first".into(), "--deminimize".into()],
+            &[],
+        )
+        .unwrap();
+        assert!(empty_first.unwrap_err().contains("minimized window"));
+
+        let unsupported = window_deminimize_target(
+            &["window".into(), "next".into(), "--deminimize".into()],
+            &[7, 9],
+        )
+        .unwrap();
+        assert!(unsupported.unwrap_err().contains("not yet supported"));
     }
 }

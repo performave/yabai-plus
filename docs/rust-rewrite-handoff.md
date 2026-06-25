@@ -16,9 +16,9 @@ reconstructing context.
   first pure query serializer for windows/spaces/displays; and `yabai-macos` has
   the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API
   plus live CoreGraphics display discovery, display/space topology reconciliation,
-  and AX window diagnostics. Live `window --deminimize` works for numeric window
-  ids restored from the daemon's minimized-window AX registry. 123 workspace
-  tests pass. The shipped C `make` flow is unchanged.
+  and AX window diagnostics. Live `window --deminimize` works for numeric,
+  `first`, and `last` selectors restored from the daemon's minimized-window AX
+  registry. 123 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-25.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -65,22 +65,27 @@ reconstructing context.
 
 ### 2026-06-25 (session 6) — window deminimize
 
-- `window <id> --deminimize` now works in the Rust WM daemon for numeric window
-  ids. Minimized windows intentionally leave the pure BSP trees, so `AxSink` now
-  keeps a separate minimized AX-element registry when `window --minimize` succeeds
-  instead of dropping the element during reconcile. The daemon also records the
-  minimized window's pid so deminimize can clear `AXMinimized` and reconcile that
-  app back into the tiled layout.
+- `window <sel> --deminimize` now works in the Rust WM daemon for numeric ids plus
+  `first`/`last` over the minimized-window registry. Minimized windows
+  intentionally leave the pure BSP trees, so `AxSink` now keeps a separate
+  minimized AX-element registry when `window --minimize` succeeds instead of
+  dropping the element during reconcile. The daemon also records the minimized
+  window's pid so deminimize can clear `AXMinimized` and reconcile that app back
+  into the tiled layout.
 - The pure layout model is unchanged: minimized windows are absent from
   `query --windows` and space window lists until AX reports them tileable again.
-  Non-numeric deminimize selectors are still deferred because minimized windows do
-  not have enough live query state outside the sink registry yet.
+  Other deminimize selectors (`next`/`prev`/directions/recent/mouse/labels) are
+  still deferred because minimized windows do not have enough live query state
+  outside the sink registry yet.
 - Live remote verification on macOS 26.2: started `--experimental-rust-wm-daemon`
   on isolated socket `/tmp/yabai_rtest.socket`, focused Finder window id 186 via
   the daemon, ran `window --minimize` and confirmed id 186 disappeared from
   `query --windows`, then ran `window 186 --deminimize` and confirmed id 186
   returned to the tiled query with focus. A repeated deminimize correctly reports
   `window with id '186' is not minimized.`
+- Follow-up remote verification: minimized two Finder windows (`781`, `186`), ran
+  `window first --deminimize` and confirmed `186` returned, then ran
+  `window last --deminimize` and confirmed `781` returned.
 - Verification: `cargo fmt --all`; `cargo test --workspace` (123 tests);
   `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
@@ -1128,10 +1133,11 @@ focus (raise), swap, warp, minimize/deminimize, toggle float/zoom; space focus
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise
    (`AxSink::focus_window`), `--warp`, `--toggle float`, `--toggle
-   zoom-fullscreen`/`zoom-parent`, `--minimize`, numeric-id `--deminimize`;
-   `--swap` already worked. Still to do: non-numeric deminimize selectors, focus
-   without-raise, native fullscreen, sticky/scratchpad, opacity/layer; mouse drag
-   move/resize/swap; rules + signals execution.
+   zoom-fullscreen`/`zoom-parent`, `--minimize`, `--deminimize` for numeric ids
+   and `first`/`last`; `--swap` already worked. Still to do: remaining
+   deminimize selectors, focus without-raise, native fullscreen,
+   sticky/scratchpad, opacity/layer; mouse drag move/resize/swap; rules + signals
+   execution.
 5. Then Phases 7-9: scripting addition (`yabai-sa`, currently empty — required
    for space management / cross-space moves on modern macOS), OSAX spike, and
    production packaging (wire the Rust binary into `make`, signing, notarization,

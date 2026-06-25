@@ -1068,6 +1068,12 @@ impl AxSink {
         self.minimized.contains_key(&window_id)
     }
 
+    pub fn minimized_window_ids(&self) -> Vec<u32> {
+        let mut ids = self.minimized.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Focus a managed window: bring its app to the front with this window key,
     /// then raise the window. Mirrors `window_manager_focus_window_with_raise` —
     /// `_SLPSSetFrontProcessWithOptions` + the synthesized make-key-window event

@@ -17,8 +17,8 @@ use yabai_macos::{
     application_pids_with_windows, current_space_for_display, cursor_display_id, cursor_location,
     display_for_space, focused_window, focused_window_diagnostics, main_visible_frame,
     mission_control_spaces, move_focused_window, move_pid_window, observe_pid, observe_workspace,
-    regular_application_pids, set_active_display, spaces_for_display, spaces_for_window,
-    switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
+    pid_window_infos, regular_application_pids, set_active_display, spaces_for_display,
+    spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
     warp_cursor_to_display_center, warp_cursor_to_point, windows_for_pid,
     windows_for_pid_diagnostics,
 };
@@ -934,6 +934,7 @@ fn resolve_deminimize_target(
 fn try_window_deminimize(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
+    signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
     minimized_pids: &mut HashMap<u32, i32>,
     tokens: &[String],
 ) -> Option<Response> {
@@ -961,7 +962,7 @@ fn try_window_deminimize(
         )));
     }
 
-    reconcile_pid(runtime, managed, pid);
+    reconcile_pid(runtime, managed, signaled, pid);
     Some(Ok(None))
 }
 
@@ -1013,6 +1014,7 @@ fn window_fullscreen_exit_target(tokens: &[String], fullscreen_ids: &[u32]) -> O
 fn try_window_native_fullscreen_exit(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
+    signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
     fullscreen_pids: &mut HashMap<u32, i32>,
     tokens: &[String],
 ) -> Option<Response> {
@@ -1035,7 +1037,7 @@ fn try_window_native_fullscreen_exit(
         )));
     }
 
-    reconcile_pid(runtime, managed, pid);
+    reconcile_pid(runtime, managed, signaled, pid);
     Some(Ok(None))
 }
 
@@ -1198,11 +1200,61 @@ fn apply_window_rules(
         .apply_new_window_rules(window_id, app, title, "", "", sid);
 }
 
+fn sync_window_lifecycle_signals(
+    runtime: &Runtime<AxSink>,
+    signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
+    pid: i32,
+) {
+    let Ok(infos) = pid_window_infos(pid) else {
+        return;
+    };
+
+    let known = signaled.entry(pid).or_default();
+    let mut current = HashMap::with_capacity(infos.len());
+    for info in infos {
+        let id = info.id;
+        let meta = WindowMeta {
+            app: info.app,
+            title: info.title,
+            pid: info.pid,
+        };
+        if !known.contains_key(&id) {
+            fire_signals(
+                runtime,
+                SignalEvent::WindowCreated,
+                &[("YABAI_WINDOW_ID", id.to_string())],
+                Some(meta.app.as_str()),
+                Some(meta.title.as_str()),
+                None,
+            );
+        }
+        current.insert(id, meta);
+    }
+
+    for (id, meta) in known.iter() {
+        if !current.contains_key(id) {
+            let active = runtime.state.focused_window_id() == Some(*id);
+            fire_signals(
+                runtime,
+                SignalEvent::WindowDestroyed,
+                &[("YABAI_WINDOW_ID", id.to_string())],
+                Some(meta.app.as_str()),
+                None,
+                Some(active),
+            );
+        }
+    }
+    *known = current;
+}
+
 fn reconcile_pid(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
+    signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
     pid: i32,
 ) {
+    sync_window_lifecycle_signals(runtime, signaled, pid);
+
     let Ok(discovered) = tileable_pid_windows(pid) else {
         return;
     };
@@ -1253,7 +1305,26 @@ fn reconcile_pid(
     runtime.state.flush_all_active_to(&mut runtime.sink);
 }
 
-fn drop_pid(runtime: &mut Runtime<AxSink>, managed: &mut HashMap<i32, HashSet<u32>>, pid: i32) {
+fn drop_pid(
+    runtime: &mut Runtime<AxSink>,
+    managed: &mut HashMap<i32, HashSet<u32>>,
+    signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
+    pid: i32,
+) {
+    if let Some(infos) = signaled.remove(&pid) {
+        for (id, meta) in infos {
+            let active = runtime.state.focused_window_id() == Some(id);
+            fire_signals(
+                runtime,
+                SignalEvent::WindowDestroyed,
+                &[("YABAI_WINDOW_ID", id.to_string())],
+                Some(meta.app.as_str()),
+                None,
+                Some(active),
+            );
+        }
+    }
+
     let Some(ids) = managed.remove(&pid) else {
         return;
     };
@@ -1426,12 +1497,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
 
     let mut runtime = Runtime::new(state, AxSink::new());
     let mut managed: HashMap<i32, HashSet<u32>> = HashMap::new();
+    let mut signaled: HashMap<i32, HashMap<u32, WindowMeta>> = HashMap::new();
     let mut minimized_pids: HashMap<u32, i32> = HashMap::new();
     let mut fullscreen_pids: HashMap<u32, i32> = HashMap::new();
 
     // Initial tile from the current world.
     for pid in &pids {
-        reconcile_pid(&mut runtime, &mut managed, *pid);
+        reconcile_pid(&mut runtime, &mut managed, &mut signaled, *pid);
     }
     let initial: usize = managed.values().map(HashSet::len).sum();
 
@@ -1499,7 +1571,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     _ => None,
                 };
                 refresh_live_display_state(&mut runtime, &mut display_frames);
-                reconcile_pid(&mut runtime, &mut managed, pid);
+                reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                 // Focus may have moved to a window on another display; point the
                 // command-active space at the focused window's space.
                 if let Some(window_id) = focused {
@@ -1530,7 +1602,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 WorkspaceEvent::ActiveSpaceChanged => {
                     refresh_live_display_state(&mut runtime, &mut display_frames);
                     for pid in observed.iter().copied().collect::<Vec<_>>() {
-                        reconcile_pid(&mut runtime, &mut managed, pid);
+                        reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                     }
                     if let Some(sid) = runtime.state.active_space_id() {
                         fire_signals(
@@ -1557,7 +1629,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     if is_all && observed.insert(pid) {
                         spawn_observer(pid, &tx);
                         refresh_live_display_state(&mut runtime, &mut display_frames);
-                        reconcile_pid(&mut runtime, &mut managed, pid);
+                        reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                     }
                 }
                 WorkspaceEvent::ApplicationTerminated { pid, app } => {
@@ -1590,7 +1662,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             fullscreen_pids.remove(&window_id);
                             runtime.sink.unregister_fullscreen(window_id);
                         }
-                        drop_pid(&mut runtime, &mut managed, pid);
+                        drop_pid(&mut runtime, &mut managed, &mut signaled, pid);
                     }
                 }
             },
@@ -1608,7 +1680,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 // Self-heal: re-reconcile every known app, catching any window
                 // change an observer missed (e.g. the unreliable AX destroy).
                 for pid in observed.iter().copied().collect::<Vec<_>>() {
-                    reconcile_pid(&mut runtime, &mut managed, pid);
+                    reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                 }
             }
             WmWork::Message { tokens, reply } => {
@@ -1618,6 +1690,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 let fullscreen_exit = try_window_native_fullscreen_exit(
                     &mut runtime,
                     &mut managed,
+                    &mut signaled,
                     &mut fullscreen_pids,
                     &tokens,
                 );
@@ -1627,6 +1700,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     None => match try_window_deminimize(
                         &mut runtime,
                         &mut managed,
+                        &mut signaled,
                         &mut minimized_pids,
                         &tokens,
                     ) {
@@ -1669,7 +1743,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         if runtime.sink.set_minimized(window_id, true) {
                             if let Some(pid) = pid {
                                 minimized_pids.insert(window_id, pid);
-                                reconcile_pid(&mut runtime, &mut managed, pid);
+                                reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                             }
                         }
                     }
@@ -1682,7 +1756,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         let pid = runtime.state.window_pid(window_id);
                         if runtime.sink.close_window(window_id) {
                             if let Some(pid) = pid {
-                                reconcile_pid(&mut runtime, &mut managed, pid);
+                                reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                             }
                         }
                     }
@@ -1700,7 +1774,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         if runtime.sink.enter_native_fullscreen(window_id) {
                             if let Some(pid) = pid {
                                 fullscreen_pids.insert(window_id, pid);
-                                reconcile_pid(&mut runtime, &mut managed, pid);
+                                reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                             }
                         }
                     }

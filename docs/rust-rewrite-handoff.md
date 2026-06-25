@@ -22,10 +22,11 @@ reconstructing context.
   `window --toggle native-fullscreen` enters/exits via the `AXFullScreen`
   attribute with a fullscreen AX registry mirroring minimize. The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
-  `window_focused`, `application_launched/terminated`, and `space_changed`
-  actions, with `app`/`title` regex filters now honored for the event categories
-  that carry that metadata. `mouse_follows_focus` warps the cursor to the focused
-  window on focus.
+  `window_created`, `window_destroyed`, `window_focused`,
+  `application_launched/terminated`, and `space_changed` actions, with
+  `app`/`title` regex filters now honored for the event categories that carry
+  that metadata. `mouse_follows_focus` warps the cursor to the focused window on
+  focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
@@ -40,6 +41,34 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-25 (session 13) — window lifecycle signals
+
+- The Rust WM daemon now fires live `window_created` and `window_destroyed`
+  signals. The important correctness change is a separate full-AX-window tracker:
+  `yabai-macos::ax::pid_window_infos(pid)` discovers broad window identity and
+  metadata without retaining elements for movement, and the daemon diffs that set
+  separately from the tileable `managed` set. This avoids false lifecycle signals
+  when a window leaves/re-enters the tiled layout because of minimize/deminimize
+  or native fullscreen.
+- `pid_window_infos` includes windows with a real CG id, settable position, or
+  minimized state, and skips non-window AX entries such as Finder's desktop. It
+  uses the same pid+AXWindows-index synthetic id fallback as tiling for windows
+  whose CG id cannot be resolved. The layout path is unchanged: only
+  `tileable_pid_windows` registers elements in `AxSink` and BSP trees.
+- `reconcile_pid` now calls `sync_window_lifecycle_signals` before tileable
+  reconciliation. New full-set ids fire `window_created` with
+  `YABAI_WINDOW_ID` and app/title context; vanished ids fire `window_destroyed`
+  with `YABAI_WINDOW_ID`, app context, and active-window context. `drop_pid` also
+  emits `window_destroyed` for any tracked windows when an observed app exits.
+- Live remote verification on `ssh student@student` with the WM daemon on socket
+  `/tmp/yabai_life.socket`: after registering Finder-filtered lifecycle signals,
+  creating a Finder window wrote `created:1028`; `window 1028 --minimize` and
+  `window 1028 --deminimize` wrote no additional lifecycle lines; `window 1028
+  --close` wrote `destroyed:1028`. Cleanup closed an older stray test window and
+  wrote `destroyed:1024`, confirming the destroy path as well.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (145 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-25 (session 12) — signal app/title filters
 
@@ -1348,11 +1377,13 @@ centering on focus.
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    still needs a CGEventTap.
    Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters
-   (including `!=` exclusion), and live firing of `window_focused`,
-   `application_launched/terminated`, `space_changed` (with `YABAI_*` env vars).
-   Still to do: the remaining signal events (`window_created/destroyed` etc.,
-   blocked on disambiguating reconcile churn) and more live verification of
-   app-filtered launch/terminate events from a GUI-launched daemon session.
+   (including `!=` exclusion), and live firing of `window_created`,
+   `window_destroyed`, `window_focused`, `application_launched/terminated`,
+   `space_changed` (with `YABAI_*` env vars). Still to do: remaining signal event
+   categories (`window_moved/resized/minimized/deminimized/title_changed`,
+   application activated/deactivated/hidden/visible/front-switched, space/display/
+   Mission Control/system events) and more live verification of app-filtered
+   launch/terminate events from a GUI-launched daemon session.
 5. Then Phases 7-9: scripting addition (`yabai-sa`, currently empty — required
    for space management / cross-space moves on modern macOS), OSAX spike, and
    production packaging (wire the Rust binary into `make`, signing, notarization,

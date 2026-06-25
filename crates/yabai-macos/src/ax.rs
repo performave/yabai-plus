@@ -189,6 +189,14 @@ pub struct DiscoveredAxWindow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxWindowInfo {
+    pub id: u32,
+    pub pid: i32,
+    pub app: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxDiagnostics {
     pub trusted: bool,
     pub system_focused_window_id: Option<u32>,
@@ -908,6 +916,71 @@ pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
             result.push(DiscoveredAxWindow {
                 id,
                 window: AxWindow::from_raw(retained),
+                pid,
+                app: app_name.clone(),
+                title,
+            });
+        }
+        CFRelease(windows);
+    }
+    Ok(result)
+}
+
+/// Discover the app's AX window identity/metadata without retaining elements for
+/// movement. This is broader than [`tileable_pid_windows`]: minimized or native-
+/// fullscreen windows can remain in this set even while they are absent from the
+/// tiled layout, so reconcile can distinguish real create/destroy transitions
+/// from normal tileability churn.
+pub fn pid_window_infos(pid: i32) -> io::Result<Vec<AxWindowInfo>> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    // SAFETY: creates an owned AX application element for `pid`, released below.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Ok(Vec::new());
+    }
+
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let windows_attr = unsafe { cfstring(b"AXWindows\0") };
+    if windows_attr.is_null() {
+        // SAFETY: `app` is an owned AX element from CreateApplication.
+        unsafe { CFRelease(app) };
+        return Ok(Vec::new());
+    }
+    let windows = copy_attribute(app, windows_attr);
+    let app_name = ax_string_attribute(app, b"AXTitle\0").unwrap_or_default();
+    // SAFETY: both owned refs are no longer needed after the copy.
+    unsafe {
+        CFRelease(windows_attr);
+        CFRelease(app);
+    }
+    if windows.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut result = Vec::new();
+    // SAFETY: `windows` is an owned CFArray returned by CopyAttributeValue. Each
+    // element is borrowed only for synchronous attribute/id reads in this loop.
+    unsafe {
+        let count = CFArrayGetCount(windows as CFArrayRef);
+        for idx in 0..count {
+            let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
+            if window.is_null() {
+                continue;
+            }
+            let cg_id = window_id(window);
+            if cg_id.is_none() && !is_position_settable(window) && !is_minimized(window) {
+                continue;
+            }
+            let synthetic = 0x8000_0000 | ((pid as u32 & 0x7FFF) << 16) | (idx as u32 & 0xFFFF);
+            let title = ax_string_attribute(window, b"AXTitle\0").unwrap_or_default();
+            result.push(AxWindowInfo {
+                id: cg_id.unwrap_or(synthetic),
                 pid,
                 app: app_name.clone(),
                 title,

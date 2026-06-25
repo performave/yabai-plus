@@ -6,7 +6,7 @@ use std::sync::mpsc::{Sender, SyncSender, channel, sync_channel};
 use std::thread;
 use std::time::Duration;
 
-use yabai_core::{Area, Message, Selector, SpaceAction, parse_message};
+use yabai_core::{Area, Message, Selector, SpaceAction, parse_message, parse_selector};
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
@@ -45,6 +45,7 @@ fn main() -> ExitCode {
         Some("--experimental-rust-tile-daemon") => run_rust_tile_daemon(&args[1..]),
         Some("--experimental-ax-observe-pid") => run_ax_observe_pid(&args[1..]),
         Some("--experimental-rust-wm-daemon") => run_rust_wm_daemon(&args[1..]),
+        Some("--experimental-space-probe") => run_space_probe(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -632,6 +633,81 @@ fn refresh_active_space(runtime: &mut Runtime<AxSink>, display_id: u32) {
 
     let _ = runtime.state.handle_event(StateEvent::SpaceChanged { sid });
     runtime.state.flush_active_to(&mut runtime.sink);
+}
+
+/// Diagnostic: dump the Mission Control space layout (global desktop order with
+/// 1-based indices, marking the current space) and, with `--focus <selector>`,
+/// resolve the selector and switch to it via the dock-swipe gesture. Proves the
+/// SkyLight discovery + gesture path in isolation, without AX, sockets, or the
+/// full WM daemon. Read-only unless `--focus` is given.
+fn run_space_probe(args: &[String]) -> ExitCode {
+    let displays = match active_displays() {
+        Ok(displays) => displays,
+        Err(error) => {
+            eprintln!("yabai-rust: failed to enumerate displays: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let Some(display) = displays.first() else {
+        eprintln!("yabai-rust: no active displays");
+        return ExitCode::from(1);
+    };
+
+    let spaces = match mission_control_spaces() {
+        Ok(spaces) if !spaces.is_empty() => spaces,
+        Ok(_) => {
+            eprintln!("yabai-rust: SkyLight returned no spaces (no GUI session?)");
+            return ExitCode::from(1);
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: failed to query spaces: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let current = current_space_for_display(display.id).ok();
+
+    println!("display {} current_space {current:?}", display.id);
+    for (index, sid) in spaces.iter().enumerate() {
+        let marker = if Some(*sid) == current {
+            " <- current"
+        } else {
+            ""
+        };
+        println!("  mc-index {} -> sid {sid}{marker}", index + 1);
+    }
+
+    if let Some(pos) = args.iter().position(|arg| arg == "--focus") {
+        let Some(token) = args.get(pos + 1) else {
+            eprintln!("yabai-rust: --focus requires a selector");
+            return ExitCode::from(64);
+        };
+        let selector = parse_selector(token);
+        let target = match resolve_space_target(&spaces, current, &selector) {
+            Ok(target) => target,
+            Err(error) => {
+                eprintln!("yabai-rust: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        if current == Some(target) {
+            eprintln!("yabai-rust: cannot focus an already focused space.");
+            return ExitCode::from(1);
+        }
+        let cur = current.and_then(|sid| spaces.iter().position(|&s| s == sid));
+        let new = spaces.iter().position(|&s| s == target);
+        if let (Some(cur), Some(new)) = (cur, new) {
+            println!(
+                "focusing sid {target} ({} step(s))",
+                new as i32 - cur as i32
+            );
+            if let Err(error) = switch_space_by_gesture(new as i32 - cur as i32) {
+                eprintln!("yabai-rust: gesture failed: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    ExitCode::SUCCESS
 }
 
 /// Intercept a standalone `space --focus <selector>` and enact the active-space

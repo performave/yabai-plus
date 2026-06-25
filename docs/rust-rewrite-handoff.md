@@ -44,6 +44,18 @@ reconstructing context.
   index/first/last/prev/next (no wrap); `recent`/`mouse`/labels are reported as
   unsupported. `--switch`/`--move`/`--create`/`--destroy`/`--swap`/`--display`
   still need the scripting addition (Phase 8). 113 workspace tests, clippy clean.
+- Added `--experimental-space-probe [--focus <sel>]`: dumps the global
+  mission-control space list (1-based, marks current) and optionally switches via
+  the gesture. Exercises the SkyLight discovery + gesture path with no AX, sockets
+  or daemon.
+- Verified live on a remote macOS 26.2 (Tahoe, arm64) box over SSH: the release
+  binary's SkyLight discovery works from a non-Aqua SSH session, and the gesture
+  actually switches the active space (`--focus 2` -> sid 12, `--focus prev` -> sid
+  1, confirmed by re-querying `current_space`). Note: posting the gesture needs
+  Accessibility permission (the C daemon requires it too); the test box had it
+  granted. `screencapture` can't grab the framebuffer from an SSH session (not in
+  the Aqua login session) without root (`launchctl asuser`) or a LaunchAgent, so
+  no screenshot was taken — the before/after `current_space` query is the proof.
 
 ### 2026-06-23 (session 3)
 

@@ -218,6 +218,12 @@ impl AppState {
         self.focused_window
     }
 
+    /// The current tiled area of a managed window, from any space's capture.
+    /// Used by the daemon's `mouse_follows_focus` to center the cursor on focus.
+    pub fn window_area(&self, window_id: u32) -> Option<Area> {
+        self.window_frame(window_id).map(|frame| frame.area)
+    }
+
     /// The owning process id for a window, from its stored metadata.
     pub fn window_pid(&self, window_id: u32) -> Option<i32> {
         self.window_meta.get(&window_id).map(|meta| meta.pid)
@@ -1248,6 +1254,19 @@ mod tests {
         let mut list = state.space(1).unwrap().window_list();
         list.sort_unstable();
         assert_eq!(list, vec![1, 2]);
+    }
+
+    #[test]
+    fn window_area_returns_the_captured_frame() {
+        let mut state = state_with_space();
+        // A lone window fills the whole space; its area is what the daemon centers
+        // the cursor on for mouse_follows_focus.
+        state.add_window(1).unwrap();
+        assert_eq!(
+            state.window_area(1),
+            Some(Area::new(0.0, 0.0, 1000.0, 1000.0))
+        );
+        assert_eq!(state.window_area(999), None);
     }
 
     #[test]

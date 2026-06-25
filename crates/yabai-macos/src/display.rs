@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::io;
 
-use yabai_core::Area;
+use yabai_core::{Area, Point};
 
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
@@ -185,6 +185,42 @@ pub fn cursor_display_id() -> io::Result<u32> {
         })
         .map(|display| display.id)
         .ok_or_else(|| io::Error::other("cursor is not on an active display"))
+}
+
+/// The current cursor location in global (top-left origin) display coordinates,
+/// via `SLSGetCurrentCursorLocation` like `window_manager_center_mouse`.
+pub fn cursor_location() -> io::Result<Point> {
+    let mut cursor = CGPoint { x: 0.0, y: 0.0 };
+    // SAFETY: `cursor` is a valid out pointer for SkyLight to fill.
+    let err = unsafe { SLSGetCurrentCursorLocation(SLSMainConnectionID(), &mut cursor) };
+    if err != 0 {
+        return Err(io::Error::other(format!(
+            "failed to read cursor location ({err})"
+        )));
+    }
+    Ok(Point {
+        x: cursor.x as f32,
+        y: cursor.y as f32,
+    })
+}
+
+/// Warp the cursor to an arbitrary global display coordinate
+/// (`CGWarpMouseCursorPosition`).
+pub fn warp_cursor_to_point(point: Point) -> io::Result<()> {
+    let target = CGPoint {
+        x: point.x as f64,
+        y: point.y as f64,
+    };
+    // SAFETY: `target` is a valid global display coordinate.
+    let err = unsafe { CGWarpMouseCursorPosition(target) };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "failed to warp cursor to ({}, {}) ({err})",
+            point.x, point.y
+        )))
+    }
 }
 
 pub fn warp_cursor_to_display_center(display_id: u32) -> io::Result<()> {

@@ -7,18 +7,20 @@ use std::thread;
 use std::time::Duration;
 
 use yabai_core::{
-    Area, Message, Selector, SignalEvent, SpaceAction, WindowAction, parse_message, parse_selector,
+    Area, Message, Point, Selector, SignalEvent, SpaceAction, WindowAction, parse_message,
+    parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
     AxSink, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt, active_displays,
-    application_pids_with_windows, current_space_for_display, cursor_display_id, display_for_space,
-    focused_window, focused_window_diagnostics, main_visible_frame, mission_control_spaces,
-    move_focused_window, move_pid_window, observe_pid, observe_workspace, regular_application_pids,
-    set_active_display, spaces_for_display, spaces_for_window, switch_space_by_gesture,
-    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
-    windows_for_pid, windows_for_pid_diagnostics,
+    application_pids_with_windows, current_space_for_display, cursor_display_id, cursor_location,
+    display_for_space, focused_window, focused_window_diagnostics, main_visible_frame,
+    mission_control_spaces, move_focused_window, move_pid_window, observe_pid, observe_workspace,
+    regular_application_pids, set_active_display, spaces_for_display, spaces_for_window,
+    switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
+    warp_cursor_to_display_center, warp_cursor_to_point, windows_for_pid,
+    windows_for_pid_diagnostics,
 };
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
@@ -49,6 +51,16 @@ fn main() -> ExitCode {
         Some("--experimental-ax-observe-pid") => run_ax_observe_pid(&args[1..]),
         Some("--experimental-rust-wm-daemon") => run_rust_wm_daemon(&args[1..]),
         Some("--experimental-space-probe") => run_space_probe(&args[1..]),
+        Some("--experimental-cursor-location") => match cursor_location() {
+            Ok(point) => {
+                println!("cursor {} {}", point.x, point.y);
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("yabai-rust: {error}");
+                ExitCode::from(1)
+            }
+        },
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -1132,6 +1144,33 @@ fn fire_signals(runtime: &Runtime<AxSink>, event: SignalEvent, env: &[(&str, Str
     }
 }
 
+/// If `mouse_follows_focus` is enabled, warp the cursor to the focused window's
+/// center, unless it is already inside the window. Mirrors
+/// `window_manager_center_mouse`: read the live cursor, skip when contained, and
+/// warp to the frame center.
+fn center_mouse_on_focus(runtime: &Runtime<AxSink>, window_id: u32) {
+    if !runtime.state.config.mouse_follows_focus {
+        return;
+    }
+    let Some(area) = runtime.state.window_area(window_id) else {
+        return;
+    };
+    if let Ok(cursor) = cursor_location() {
+        if cursor.x >= area.x
+            && cursor.x < area.x + area.w
+            && cursor.y >= area.y
+            && cursor.y < area.y + area.h
+        {
+            return;
+        }
+    }
+    let center = Point {
+        x: area.x + area.w / 2.0,
+        y: area.y + area.h / 2.0,
+    };
+    let _ = warp_cursor_to_point(center);
+}
+
 fn reconcile_pid(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
@@ -1437,6 +1476,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             .state
                             .handle_event(StateEvent::WindowFocused { window_id });
                     }
+                    center_mouse_on_focus(&runtime, window_id);
                     // `window_focused` signal (observer-driven focus, e.g. a
                     // click). De-duplicated against the command path below.
                     if last_focus_signal != Some(window_id) {
@@ -1556,6 +1596,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 if response.is_ok() && is_window_focus(&tokens) {
                     if let Some(window_id) = runtime.state.focused_window_id() {
                         runtime.sink.focus_window(window_id);
+                        center_mouse_on_focus(&runtime, window_id);
                         // Fire `window_focused` here too: command-driven focus does
                         // not always produce an AX observer notification. De-dup
                         // with the observer path via `last_focus_signal`.

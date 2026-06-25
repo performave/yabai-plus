@@ -23,7 +23,8 @@ reconstructing context.
   attribute with a fullscreen AX registry mirroring minimize. The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
   `window_focused`, `application_launched/terminated`, and `space_changed`
-  actions. 133 workspace tests pass. The shipped C `make` flow is unchanged.
+  actions. `mouse_follows_focus` warps the cursor to the focused window on focus.
+  134 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-25.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -34,6 +35,33 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-25 (session 10) — mouse_follows_focus
+
+- `mouse_follows_focus` now works in the Rust WM daemon, mirroring
+  `window_manager_center_mouse`. New `center_mouse_on_focus` checks
+  `config.mouse_follows_focus`, reads the live cursor, skips when the cursor is
+  already inside the focused window's frame, and otherwise warps to the frame
+  center. It runs on both focus paths (the AX observer and the command
+  `window <sel> --focus` post-step), next to the focus signal/raise.
+- macOS primitives added to `yabai-macos::display`: `cursor_location()`
+  (`SLSGetCurrentCursorLocation` -> `Point`) and `warp_cursor_to_point(Point)`
+  (`CGWarpMouseCursorPosition`); the existing FFI was reused. `AppState` exposes
+  `window_area(window_id) -> Option<Area>` (the captured tiled frame) for the
+  daemon. A diagnostic `--experimental-cursor-location` prints the cursor.
+- `config mouse_follows_focus on|off` already round-tripped through the pure
+  `Config`; this session just wires the effect. The config was already modeled.
+- Live remote verification on macOS 26.2 (WM daemon over Finder, 11 windows, 2
+  displays): with `mouse_follows_focus on`, `window 186 --focus` warped the cursor
+  to `(3202, 732)` and `window 795 --focus` to `(2290, 618)` — both exact frame
+  centers. Focusing a window the cursor was already inside left the cursor put
+  (the contained-skip), and with `mouse_follows_focus off` focus no longer moved
+  the cursor. Cursor read back via `--experimental-cursor-location`.
+- Gotcha worth keeping: do NOT `scp` over the daemon's running binary path — macOS
+  SIGKILLs (`Killed: 9`) subsequent execs when a running ad-hoc-signed file is
+  overwritten. Deploy to a fresh path (or stop the daemon first).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (134 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-25 (session 9) — signals
 
@@ -1203,6 +1231,7 @@ the socket, and `query --windows id,app,title` returning real values.
 
 Other experimental flags in `main.rs`: `--experimental-ax-{focused-window,debug,
 windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
+`--experimental-cursor-location` (prints the live cursor point),
 `--experimental-rust-{daemon,tile-daemon}` (the tile-daemon is the older
 snapshot-only `Actor<AxSink>` version; the wm-daemon supersedes it).
 
@@ -1214,7 +1243,8 @@ changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
 float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/layout;
-`signal` add/list/remove with live firing on focus/app/space events.
+`signal` add/list/remove with live firing on focus/app/space events;
+`mouse_follows_focus` cursor centering on focus.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
@@ -1241,7 +1271,9 @@ float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/la
    already worked. Still to do: remaining deminimize/native-fullscreen-exit
    selectors, focus without-raise, sticky/scratchpad, opacity/layer (opacity/layer/
    sticky/shadow all need the scripting addition — `scripting_addition_set_*`);
-   mouse drag move/resize/swap.
+   mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
+   focused window's center on focus, with the contained-skip); `focus_follows_mouse`
+   still needs a CGEventTap.
    Signals: done — `signal --add/--list/--remove` and live firing of
    `window_focused`, `application_launched/terminated`, `space_changed` (with
    `YABAI_*` env vars). Still to do: signal `app`/`title` regex filters (needs a

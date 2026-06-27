@@ -1196,6 +1196,38 @@ fn center_mouse_on_focus(runtime: &Runtime<AxSink>, window_id: u32) {
     let _ = warp_cursor_to_point(center);
 }
 
+fn observed_geometry_signal(
+    runtime: &Runtime<AxSink>,
+    event: &ObservedEvent,
+) -> Option<(SignalEvent, u32)> {
+    let (signal, window_id) = match event {
+        ObservedEvent::WindowMoved {
+            window_id: Some(id),
+            ..
+        } => (SignalEvent::WindowMoved, *id),
+        ObservedEvent::WindowResized {
+            window_id: Some(id),
+            ..
+        } => (SignalEvent::WindowResized, *id),
+        _ => return None,
+    };
+    let expected = runtime.state.window_area(window_id)?;
+    let actual = runtime.sink.window_frame(window_id)?;
+    geometry_signal_frame_changed(signal, expected, actual).then_some((signal, window_id))
+}
+
+fn geometry_signal_frame_changed(signal: SignalEvent, expected: Area, actual: Area) -> bool {
+    const AX_DIFF_THRESHOLD: f32 = 1.5;
+    let changed = |a: f32, b: f32| (a - b).abs() >= AX_DIFF_THRESHOLD;
+    match signal {
+        SignalEvent::WindowMoved => changed(expected.x, actual.x) || changed(expected.y, actual.y),
+        SignalEvent::WindowResized => {
+            changed(expected.w, actual.w) || changed(expected.h, actual.h)
+        }
+        _ => false,
+    }
+}
+
 /// Apply matching window rules to a window. Currently enacts the `manage` effect
 /// (off -> float, on -> tile); other effects (sticky/opacity/layer/grid/
 /// display/space/fullscreen) are parsed and stored but their application is
@@ -1594,6 +1626,18 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     _ => None,
                 };
                 refresh_live_display_state(&mut runtime, &mut display_frames);
+                if let Some((signal, window_id)) = observed_geometry_signal(&runtime, &event) {
+                    let active = runtime.state.focused_window_id() == Some(window_id);
+                    let meta = runtime.state.window_meta(window_id);
+                    fire_signals(
+                        &runtime,
+                        signal,
+                        &[("YABAI_WINDOW_ID", window_id.to_string())],
+                        meta.map(|m| m.app.as_str()),
+                        meta.map(|m| m.title.as_str()),
+                        Some(active),
+                    );
+                }
                 reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                 // Focus may have moved to a window on another display; point the
                 // command-active space at the focused window's space.
@@ -1996,6 +2040,31 @@ mod tests {
         assert!(is_window_close(&toks(&["window", "--close"])));
         assert!(is_window_close(&toks(&["window", "42", "--close"])));
         assert!(!is_window_close(&toks(&["window", "--minimize"])));
+    }
+
+    #[test]
+    fn geometry_signal_frame_diff_matches_c_threshold() {
+        let expected = Area::new(10.0, 20.0, 300.0, 400.0);
+        assert!(!geometry_signal_frame_changed(
+            SignalEvent::WindowMoved,
+            expected,
+            Area::new(11.49, 20.0, 300.0, 400.0)
+        ));
+        assert!(geometry_signal_frame_changed(
+            SignalEvent::WindowMoved,
+            expected,
+            Area::new(11.5, 20.0, 300.0, 400.0)
+        ));
+        assert!(!geometry_signal_frame_changed(
+            SignalEvent::WindowResized,
+            expected,
+            Area::new(10.0, 21.5, 300.0, 400.0)
+        ));
+        assert!(geometry_signal_frame_changed(
+            SignalEvent::WindowResized,
+            expected,
+            Area::new(10.0, 20.0, 301.5, 400.0)
+        ));
     }
 
     #[test]

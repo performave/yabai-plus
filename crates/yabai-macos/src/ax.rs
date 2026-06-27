@@ -1258,6 +1258,13 @@ impl AxSink {
         }
     }
 
+    /// Read the live AX frame for a managed window retained by the sink.
+    pub fn window_frame(&self, window_id: u32) -> Option<Area> {
+        self.windows
+            .get(&window_id)
+            .and_then(|window| read_window_frame(window.element))
+    }
+
     /// Minimize or de-minimize a managed window by toggling its
     /// `AXMinimized` attribute, like `window_manager_{minimize,deminimize}_window`.
     /// Returns `false` if the window is not registered. A minimized window is no

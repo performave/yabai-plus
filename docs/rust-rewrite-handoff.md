@@ -22,15 +22,16 @@ reconstructing context.
   `window --toggle native-fullscreen` enters/exits via the `AXFullScreen`
   attribute with a fullscreen AX registry mirroring minimize. The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
-  `window_created`, `window_destroyed`, `window_focused`, `window_minimized`,
-  `window_deminimized`, `window_title_changed`, `application_launched/terminated`,
-  and `space_changed` actions, with `app`/`title` regex filters now honored for
-  the event categories that carry that metadata. `mouse_follows_focus` warps the
-  cursor to the focused window on focus.
+  `window_created`, `window_destroyed`, `window_focused`, `window_moved`,
+  `window_resized`, `window_minimized`, `window_deminimized`,
+  `window_title_changed`, `application_launched/terminated`, and `space_changed`
+  actions, with `app`/`title` regex filters now honored for the event categories
+  that carry that metadata. `mouse_follows_focus` warps the cursor to the focused
+  window on focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 145 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 146 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-25.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -41,6 +42,27 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-25 (session 16) — moved/resized signals
+
+- The Rust WM daemon now fires live `window_moved` and `window_resized` signals.
+  The AX observer registers `AXMoved` and `AXResized` on existing windows and
+  newly-created windows, forwarding typed `ObservedEvent` variants into the main
+  daemon loop.
+- Geometry signals are debounced against the runtime's expected tiled frame before
+  reconciliation, using the C daemon's `AX_DIFF` threshold (`>= 1.5` points). This
+  suppresses signals caused by the daemon's own corrective AX flushes while still
+  reporting external user/app movement or resizing. Signal context includes
+  `YABAI_WINDOW_ID`, app/title metadata, and active-window state for filter
+  matching.
+- Live remote verification on `ssh student@student` with the WM daemon on socket
+  `/tmp/yabai_geom.socket`: registered Finder-filtered `window_moved` and
+  `window_resized` actions. An AppleScript Finder bounds change fired
+  `window_resized` for window `766`; a direct AX move by Finder pid/index fired
+  `window_moved` for the same window. The test daemon, socket, logs, and deployed
+  `/tmp/yabai-geom-1782414658` binary were cleaned up.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (146 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-25 (session 15) — title-change signals
 
@@ -1371,8 +1393,9 @@ pickup via CGWindowList, real active-space id discovery at startup, per-space
 trees for the first display's discovered spaces, window-to-space assignment
 routing during reconciliation, first-display space add/remove reconciliation,
 active-space notification handling with SkyLight re-read, direct app pickup in
-`all` mode, immediate app-termination cleanup, `space --rotate`/`--balance` over
-the socket, and `query --windows id,app,title` returning real values.
+`all` mode, immediate app-termination cleanup, debounced `window_moved` /
+`window_resized` signals, `space --rotate`/`--balance` over the socket, and
+`query --windows id,app,title` returning real values.
 
 Other experimental flags in `main.rs`: `--experimental-ax-{focused-window,debug,
 windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
@@ -1388,8 +1411,8 @@ changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
 float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/layout;
-`signal` add/list/remove with live firing on focus/app/space/minimize/deminimize/
-title-change events and app/title filters for metadata-carrying events;
+`signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
+deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
@@ -1423,9 +1446,9 @@ title-change events and app/title filters for metadata-carrying events;
    Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters
    (including `!=` exclusion), and live firing of `window_created`,
    `window_destroyed`, `window_focused`, `application_launched/terminated`,
-   `space_changed`, `window_minimized`, `window_deminimized`, and
-   `window_title_changed` (with `YABAI_*` env vars). Still to do: remaining signal
-   event categories (`window_moved/resized`, application
+   `space_changed`, `window_moved`, `window_resized`, `window_minimized`,
+   `window_deminimized`, and `window_title_changed` (with `YABAI_*` env vars).
+   Still to do: remaining signal event categories (application
    activated/deactivated/hidden/visible/front-switched, space/display/
    Mission Control/system events) and more live verification of app-filtered
    launch/terminate events from a GUI-launched daemon session.

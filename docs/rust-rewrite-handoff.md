@@ -37,7 +37,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 147 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 148 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-26.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -48,6 +48,14 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-27 (session 21b) — space `display` query property
+
+- Added the `display` property to `query --spaces` (arrangement index of the
+  space's display, via `display_index`), and switched `query --spaces`
+  `is-visible` to the per-display `space_is_visible` helper (a space can be visible
+  on its own display without being the globally focused space). Added a golden test
+  over a two-display state. 148 tests; fmt/clippy clean; release builds.
 
 ### 2026-06-27 (session 21) — more `query --windows` properties
 

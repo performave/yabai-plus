@@ -1171,6 +1171,7 @@ impl AppState {
                 "last-window",
                 "has-focus",
                 "is-visible",
+                "display",
             ],
             "space",
         )?;
@@ -1349,7 +1350,15 @@ impl AppState {
                 )),
                 "is-visible" => fields.push(format!(
                     "\t\"is-visible\":{}",
-                    json_bool(self.active_space == Some(sid))
+                    json_bool(self.space_is_visible(sid))
+                )),
+                "display" => fields.push(format!(
+                    "\t\"display\":{}",
+                    self.space_displays
+                        .get(&sid)
+                        .copied()
+                        .and_then(|did| self.display_index(did))
+                        .unwrap_or(0)
                 )),
                 _ => unreachable!("query_properties rejects unsupported properties"),
             }
@@ -2401,6 +2410,39 @@ mod tests {
             ])),
             Ok(Some(
                 "{\n\t\"id\":1,\n\t\"type\":\"bsp\",\n\t\"windows\":[1, 2],\n\t\"first-window\":1,\n\t\"last-window\":2,\n\t\"has-focus\":true,\n\t\"is-visible\":true\n}\n".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn query_spaces_serializes_display_property() {
+        let mut state = state_with_displays();
+        state.set_active_space(2);
+
+        // Space 1 is on display 42 (arrangement index 1); space 2 on display 77
+        // (index 2). Only space 2 is the active/visible one.
+        assert_eq!(
+            state.handle_tokens(&toks(&[
+                "query",
+                "--spaces",
+                "id,display,is-visible",
+                "--space",
+                "1",
+            ])),
+            Ok(Some(
+                "{\n\t\"id\":1,\n\t\"display\":1,\n\t\"is-visible\":false\n}\n".to_string()
+            ))
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&[
+                "query",
+                "--spaces",
+                "id,display,is-visible",
+                "--space",
+                "2",
+            ])),
+            Ok(Some(
+                "{\n\t\"id\":2,\n\t\"display\":2,\n\t\"is-visible\":true\n}\n".to_string()
             ))
         );
     }

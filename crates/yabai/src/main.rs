@@ -19,7 +19,7 @@ use yabai_macos::{
     mission_control_spaces, move_focused_window, move_pid_window, ns_application_load, observe_pid,
     observe_workspace, pid_window_infos, regular_application_pids, set_active_display,
     spaces_for_display, spaces_for_window, switch_space_by_gesture, tileable_pid_windows,
-    visible_frame_for_display, warp_cursor_to_display_center, warp_cursor_to_point,
+    visible_frame_for_display, warp_cursor_to_display_center, warp_cursor_to_point, window_alpha,
     windows_for_pid, windows_for_pid_diagnostics,
 };
 use yabai_runtime::{
@@ -67,6 +67,7 @@ fn main() -> ExitCode {
         Some("--experimental-sa-create-space") => run_sa_space(&args[1..], true),
         Some("--experimental-sa-destroy-space") => run_sa_space(&args[1..], false),
         Some("--experimental-sa-window-to-space") => run_sa_window_to_space(&args[1..]),
+        Some("--experimental-window-alpha") => run_window_alpha(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -935,6 +936,26 @@ fn run_sa_window_to_space(args: &[String]) -> ExitCode {
     }
 }
 
+/// Read-only probe of a window's live alpha via SkyLight (`SLSGetWindowAlpha`).
+/// Used to verify the scripting-addition opacity opcode took effect, since the SA
+/// write itself only returns an ack byte. Usage: `--experimental-window-alpha <window_id>`.
+fn run_window_alpha(args: &[String]) -> ExitCode {
+    let Some(wid) = args.first().and_then(|a| a.parse::<u32>().ok()) else {
+        eprintln!("usage: --experimental-window-alpha <window_id>");
+        return ExitCode::from(64);
+    };
+    match window_alpha(wid) {
+        Ok(alpha) => {
+            println!("window {wid} alpha {alpha}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_space_probe(args: &[String]) -> ExitCode {
     let displays = match active_displays() {
         Ok(displays) => displays,
@@ -1271,30 +1292,70 @@ fn try_scripting_addition(
         }
         Ok(Message::Window(cmd)) => {
             for action in &cmd.actions {
-                let WindowAction::Space(selector) = action else {
-                    continue;
-                };
-                // Move the acting (target/focused) window to the selected space,
-                // mirroring `window --space` (`scripting_addition_move_window_to_space`).
-                let result = match (
-                    runtime.state.resolve_window_selector(cmd.target.as_ref()),
-                    runtime.state.resolve_space(Some(selector)),
-                ) {
-                    (Ok(wid), Ok(sid)) => sa
-                        .move_window_to_space(sid, wid)
-                        .map(|()| None)
-                        .map_err(|error| format!("could not move window to space: {error}\n")),
-                    (Err(error), _) | (_, Err(error)) => Err(error),
-                };
-                if result.is_ok() {
-                    refresh_live_display_state(runtime, display_frames);
+                match action {
+                    WindowAction::Space(selector) => {
+                        // Move the acting (target/focused) window to the selected space,
+                        // mirroring `window --space` (`scripting_addition_move_window_to_space`).
+                        let result = match (
+                            runtime.state.resolve_window_selector(cmd.target.as_ref()),
+                            runtime.state.resolve_space(Some(selector)),
+                        ) {
+                            (Ok(wid), Ok(sid)) => sa
+                                .move_window_to_space(sid, wid)
+                                .map(|()| None)
+                                .map_err(|error| {
+                                    format!("could not move window to space: {error}\n")
+                                }),
+                            (Err(error), _) | (_, Err(error)) => Err(error),
+                        };
+                        if result.is_ok() {
+                            refresh_live_display_state(runtime, display_frames);
+                        }
+                        return Some(result);
+                    }
+                    // `window --opacity <float>` sets the window alpha through the SA;
+                    // it is purely visual, so no tree re-flow is needed.
+                    WindowAction::Raw { command, arg } if command == "--opacity" => {
+                        return Some(window_opacity_via_sa(sa, runtime, cmd.target.as_ref(), arg));
+                    }
+                    _ => continue,
                 }
-                return Some(result);
             }
             None
         }
         _ => None,
     }
+}
+
+/// Set the acting window's opacity through the scripting addition, mirroring the
+/// C `window --opacity` (`scripting_addition_set_opacity` with the configured
+/// `window_opacity_duration`). Faithful to the C value validation and the two
+/// `daemon_fail` strings.
+fn window_opacity_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    target: Option<&Selector>,
+    arg: &str,
+) -> Response {
+    // The C parser requires a float in `[0.0, 1.0]`; anything else (including a
+    // non-float token) is rejected with the standard "unknown value" message.
+    let opacity = match arg.parse::<f32>() {
+        Ok(value) if (0.0..=1.0).contains(&value) => value,
+        _ => {
+            return Err(format!(
+                "unknown value '{arg}' given to command '--opacity' for domain 'window'\n"
+            ));
+        }
+    };
+    let wid = runtime.state.resolve_window_selector(target)?;
+    let duration = runtime.state.config.window_opacity_duration;
+    sa.set_opacity(wid, opacity, duration)
+        .map(|()| None)
+        .map_err(|_| {
+            format!(
+                "could not change opacity of window with id '{wid}' due to an error with the scripting-addition.\n"
+            )
+        })
 }
 
 fn try_space_focus(

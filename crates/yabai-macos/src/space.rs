@@ -120,6 +120,7 @@ unsafe extern "C" {
     fn SLSCopyManagedDisplaySpaces(cid: i32) -> CFArrayRef;
     fn SLSCopySpacesForWindows(cid: i32, selector: i32, window_list: CFArrayRef) -> CFArrayRef;
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
+    fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
 }
 
 fn owned_cfstring(literal: &[u8]) -> io::Result<OwnedCf> {
@@ -496,6 +497,26 @@ pub fn spaces_for_window(window_id: u32) -> io::Result<Vec<u64>> {
         )))
     } else {
         Ok(result)
+    }
+}
+
+/// Read a window's current alpha (opacity in `0.0..=1.0`) via SkyLight.
+///
+/// Read-only and needs no special permissions; mirrors the C
+/// `SLSGetWindowAlpha` usage. Used to verify the scripting-addition opacity
+/// opcode took effect (the SA write itself returns only an ack byte).
+pub fn window_alpha(window_id: u32) -> io::Result<f32> {
+    let mut alpha = 0.0f32;
+    // SAFETY: `SLSMainConnectionID` returns the process' SkyLight connection;
+    // `window_id` is a plain CG window id and `alpha` is a valid out pointer for
+    // the float SkyLight writes on success.
+    let err = unsafe { SLSGetWindowAlpha(SLSMainConnectionID(), window_id, &mut alpha) };
+    if err != 0 {
+        Err(io::Error::other(format!(
+            "failed to read alpha for window {window_id} (SkyLight error {err})"
+        )))
+    } else {
+        Ok(alpha)
     }
 }
 

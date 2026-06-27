@@ -38,7 +38,7 @@ reconstructing context.
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
   deferred. 158 workspace tests pass. The shipped C `make` flow is unchanged.
-- Last updated: 2026-06-26.
+- Last updated: 2026-06-27.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
     longer a primary constraint for this track.
@@ -48,6 +48,54 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-27 (session 28) — SA window opacity wired into daemon + verified live
+
+- Wired `window --opacity <float>` through the WM daemon via the scripting
+  addition, continuing the SA-wiring arc. `try_scripting_addition` now also
+  intercepts `Message::Window` carrying the `--opacity` action (parsed as
+  `WindowAction::Raw { command: "--opacity", arg }`): the new
+  `window_opacity_via_sa` helper validates the value is a float in `[0.0, 1.0]`
+  (rejecting out-of-range and non-float tokens with the faithful C string
+  `unknown value '<v>' given to command '--opacity' for domain 'window'`),
+  resolves the acting (target/focused) window via
+  `AppState::resolve_window_selector`, reads `config.window_opacity_duration`,
+  and calls `ScriptingAddition::set_opacity`. SA failures map to the C
+  `daemon_fail` text `could not change opacity of window with id '<id>' due to an
+  error with the scripting-addition.`. Opacity is purely visual, so no tree
+  re-flow follows.
+- Added a read-only opacity readback: `yabai_macos::space::window_alpha(wid)`
+  (`SLSGetWindowAlpha`) + the `--experimental-window-alpha <wid>` probe. The SA
+  opacity write only returns an ack byte, so this SkyLight read is the
+  deterministic way to confirm the alpha actually changed (and is the foundation
+  for an `opacity` field in the query serializer later). It needs no special
+  permissions and is reachable over plain SSH like the other read-only SkyLight
+  probes.
+- **Verified live end-to-end against the real injected payload (local box).**
+  Started the WM daemon on a throwaway socket pointed at a window-less `sleep`
+  pid (0 windows managed → zero interference with the live C yabai), then over
+  the socket: `window 22559 --opacity 0.5` → `--experimental-window-alpha`
+  reported `0.5`; `--opacity 0.25` → `0.25`; `--opacity 1.0` → `1.0` (reverted,
+  also confirmed by the live C `query --windows` showing opacity `1.0`).
+  `--opacity 2.0` and `--opacity abc` both returned the C-faithful "unknown
+  value" error with exit 1 and left the alpha unchanged. The full path
+  parse → `try_scripting_addition` → `window_opacity_via_sa` → resolve → live SA
+  → real alpha change is proven.
+- **Verified the readback on the remote MacBook Air (macOS 26.2 Tahoe, arm64).**
+  Deployed/signed the binary; `--experimental-window-alpha` on a real Finder
+  window read `1` (and `0` for its offscreen helper windows), confirming the new
+  `SLSGetWindowAlpha` FFI works on a second machine/OS version. The opacity
+  *opcode* itself can only be exercised where the SA is loaded (the local box) —
+  the remote has no SA loaded, matching how sessions 26/27 verified SA opcodes
+  "on this machine".
+- Still to wire through the daemon (client methods exist + proven): `space
+  --move` / `--display` (cross-display space moves), `window --display` (move
+  window to a display), and window `layer`/`sticky`/`shadow` (sticky/shadow need
+  toggle-state tracking; `--layer` is not yet in the parser grammar). `space
+  --focus` still uses the gesture path; it could switch to the SA `focus_space`
+  opcode now that the SA is available.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-27 (session 27) — SA space create/destroy + window→space wired + verified live
 
@@ -1737,6 +1785,9 @@ active-space notification handling with SkyLight re-read, direct app pickup in
 Other experimental flags in `main.rs`: `--experimental-ax-{focused-window,debug,
 windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
 `--experimental-cursor-location` (prints the live cursor point),
+`--experimental-window-alpha <wid>` (read-only `SLSGetWindowAlpha` opacity
+readback — verifies the SA opacity opcode), `--experimental-sa-{status,opacity,
+create-space,destroy-space,window-to-space}` (direct SA opcode probes),
 `--experimental-rust-{daemon,tile-daemon}` (the tile-daemon is the older
 snapshot-only `Actor<AxSink>` version; the wm-daemon supersedes it).
 
@@ -1774,9 +1825,12 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    zoom-fullscreen`/`zoom-parent`, `--toggle native-fullscreen` (enter on the
    focused window; exit via id/`first`/`last`/single-window bare toggle),
    `--minimize`, `--deminimize` for numeric ids and `first`/`last`; `--swap`
-   already worked. Still to do: remaining deminimize/native-fullscreen-exit
-   selectors, focus without-raise, sticky/scratchpad, opacity/layer (opacity/layer/
-   sticky/shadow all need the scripting addition — `scripting_addition_set_*`);
+   already worked. `window --opacity <float>` is now wired through the SA
+   (`set_opacity` + `config.window_opacity_duration`), verified live via the
+   `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback. Still to do:
+   remaining deminimize/native-fullscreen-exit selectors, focus without-raise,
+   sticky/scratchpad, `--layer` (not yet in the parser grammar) and
+   sticky/shadow (need toggle-state tracking) — all via `scripting_addition_set_*`;
    mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    still needs a CGEventTap.

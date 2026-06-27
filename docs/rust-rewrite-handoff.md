@@ -46,6 +46,44 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-06-26 (session 18) — backport audit of C `master` fixes
+
+Audited the 9 commits on `master` (the C codebase) that postdate the rust-port
+branch point (`53f53f8`) and assessed each against the Rust port:
+
+- `1cd51ce fix: ignore zero-area windows when managing` — **PORTED.** The Rust
+  `tileable_pid_windows` had the same bug (it tiled 0x0 AXStandardWindows, e.g.
+  zoom.us's invisible window, reserving a phantom BSP slot). Added a
+  `frame.w > 0 && frame.h > 0` gate in discovery, mirroring the C
+  `window_manager_should_manage_window` zero-area check.
+- `817edb0 fix(manage): respect disabled management at startup` — **N/A yet.** The
+  C fix adds `read_config_manage_setting` to read `config manage off` from
+  `yabairc` at startup. The experimental Rust daemon does not read a config file
+  at all (gap/padding come from CLI args; `config` is set at runtime over the
+  socket). Revisit when config-file loading lands. The same commit's
+  `--toggle float` make-managed/make-floating split is superseded by `fda359b`.
+- `658f356 fix(manage): keep managed windows tiled when moved between spaces` and
+  `fda359b fix(manage): mark on-demand-tiled windows so layout switches keep them`
+  — **N/A structurally.** These fix a C-specific bug: under `config manage off`, a
+  window tiled on demand via `--toggle float` lacked `WINDOW_RULE_MANAGED`, so any
+  path that *re-derives* tree membership through `window_manager_should_manage_window`
+  (bsp<->stack layout switch, cross-space re-home) dropped it. The Rust port does
+  not re-derive membership from a manage gate on rebuild — a window stays in its
+  `Tree` until explicitly floated/removed/destroyed (`floating: HashSet`), and the
+  config-change path only re-flows geometry. Cross-space moves aren't implemented
+  yet (need the scripting addition). So the orphaning bug is not reachable in the
+  current Rust model. Re-verify if/when membership ever becomes gate-derived on
+  rebuild or manage-off on-demand tiling + layout switch lands.
+- `a7f15a9 build(dev): swap canary in place to preserve Accessibility grant` —
+  **build-flow only**, C `make dev`. Not Rust code, but the underlying lesson
+  (replacing a binary changes its cdhash and invalidates a cdhash-bound TCC grant)
+  is exactly the remote-testing friction hit in session 17; the Rust remote runbook
+  now uses a fixed-identifier ad-hoc signature so the grant survives rebuilds.
+- `d10e2bf`, `f80d7e9`, `0cb5d50` (release chores) and `00ba964` (docs) — no code.
+
+- Verification: `cargo fmt --all`; `cargo test --workspace` (146 tests);
+  `cargo clippy --workspace --all-targets`.
+
 ### 2026-06-26 (session 17) — application activated/deactivated/hidden/visible signals
 
 - The Rust WM daemon now fires `application_activated`, `application_deactivated`,

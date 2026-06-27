@@ -899,12 +899,19 @@ pub fn tileable_pid_windows(pid: i32) -> io::Result<Vec<DiscoveredAxWindow>> {
         let count = CFArrayGetCount(windows as CFArrayRef);
         for idx in 0..count {
             let window = CFArrayGetValueAtIndex(windows as CFArrayRef, idx);
-            if window.is_null()
-                || is_minimized(window)
-                || !is_position_settable(window)
-                || read_window_frame(window).is_none()
-            {
+            if window.is_null() || is_minimized(window) || !is_position_settable(window) {
                 continue;
+            }
+            // Skip zero-area windows, mirroring the C
+            // `window_manager_should_manage_window` zero-area gate. Some apps
+            // (e.g. zoom.us) keep an invisible 0x0 AXStandardWindow alive; tiling
+            // it would reserve a phantom BSP slot — an empty gap in the layout —
+            // while the real window floats untouched. A window that starts at 0x0
+            // is still tiled once it has a real frame, since discovery re-reads the
+            // live frame every reconcile.
+            match read_window_frame(window) {
+                Some(frame) if frame.w > 0.0 && frame.h > 0.0 => {}
+                _ => continue,
             }
             // A synthetic id keyed on pid+index when the CG id will not resolve.
             // The high bit avoids clashing with real CG ids, and folding the pid

@@ -66,6 +66,7 @@ fn main() -> ExitCode {
         Some("--experimental-sa-opacity") => run_sa_opacity(&args[1..]),
         Some("--experimental-sa-create-space") => run_sa_space(&args[1..], true),
         Some("--experimental-sa-destroy-space") => run_sa_space(&args[1..], false),
+        Some("--experimental-sa-window-to-space") => run_sa_window_to_space(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -908,6 +909,32 @@ fn run_sa_space(args: &[String], create: bool) -> ExitCode {
     }
 }
 
+/// Direct probe of the move-window-to-space SA opcode against the live payload.
+/// Usage: `--experimental-sa-window-to-space <window_id> <sid>`.
+fn run_sa_window_to_space(args: &[String]) -> ExitCode {
+    let (Some(wid), Some(sid)) = (
+        args.first().and_then(|a| a.parse::<u32>().ok()),
+        args.get(1).and_then(|a| a.parse::<u64>().ok()),
+    ) else {
+        eprintln!("usage: --experimental-sa-window-to-space <window_id> <sid>");
+        return ExitCode::from(64);
+    };
+    let Ok(user) = std::env::var("USER") else {
+        eprintln!("scripting-addition: 'env USER' not set");
+        return ExitCode::from(1);
+    };
+    match yabai_sa::ScriptingAddition::for_user(&user).move_window_to_space(sid, wid) {
+        Ok(()) => {
+            println!("scripting-addition: moved window {wid} to space {sid}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("scripting-addition: move window to space failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_space_probe(args: &[String]) -> ExitCode {
     let displays = match active_displays() {
         Ok(displays) => displays,
@@ -1198,51 +1225,76 @@ fn try_window_native_fullscreen_exit(
 /// (including a `--focus` mixed with other actions) returns `None` so the caller
 /// dispatches it through the pure core. Mirrors `space_manager_focus_space`'s
 /// gesture fallback; the scripting-addition path is deferred (Phase 8).
-/// Intercept the `space` commands that require the scripting addition
-/// (`--create`, `--destroy`). Returns `None` for any other command so the normal
-/// dispatch chain handles it. On success it refreshes live display state so the
-/// new/removed space is reflected immediately rather than waiting for the tick.
+/// Intercept the `space`/`window` commands that require the scripting addition
+/// (`space --create`/`--destroy`, `window --space`). Returns `None` for any other
+/// command so the normal dispatch chain handles it. On success it refreshes live
+/// display state so the changed topology is reflected immediately.
 fn try_scripting_addition(
     sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     display_frames: &mut Vec<(u32, Area)>,
     tokens: &[String],
 ) -> Option<Response> {
-    let Ok(Message::Space(cmd)) = parse_message(tokens) else {
-        return None;
-    };
-    for action in &cmd.actions {
-        let result = match action {
-            SpaceAction::Create => {
-                // Create a space on the display of the acting (target/active) space,
-                // mirroring the C `space --create`.
-                match runtime.state.resolve_space(cmd.target.as_ref()) {
-                    Ok(sid) => sa
-                        .create_space(sid)
-                        .map(|()| None)
-                        .map_err(|error| format!("could not create space: {error}\n")),
-                    Err(error) => Err(error),
+    match parse_message(tokens) {
+        Ok(Message::Space(cmd)) => {
+            for action in &cmd.actions {
+                let result = match action {
+                    SpaceAction::Create => {
+                        // Create a space on the display of the acting (target/active)
+                        // space, mirroring the C `space --create`.
+                        match runtime.state.resolve_space(cmd.target.as_ref()) {
+                            Ok(sid) => sa
+                                .create_space(sid)
+                                .map(|()| None)
+                                .map_err(|error| format!("could not create space: {error}\n")),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    SpaceAction::Destroy(selector) => {
+                        let selector = selector.as_ref().or(cmd.target.as_ref());
+                        match runtime.state.resolve_space(selector) {
+                            Ok(sid) => sa
+                                .destroy_space(sid)
+                                .map(|()| None)
+                                .map_err(|error| format!("could not destroy space: {error}\n")),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    _ => continue,
+                };
+                if result.is_ok() {
+                    refresh_live_display_state(runtime, display_frames);
                 }
+                return Some(result);
             }
-            SpaceAction::Destroy(selector) => {
-                let selector = selector.as_ref().or(cmd.target.as_ref());
-                match runtime.state.resolve_space(selector) {
-                    Ok(sid) => sa
-                        .destroy_space(sid)
-                        .map(|()| None)
-                        .map_err(|error| format!("could not destroy space: {error}\n")),
-                    Err(error) => Err(error),
-                }
-            }
-            _ => continue,
-        };
-        if result.is_ok() {
-            // Pick up the new/removed space (and its tree) right away.
-            refresh_live_display_state(runtime, display_frames);
+            None
         }
-        return Some(result);
+        Ok(Message::Window(cmd)) => {
+            for action in &cmd.actions {
+                let WindowAction::Space(selector) = action else {
+                    continue;
+                };
+                // Move the acting (target/focused) window to the selected space,
+                // mirroring `window --space` (`scripting_addition_move_window_to_space`).
+                let result = match (
+                    runtime.state.resolve_window_selector(cmd.target.as_ref()),
+                    runtime.state.resolve_space(Some(selector)),
+                ) {
+                    (Ok(wid), Ok(sid)) => sa
+                        .move_window_to_space(sid, wid)
+                        .map(|()| None)
+                        .map_err(|error| format!("could not move window to space: {error}\n")),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                };
+                if result.is_ok() {
+                    refresh_live_display_state(runtime, display_frames);
+                }
+                return Some(result);
+            }
+            None
+        }
+        _ => None,
     }
-    None
 }
 
 fn try_space_focus(

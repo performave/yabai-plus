@@ -49,7 +49,7 @@ reconstructing context.
 
 ## Progress log
 
-### 2026-06-27 (session 27) — SA space create/destroy wired + verified live
+### 2026-06-27 (session 27) — SA space create/destroy + window→space wired + verified live
 
 - Wired the scripting addition into the WM daemon for the headline feature: space
   management. `try_scripting_addition` intercepts `space --create` / `space
@@ -66,11 +66,20 @@ reconstructing context.
   (`[22,156,8,354,334]`), then `destroy-space 354` restored `[22,156,8,334]`.
   This is the first time the Rust port has created/destroyed real macOS spaces —
   the single biggest functional gap, now closed for create/destroy.
+- Also wired and verified `window --space` (move window to another space).
+  `try_scripting_addition` now also intercepts `Message::Window` with a
+  `WindowAction::Space(selector)`, resolves the acting window
+  (`AppState::resolve_window_selector`, newly public) and target space, and calls
+  `move_window_to_space`. **Verified live** via `--experimental-sa-window-to-space
+  <wid> <sid>`: moved Finder window 22656 to sid 22 (MC index 1) and restored it
+  to sid 8 (index 3, its origin). NOTE confirmed: the C `query` reports a space's
+  *Mission Control index*, while the SA and the Rust runtime use the SLS *sid* —
+  the daemon's `resolve_space` yields the sid, which is what the SA opcode wants.
 - Still to wire through the daemon (client methods exist + proven): `space --move`
-  / `--display` (cross-display), `window --display`/`--space` (move window to
-  space/display), and window `opacity`/`layer`/`sticky`/`shadow` (sticky/shadow
-  need toggle-state tracking). `space --focus` still uses the gesture path; it
-  could switch to the SA `focus_space` opcode now that the SA is available.
+  / `--display` (cross-display space moves), `window --display` (move window to a
+  display), and window `opacity`/`layer`/`sticky`/`shadow` (sticky/shadow need
+  toggle-state tracking). `space --focus` still uses the gesture path; it could
+  switch to the SA `focus_space` opcode now that the SA is available.
 - Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
   `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 

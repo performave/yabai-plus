@@ -115,6 +115,9 @@ pub struct AppState {
     /// Registered window `rule`s in insertion order, each with its filter
     /// patterns pre-compiled. The daemon evaluates these against new windows.
     rules: Vec<CompiledRule>,
+    /// User-assigned space labels (`space --label <name>`), `sid -> label`.
+    /// Labels are unique across spaces, so a label selector resolves to one sid.
+    space_labels: HashMap<u64, String>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -597,7 +600,7 @@ impl AppState {
         match message {
             Message::Config(cmd) => self.dispatch_config(&cmd.ops),
             Message::Window(cmd) => self.dispatch_window(cmd.target.as_ref(), &cmd.actions),
-            Message::Space(cmd) => self.dispatch_space(&cmd.actions),
+            Message::Space(cmd) => self.dispatch_space(cmd.target.as_ref(), &cmd.actions),
             Message::Query(cmd) => self.dispatch_query(&cmd),
             Message::Signal(cmd) => self.dispatch_signal(cmd),
             Message::Rule(cmd) => self.dispatch_rule(cmd),
@@ -712,8 +715,14 @@ impl AppState {
         Ok(None)
     }
 
-    fn dispatch_space(&mut self, actions: &[SpaceAction]) -> Response {
+    fn dispatch_space(&mut self, target: Option<&Selector>, actions: &[SpaceAction]) -> Response {
         for action in actions {
+            // `--label` acts on the selected (or active) space, not the tree.
+            if let SpaceAction::Label(label) = action {
+                let sid = self.resolve_space_selector(target)?;
+                self.set_space_label(sid, label)?;
+                continue;
+            }
             let tree = self.active_tree_mut()?;
             let root = tree.root();
             match action {
@@ -741,6 +750,29 @@ impl AppState {
             }
         }
         Ok(None)
+    }
+
+    /// Set or clear (empty `label`) a space's label, mirroring the C
+    /// `parse_label` rules: numeric labels and the reserved selector keywords are
+    /// rejected, an empty label clears it, and labels are unique across spaces
+    /// (assigning a name first removes it from any other space).
+    fn set_space_label(&mut self, sid: u64, label: &str) -> Result<(), String> {
+        if label.is_empty() {
+            self.space_labels.remove(&sid);
+            return Ok(());
+        }
+        if label.parse::<f64>().is_ok() {
+            return Err(format!("'{label}' cannot be used as a label.\n"));
+        }
+        const RESERVED: [&str; 6] = ["prev", "next", "first", "last", "recent", "mouse"];
+        if RESERVED.contains(&label) {
+            return Err(format!(
+                "'{label}' is a reserved keyword and cannot be used as a label.\n"
+            ));
+        }
+        self.space_labels.retain(|_, existing| existing != label);
+        self.space_labels.insert(sid, label.to_string());
+        Ok(())
     }
 
     fn dispatch_query(&self, cmd: &QueryCommand) -> Response {
@@ -1165,6 +1197,7 @@ impl AppState {
             &cmd.properties,
             &[
                 "id",
+                "label",
                 "type",
                 "windows",
                 "first-window",
@@ -1334,6 +1367,15 @@ impl AppState {
         for property in properties {
             match *property {
                 "id" => fields.push(format!("\t\"id\":{sid}")),
+                "label" => fields.push(format!(
+                    "\t\"label\":\"{}\"",
+                    json_escape(
+                        self.space_labels
+                            .get(&sid)
+                            .map(String::as_str)
+                            .unwrap_or("")
+                    )
+                )),
                 "type" => fields.push(format!("\t\"type\":\"{}\"", view_type_str(tree.layout))),
                 "windows" => fields.push(format!("\t\"windows\":[{}]", join_ids(&windows))),
                 "first-window" => fields.push(format!(
@@ -1540,6 +1582,11 @@ impl AppState {
     fn resolve_space_selector(&self, selector: Option<&Selector>) -> Result<u64, String> {
         match selector {
             Some(Selector::Index(id)) => Ok(u64::from(*id)),
+            Some(Selector::Label(label)) => self
+                .space_labels
+                .iter()
+                .find_map(|(&sid, existing)| (existing == label).then_some(sid))
+                .ok_or_else(|| format!("could not locate space with label '{label}'.\n")),
             Some(selector) => Err(format!(
                 "selector {selector:?} cannot be resolved without live space state"
             )),
@@ -2411,6 +2458,57 @@ mod tests {
             Ok(Some(
                 "{\n\t\"id\":1,\n\t\"type\":\"bsp\",\n\t\"windows\":[1, 2],\n\t\"first-window\":1,\n\t\"last-window\":2,\n\t\"has-focus\":true,\n\t\"is-visible\":true\n}\n".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn space_label_set_select_and_validation() {
+        let mut state = state_with_displays();
+        state.set_active_space(1);
+
+        // Label the active space, then a labeled space query / selector resolves.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--label", "web"])),
+            Ok(None)
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--spaces", "id,label", "--space", "web"])),
+            Ok(Some("{\n\t\"id\":1,\n\t\"label\":\"web\"\n}\n".to_string()))
+        );
+
+        // Labels are unique: moving "web" to space 2 clears it from space 1.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "2", "--label", "web"])),
+            Ok(None)
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--spaces", "id,label", "--space", "1"])),
+            Ok(Some("{\n\t\"id\":1,\n\t\"label\":\"\"\n}\n".to_string()))
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--spaces", "id", "--space", "web"])),
+            Ok(Some("{\n\t\"id\":2\n}\n".to_string()))
+        );
+
+        // An empty label clears it.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "2", "--label", ""])),
+            Ok(None)
+        );
+        assert!(
+            state
+                .handle_tokens(&toks(&["query", "--spaces", "id", "--space", "web"]))
+                .is_err()
+        );
+
+        // Numeric and reserved-keyword labels are rejected like the C daemon.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--label", "7"])),
+            Err("'7' cannot be used as a label.\n".to_string())
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--label", "next"])),
+            Err("'next' is a reserved keyword and cannot be used as a label.\n".to_string())
         );
     }
 

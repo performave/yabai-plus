@@ -37,7 +37,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 148 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 149 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-26.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -48,6 +48,24 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-27 (session 22) — space labels
+
+- Implemented `space --label <name>` end-to-end in the pure runtime. `AppState`
+  gained a `space_labels: HashMap<sid, String>`; `dispatch_space` intercepts
+  `--label` and acts on the selected (or active) space. `set_space_label` mirrors
+  the C `parse_label` rules: numeric labels and the reserved selector keywords
+  (`prev`/`next`/`first`/`last`/`recent`/`mouse`) are rejected with the C error
+  text, an empty label clears it, and labels are unique across spaces (assigning a
+  name removes it from any other space). `resolve_space_selector` now resolves a
+  `Selector::Label`, so `--space <label>` works for any space command/query. Added
+  the `label` property to `query --spaces`.
+- Live-verified through the WM daemon: `space --label coding` labeled the active
+  space (sid 18); `query --spaces id,label` showed it; `query --spaces id --space
+  coding` resolved the label selector to sid 18. Added a pure golden/behavior test
+  (set, label query, uniqueness move, clear, numeric/reserved rejection).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (149 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-27 (session 21b) — space `display` query property
 

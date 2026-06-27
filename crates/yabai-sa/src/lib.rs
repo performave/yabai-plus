@@ -1,5 +1,8 @@
 pub use yabai_osax_common as common;
 
+mod client;
+pub use client::{Payload, ScriptingAddition, request_handshake, send_message, status};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScriptingAdditionStatus {
     NotLoaded,

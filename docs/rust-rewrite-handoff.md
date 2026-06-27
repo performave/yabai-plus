@@ -37,7 +37,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 153 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 158 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-26.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -48,6 +48,40 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-27 (session 26) — Phase 7 start: scripting-addition runtime client
+
+- Started Phase 7 with the highest-leverage piece: the **runtime client** that the
+  daemon will call to perform privileged ops the AX API cannot. New
+  `yabai-sa::client` (pure std, no macOS dep — unit-testable) ports the
+  `scripting_addition_*` request functions from `src/sa.m`:
+  - `send_message` frames `[u16 LE length][opcode][payload]` (length = opcode +
+    payload bytes) and reads the one ack byte, mirroring `sa_payload_*`/
+    `scripting_addition_send_bytes`; `Payload` is the little-endian `pack` builder.
+  - `request_handshake` parses the NUL-terminated version + `u32` attrib reply;
+    `status` classifies NotLoaded/Outdated/MissingSupport/Healthy like
+    `scripting_addition_status`.
+  - `ScriptingAddition` exposes the full non-animation opcode surface:
+    focus/create/destroy space, move space to display / after space, window
+    move/opacity(+fade)/layer/sticky/shadow/focus/scale/order/order-in,
+    move-window(-list)-to-space. (Proxy-swap animation opcodes deferred — they
+    need window-animation/proxy state.)
+- Added 7 unit tests against an in-process mock SA socket (frame length/opcode/
+  payload LE, signed coords, opacity fade selector, handshake parse, status
+  classification). 158 workspace tests.
+- Exposed `--experimental-sa-status` in the binary (mirrors `yabai --check-sa`).
+  **Live-verified against the real C-loaded payload**: on this machine the probe
+  handshook `/tmp/yabai-sa_eric.socket` and reported `loaded and healthy (payload
+  v2.1.30)`, exit 0 — validating the entire runtime protocol (connect, framing,
+  handshake parse, version/attrib check) end-to-end against the actual injected
+  scripting addition.
+- NOT yet done (rest of Phase 7 + Phase 8): the SA *manager* (install/uninstall/
+  load/sudoers bundle writing + Dock injection from `src/sa.m`), wiring the client
+  into the daemon to enact `space --create/destroy/move`, cross-display moves, and
+  window opacity/layer/sticky/shadow, and the loader/payload artifacts (Phase 8,
+  the arm64e/PAC injection — kept as the legacy ObjC/asm island per the plan).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-27 (session 25) — `mouse` selector (window/space/display)
 

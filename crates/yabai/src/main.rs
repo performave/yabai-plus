@@ -25,6 +25,7 @@ use yabai_macos::{
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
 };
+use yabai_sa::ScriptingAdditionStatus;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,6 +62,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        Some("--experimental-sa-status") => run_sa_status(),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -802,6 +804,40 @@ fn focus_space_by_gesture(
 /// resolve the selector and switch to it via the dock-swipe gesture. Proves the
 /// SkyLight discovery + gesture path in isolation, without AX, sockets, or the
 /// full WM daemon. Read-only unless `--focus` is given.
+/// Probe the scripting addition over its socket and report its status, mirroring
+/// the C `scripting_addition_status` / `yabai --check-sa`. Works against an SA
+/// loaded by either the C or Rust daemon (same socket protocol).
+fn run_sa_status() -> ExitCode {
+    let Ok(user) = std::env::var("USER") else {
+        eprintln!("scripting-addition: cannot check -- 'env USER' not set");
+        return ExitCode::from(1);
+    };
+    let socket = yabai_sa::common::sa_socket_path(&user);
+    match yabai_sa::status(&socket) {
+        ScriptingAdditionStatus::NotLoaded => {
+            println!("scripting-addition: NOT loaded (no response on {socket})");
+            ExitCode::from(1)
+        }
+        ScriptingAdditionStatus::Outdated { payload_version } => {
+            println!(
+                "scripting-addition: loaded but OUTDATED (payload v{payload_version}, this build expects v{})",
+                yabai_sa::common::OSAX_VERSION
+            );
+            ExitCode::from(1)
+        }
+        ScriptingAdditionStatus::MissingSupport { attributes } => {
+            println!(
+                "scripting-addition: loaded but missing support for this macOS (attrib 0x{attributes:X})"
+            );
+            ExitCode::from(1)
+        }
+        ScriptingAdditionStatus::Healthy { payload_version } => {
+            println!("scripting-addition: loaded and healthy (payload v{payload_version})");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn run_space_probe(args: &[String]) -> ExitCode {
     let displays = match active_displays() {
         Ok(displays) => displays,

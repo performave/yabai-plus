@@ -25,14 +25,17 @@ reconstructing context.
   `window_created`, `window_destroyed`, `window_focused`, `window_moved`,
   `window_resized`, `window_minimized`, `window_deminimized`,
   `window_title_changed`, `application_launched/terminated`, and `space_changed`
-  actions, with `app`/`title` regex filters now honored for the event categories
-  that carry that metadata. `mouse_follows_focus` warps the cursor to the focused
-  window on focus.
+  actions, plus `application_activated`, `application_deactivated`,
+  `application_hidden`, and `application_visible` (NSWorkspace-driven), with
+  `app`/`title` regex filters now honored for the event categories that carry
+  that metadata and the `active` (front-app) context for the hidden/terminated
+  categories. `mouse_follows_focus` warps the cursor to the focused window on
+  focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
   deferred. 146 workspace tests pass. The shipped C `make` flow is unchanged.
-- Last updated: 2026-06-25.
+- Last updated: 2026-06-26.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
     longer a primary constraint for this track.
@@ -42,6 +45,38 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-26 (session 17) — application activated/deactivated/hidden/visible signals
+
+- The Rust WM daemon now fires `application_activated`, `application_deactivated`,
+  `application_hidden`, and `application_visible` signals. `yabai-macos::workspace`
+  gained four new `WorkspaceEvent` variants and registers the matching NSWorkspace
+  notifications (`NSWorkspaceDidActivate/Deactivate/Hide/UnhideApplicationNotification`)
+  on the existing observer object/thread; each carries the pid and localized app
+  name. The daemon fires the signal with `YABAI_PROCESS_ID` and app context,
+  mirroring the C `event_signal.c` categories.
+- Tracked the front (active) app pid from `application_activated` so the
+  `application_hidden` category (and now `application_terminated`) can supply the
+  `active` filter context (`front_pid == pid`), as the C event populates
+  `es->active`. Previously terminated passed no `active`, so an `active=`-filtered
+  terminate signal could never fire; the common (unfiltered) case is unchanged.
+  The pure runtime already categorized all of these (activated/deactivated/visible
+  = app filter only; hidden/terminated = app + active), so no runtime changes were
+  needed — only the live firing.
+- Live verification BLOCKED by the environment, same wall as session 12: the
+  NSWorkspace-driven application notifications are not delivered to an SSH-launched
+  daemon, and a GUI-session launch (LaunchAgent bootstrapped into `gui/501`) failed
+  the Accessibility check because the path-bound TCC grant for `/tmp/yabai-rust`
+  was created for a previous binary's cdhash and the redeploy invalidated it for
+  the GUI context. Re-granting requires writing the user TCC.db, which the harness
+  safety classifier blocks. Confirmed over SSH that the daemon is healthy with the
+  change (starts, `signal --add event=application_activated` succeeds, queries
+  work). The firing path is wired exactly like the verified `application_launched`/
+  `application_terminated` signals, which use the same NSWorkspace observer.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (146 tests, no new
+  unit test — the change is in the macOS/daemon FFI+event-wiring layer, which is
+  not unit-tested; the runtime filter categories were already covered);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-25 (session 16) — moved/resized signals
 
@@ -1447,11 +1482,13 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    (including `!=` exclusion), and live firing of `window_created`,
    `window_destroyed`, `window_focused`, `application_launched/terminated`,
    `space_changed`, `window_moved`, `window_resized`, `window_minimized`,
-   `window_deminimized`, and `window_title_changed` (with `YABAI_*` env vars).
-   Still to do: remaining signal event categories (application
-   activated/deactivated/hidden/visible/front-switched, space/display/
-   Mission Control/system events) and more live verification of app-filtered
-   launch/terminate events from a GUI-launched daemon session.
+   `window_deminimized`, `window_title_changed`, `application_activated`,
+   `application_deactivated`, `application_hidden`, and `application_visible`
+   (with `YABAI_*` env vars). Still to do: `application_front_switched` (needs
+   front/last-front pid tracking with `YABAI_RECENT_PROCESS_ID`), the
+   space/display/Mission Control/system event categories, and live verification
+   of the NSWorkspace-driven application signals from a GUI-launched daemon
+   session (blocked in the current test harness — see session 17).
 5. Then Phases 7-9: scripting addition (`yabai-sa`, currently empty — required
    for space management / cross-space moves on modern macOS), OSAX spike, and
    production packaging (wire the Rust binary into `make`, signing, notarization,

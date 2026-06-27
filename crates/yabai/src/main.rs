@@ -1565,6 +1565,9 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
     // Most-recently signaled focused window, so `window_focused` fires once per
     // real focus change whether the change came from a command or an AX observer.
     let mut last_focus_signal: Option<u32> = None;
+    // The front (active) app pid, tracked from NSWorkspace activate notifications.
+    // Used as the `active` context for application_hidden/terminated signals.
+    let mut front_pid: Option<i32> = None;
 
     // Unified event loop: observers, the periodic tick, and the socket all feed
     // one channel processed against the single `Runtime<AxSink>`.
@@ -1699,6 +1702,50 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
                     }
                 }
+                WorkspaceEvent::ApplicationActivated { pid, app } => {
+                    front_pid = Some(pid);
+                    fire_signals(
+                        &runtime,
+                        SignalEvent::ApplicationActivated,
+                        &[("YABAI_PROCESS_ID", pid.to_string())],
+                        Some(&app),
+                        None,
+                        None,
+                    );
+                }
+                WorkspaceEvent::ApplicationDeactivated { pid, app } => {
+                    fire_signals(
+                        &runtime,
+                        SignalEvent::ApplicationDeactivated,
+                        &[("YABAI_PROCESS_ID", pid.to_string())],
+                        Some(&app),
+                        None,
+                        None,
+                    );
+                }
+                WorkspaceEvent::ApplicationVisible { pid, app } => {
+                    fire_signals(
+                        &runtime,
+                        SignalEvent::ApplicationVisible,
+                        &[("YABAI_PROCESS_ID", pid.to_string())],
+                        Some(&app),
+                        None,
+                        None,
+                    );
+                }
+                WorkspaceEvent::ApplicationHidden { pid, app } => {
+                    // The hidden category filters on app + active (front app), per
+                    // `event_signal.c`.
+                    let active = front_pid == Some(pid);
+                    fire_signals(
+                        &runtime,
+                        SignalEvent::ApplicationHidden,
+                        &[("YABAI_PROCESS_ID", pid.to_string())],
+                        Some(&app),
+                        None,
+                        Some(active),
+                    );
+                }
                 WorkspaceEvent::ApplicationTerminated { pid, app } => {
                     fire_signals(
                         &runtime,
@@ -1706,7 +1753,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         &[("YABAI_PROCESS_ID", pid.to_string())],
                         Some(&app),
                         None,
-                        None,
+                        Some(front_pid == Some(pid)),
                     );
                     if observed.remove(&pid) {
                         for window_id in minimized_pids

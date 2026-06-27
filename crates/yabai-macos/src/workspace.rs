@@ -49,6 +49,10 @@ pub enum WorkspaceEvent {
     ActiveSpaceChanged,
     ApplicationLaunched { pid: i32, app: String },
     ApplicationTerminated { pid: i32, app: String },
+    ApplicationActivated { pid: i32, app: String },
+    ApplicationDeactivated { pid: i32, app: String },
+    ApplicationHidden { pid: i32, app: String },
+    ApplicationVisible { pid: i32, app: String },
 }
 
 fn send_workspace_event(event: WorkspaceEvent) {
@@ -126,6 +130,30 @@ extern "C" fn application_did_terminate(_this: Id, _cmd: Sel, notification: Id) 
     }
 }
 
+extern "C" fn application_did_activate(_this: Id, _cmd: Sel, notification: Id) {
+    if let Some((pid, app)) = notification_application(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationActivated { pid, app });
+    }
+}
+
+extern "C" fn application_did_deactivate(_this: Id, _cmd: Sel, notification: Id) {
+    if let Some((pid, app)) = notification_application(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationDeactivated { pid, app });
+    }
+}
+
+extern "C" fn application_did_hide(_this: Id, _cmd: Sel, notification: Id) {
+    if let Some((pid, app)) = notification_application(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationHidden { pid, app });
+    }
+}
+
+extern "C" fn application_did_unhide(_this: Id, _cmd: Sel, notification: Id) {
+    if let Some((pid, app)) = notification_application(notification) {
+        send_workspace_event(WorkspaceEvent::ApplicationVisible { pid, app });
+    }
+}
+
 fn add_observer_method(cls: Class, name: Sel, method: extern "C" fn(Id, Sel, Id)) -> bool {
     // SAFETY: `cls` is being configured before registration. All observer
     // methods take one object argument and return void (`v@:@`), matching
@@ -161,6 +189,26 @@ fn workspace_observer_class() -> Option<Class> {
                 sel(c"applicationDidTerminate:"),
                 application_did_terminate,
             ) {
+                return;
+            }
+            if !add_observer_method(
+                cls,
+                sel(c"applicationDidActivate:"),
+                application_did_activate,
+            ) {
+                return;
+            }
+            if !add_observer_method(
+                cls,
+                sel(c"applicationDidDeactivate:"),
+                application_did_deactivate,
+            ) {
+                return;
+            }
+            if !add_observer_method(cls, sel(c"applicationDidHide:"), application_did_hide) {
+                return;
+            }
+            if !add_observer_method(cls, sel(c"applicationDidUnhide:"), application_did_unhide) {
                 return;
             }
             // SAFETY: `cls` has been fully configured and can now be registered.
@@ -290,6 +338,30 @@ pub fn observe_workspace(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
             observer,
             sel(c"applicationDidTerminate:"),
             b"NSWorkspaceDidTerminateApplicationNotification\0",
+        )?;
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"applicationDidActivate:"),
+            b"NSWorkspaceDidActivateApplicationNotification\0",
+        )?;
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"applicationDidDeactivate:"),
+            b"NSWorkspaceDidDeactivateApplicationNotification\0",
+        )?;
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"applicationDidHide:"),
+            b"NSWorkspaceDidHideApplicationNotification\0",
+        )?;
+        add_workspace_observer(
+            center,
+            observer,
+            sel(c"applicationDidUnhide:"),
+            b"NSWorkspaceDidUnhideApplicationNotification\0",
         )?;
 
         CFRunLoopRun();

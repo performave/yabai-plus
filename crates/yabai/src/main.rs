@@ -63,6 +63,7 @@ fn main() -> ExitCode {
             }
         },
         Some("--experimental-sa-status") => run_sa_status(),
+        Some("--experimental-sa-opacity") => run_sa_opacity(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -834,6 +835,42 @@ fn run_sa_status() -> ExitCode {
         ScriptingAdditionStatus::Healthy { payload_version } => {
             println!("scripting-addition: loaded and healthy (payload v{payload_version})");
             ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Direct, non-destructive probe of a mutating SA opcode: set a window's opacity
+/// via the runtime client against the live (C- or Rust-loaded) payload. Exercises
+/// the full pack/frame/send path with a real privileged effect.
+/// Usage: `--experimental-sa-opacity <window_id> <opacity> [duration]`
+fn run_sa_opacity(args: &[String]) -> ExitCode {
+    let (Some(wid), Some(opacity)) = (
+        args.first().and_then(|a| a.parse::<u32>().ok()),
+        args.get(1).and_then(|a| a.parse::<f32>().ok()),
+    ) else {
+        eprintln!("usage: --experimental-sa-opacity <window_id> <opacity> [duration]");
+        return ExitCode::from(64);
+    };
+    let duration = args
+        .get(2)
+        .and_then(|a| a.parse::<f32>().ok())
+        .unwrap_or(0.0);
+
+    let Ok(user) = std::env::var("USER") else {
+        eprintln!("scripting-addition: 'env USER' not set");
+        return ExitCode::from(1);
+    };
+    let sa = yabai_sa::ScriptingAddition::for_user(&user);
+    match sa.set_opacity(wid, opacity, duration) {
+        Ok(()) => {
+            println!(
+                "scripting-addition: set opacity of window {wid} to {opacity} (dur {duration})"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("scripting-addition: opacity request failed: {error}");
+            ExitCode::from(1)
         }
     }
 }

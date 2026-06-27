@@ -75,6 +75,13 @@ reconstructing context.
   v2.1.30)`, exit 0 — validating the entire runtime protocol (connect, framing,
   handshake parse, version/attrib check) end-to-end against the actual injected
   scripting addition.
+- **Validated a mutating opcode against the real payload too.** Added
+  `--experimental-sa-opacity <wid> <opacity> [duration]` (direct, reversible probe
+  of `WINDOW_OPACITY`). Live on this machine: setting Finder window 22656 to 0.8
+  was confirmed by `query --windows` (`opacity: 0.8`), then reverted to 1.0 — the
+  full pack/frame/send path produces bytes the injected payload accepts and acts
+  on, not just the handshake. So the runtime client is proven for real privileged
+  effects, end-to-end.
 - NOT yet done (rest of Phase 7 + Phase 8): the SA *manager* (install/uninstall/
   load/sudoers bundle writing + Dock injection from `src/sa.m`), wiring the client
   into the daemon to enact `space --create/destroy/move`, cross-display moves, and

@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use regex_lite::Regex;
 use yabai_core::{
-    Area, ConfigOp, DisplayAction, Layer, Message, NodeSplit, QueryCommand, QueryScopeKind,
+    Area, ConfigOp, DisplayAction, Layer, Message, NodeSplit, Point, QueryCommand, QueryScopeKind,
     QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects, Selector, Signal, SignalCommand,
     SignalEvent, SpaceAction, Tree, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
 };
@@ -125,6 +125,9 @@ pub struct AppState {
     /// User-assigned display labels (`display --label <name>`), `did -> label`,
     /// also unique across displays.
     display_labels: HashMap<u32, String>,
+    /// Last known cursor location (top-left CG coords), set by the daemon before
+    /// dispatching a command so the `mouse` selector can resolve.
+    cursor_point: Option<Point>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -327,6 +330,28 @@ impl AppState {
 
     pub fn active_space_id(&self) -> Option<u64> {
         self.active_space
+    }
+
+    /// Record the live cursor location so the `mouse` selector can resolve. The
+    /// daemon sets this before dispatching each command.
+    pub fn set_cursor_point(&mut self, point: Point) {
+        self.cursor_point = Some(point);
+    }
+
+    /// The display whose frame contains `point` (the `mouse` display).
+    fn display_at_point(&self, point: Point) -> Option<u32> {
+        self.displays
+            .iter()
+            .find_map(|(&did, info)| info.frame.contains_point(point).then_some(did))
+    }
+
+    /// The managed window whose tiled frame contains `point` (the `mouse` window).
+    fn window_at_point(&self, point: Point) -> Option<u32> {
+        self.spaces.values().find_map(|tree| {
+            tree.capture()
+                .into_iter()
+                .find_map(|frame| frame.area.contains_point(point).then_some(frame.window_id))
+        })
     }
 
     /// Record `display_id`'s currently visible space (for multi-display flush).
@@ -1647,6 +1672,10 @@ impl AppState {
                 .iter()
                 .find_map(|(&did, existing)| (existing == label).then_some(did))
                 .ok_or_else(|| format!("could not locate display with label '{label}'.\n")),
+            Some(Selector::Mouse) => self
+                .cursor_point
+                .and_then(|point| self.display_at_point(point))
+                .ok_or_else(|| "could not locate the display under the cursor.\n".to_string()),
             Some(selector) => Err(format!(
                 "selector {selector:?} cannot be resolved without live display state"
             )),
@@ -1667,6 +1696,11 @@ impl AppState {
             Some(Selector::Recent) => self
                 .last_active_space
                 .ok_or_else(|| "could not locate the recent space.\n".to_string()),
+            Some(Selector::Mouse) => self
+                .cursor_point
+                .and_then(|point| self.display_at_point(point))
+                .and_then(|did| self.display_active_space.get(&did).copied())
+                .ok_or_else(|| "could not locate the space under the cursor.\n".to_string()),
             Some(selector) => Err(format!(
                 "selector {selector:?} cannot be resolved without live space state"
             )),
@@ -1696,6 +1730,12 @@ impl AppState {
             return self
                 .last_focused_window
                 .ok_or_else(|| "could not locate the recent window.\n".to_string());
+        }
+        if let Selector::Mouse = selector {
+            return self
+                .cursor_point
+                .and_then(|point| self.window_at_point(point))
+                .ok_or_else(|| "could not locate the window under the cursor.\n".to_string());
         }
 
         let sid = self
@@ -2221,14 +2261,30 @@ mod tests {
     }
 
     #[test]
-    fn window_focus_label_selector_still_unsupported() {
+    fn window_mouse_selector_resolves_window_under_cursor() {
         let mut state = state_with_space();
         state.add_window(1).unwrap();
-        state.set_focused_window(Some(1));
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(2));
+
+        // Two windows split the 1000x1000 space; window 1 is the left half.
+        // A cursor in the left half resolves `mouse` to window 1.
+        state.set_cursor_point(Point { x: 100.0, y: 500.0 });
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--focus", "mouse"])),
+            Ok(None)
+        );
+        assert_eq!(state.focused_window_id(), Some(1));
+
+        // With no window under the cursor, `mouse` fails with a clear message.
+        state.set_cursor_point(Point {
+            x: 5000.0,
+            y: 5000.0,
+        });
         let err = state
             .handle_tokens(&toks(&["window", "--focus", "mouse"]))
             .unwrap_err();
-        assert!(err.contains("cannot be resolved"));
+        assert!(err.contains("under the cursor"));
     }
 
     #[test]
@@ -2595,6 +2651,27 @@ mod tests {
             Ok(None)
         );
         assert_eq!(state.focused_window_id(), Some(1));
+    }
+
+    #[test]
+    fn mouse_selector_resolves_space_and_display_under_cursor() {
+        let mut state = state_with_displays();
+        state.set_display_active_space(42, 1);
+        state.set_display_active_space(77, 2);
+        // Cursor over the second display (frame x:1440..2720).
+        state.set_cursor_point(Point {
+            x: 1500.0,
+            y: 100.0,
+        });
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--displays", "id", "--display", "mouse"])),
+            Ok(Some("{\n\t\"id\":77\n}\n".to_string()))
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--spaces", "id", "--space", "mouse"])),
+            Ok(Some("{\n\t\"id\":2\n}\n".to_string()))
+        );
     }
 
     #[test]

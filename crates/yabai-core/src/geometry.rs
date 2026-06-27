@@ -38,6 +38,16 @@ impl Area {
         }
     }
 
+    /// Whether `point` lies within this area (left/top inclusive, right/bottom
+    /// exclusive), used to resolve the `mouse` selector against window/display
+    /// frames.
+    pub fn contains_point(self, point: Point) -> bool {
+        point.x >= self.x
+            && point.x < self.x + self.w
+            && point.y >= self.y
+            && point.y < self.y + self.h
+    }
+
     pub fn split(self, split: Split, gap: i32, ratio: f32) -> (Self, Self) {
         let mut left = self;
         let mut right = self;

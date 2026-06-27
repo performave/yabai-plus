@@ -1892,6 +1892,11 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                 }
                 WmWork::Message { tokens, reply } => {
                     refresh_live_display_state(&mut runtime, &mut display_frames);
+                    // Record the live cursor so the `mouse` selector can resolve
+                    // the window/space/display under the pointer.
+                    if let Ok(cursor) = cursor_location() {
+                        runtime.state.set_cursor_point(cursor);
+                    }
                     // Some commands need macOS-layer state/effects the pure core can't
                     // perform; handle those here, otherwise fall through.
                     let fullscreen_exit = try_window_native_fullscreen_exit(

@@ -37,7 +37,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 152 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 153 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-26.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -48,6 +48,26 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-27 (session 25) — `mouse` selector (window/space/display)
+
+- Implemented the `mouse` selector — the window/space/display under the cursor.
+  `AppState` gained `cursor_point: Option<Point>` (set by the daemon before each
+  command via `set_cursor_point(cursor_location())`); `resolve_window` resolves
+  `mouse` to the managed window whose tiled frame contains the cursor
+  (`window_at_point`, via `Tree::capture`), `resolve_display_selector` to the
+  display whose frame contains it (`display_at_point`), and
+  `resolve_space_selector` to that display's active space. Added
+  `geometry::Area::contains_point` (left/top inclusive, right/bottom exclusive).
+- Live-verified through the WM daemon: with the cursor at (657, 649),
+  `query --displays --display mouse` returned display 1 (frame contains the
+  point) and `query --spaces --space mouse` returned the cursor display's active
+  space (sid 18). Added pure tests for window/space/display mouse resolution and
+  the no-window-under-cursor error; rewrote the stale
+  `window_focus_label_selector_still_unsupported` test (which asserted `mouse` was
+  unsupported) into a real mouse-resolution test. 153 tests; fmt/clippy clean.
+- Remaining selectors: `stack[.N]` (needs stack-layout state) is the last one not
+  resolved in the pure layer.
 
 ### 2026-06-27 (session 24) — display labels
 
@@ -1743,6 +1763,6 @@ deminimize/title-change events and app/title filters for metadata-carrying event
 - Deferred in the pure layer (need live state): zoom persistence, insert
   feedback, the z-order rank tie-break in `find_node_in_direction`, cross-space
   warp/swap and the `:NaturalWarp` heuristic (single-space `warp_window` is
-  done), and `mouse`/`stack[.N]` selector resolution. DONE since: `recent`
-  (window + space, via `last_focused_window`/`last_active_space`) and space
-  `label` selectors.
+  done), and `stack[.N]` selector resolution. DONE since: `recent` (window +
+  space, via `last_focused_window`/`last_active_space`), `label` selectors (space
+  + display), and `mouse` (window/space/display, via `cursor_point`).

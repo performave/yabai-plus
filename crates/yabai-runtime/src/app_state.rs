@@ -1397,7 +1397,9 @@ impl AppState {
             .and_then(|sid| self.space_displays.get(&sid).copied())
     }
 
-    fn display_index(&self, display_id: u32) -> Option<usize> {
+    /// The 1-based arrangement index of a display (displays sorted by id),
+    /// matching `query --displays` `index` and the C `YABAI_DISPLAY_INDEX`.
+    pub fn display_index(&self, display_id: u32) -> Option<usize> {
         let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
         display_ids.sort_unstable();
         display_ids

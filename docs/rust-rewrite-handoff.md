@@ -66,6 +66,17 @@ reconstructing context.
   twice — confirming the **distributed** notification-center path (so
   `dock_did_change_pref`, same center, is covered by the same mechanism).
   `display_changed`/`system_woke` use the already-verified NSWorkspace center.
+- Also fired `display_added` / `display_removed` from the existing display-topology
+  poll in `refresh_live_display_state`: it now snapshots the known display ids
+  before registering/removing, then fires `display_added` (with `YABAI_DISPLAY_ID`
+  + `YABAI_DISPLAY_INDEX`) for newcomers and `display_removed` (`YABAI_DISPLAY_ID`)
+  for vanished displays, mirroring `event_signal.c`. Exposed
+  `AppState::display_index` (1-based arrangement index, matching `query --displays`).
+  The diff fires exactly once per topology change (prior set is read fresh each
+  poll, which already reflects the previous poll's registrations). Not yet
+  live-verified — needs a physical monitor hot-plug (the tiling side of hot-plug
+  was verified in session 4). `display_moved`/`display_resized` still need a
+  CGDisplayReconfiguration callback (deferred).
 - KNOWN GAP: `dock_did_restart` did **not** fire on `killall Dock`. It is an
   AppKit-internal notification posted to the local default center, and detecting
   the Dock restart appears to require the full `[NSApp run]` AppKit event loop;
@@ -1599,11 +1610,12 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `application_front_switched` (with `YABAI_*` env vars, incl.
    `YABAI_RECENT_PROCESS_ID`), plus the context-free `space_changed`,
    `display_changed`, `system_woke`, `menu_bar_hidden_changed`, and
-   `dock_did_change_pref` (`dock_did_restart` is wired but unverified — likely
-   needs `[NSApp run]`; see session 20). Still to do: `space_created`/
-   `space_destroyed`, `display_added`/`removed`/`moved`/`resized` (the daemon
-   already polls display topology — these could fire from that diff), and
-   `mission_control_enter`/`exit` (need SLS/private notifications).
+   `dock_did_change_pref`, and `display_added`/`display_removed` (from the display
+   poll diff, not yet hot-plug-verified). `dock_did_restart` is wired but
+   unverified (likely needs `[NSApp run]`; see session 20). Still to do:
+   `space_created`/`space_destroyed`, `display_moved`/`display_resized` (need a
+   CGDisplayReconfiguration callback), and `mission_control_enter`/`exit` (need
+   SLS/private notifications).
    The NSWorkspace-driven application signals (launch/terminate/activate/
    deactivate/hide/visible) and app filters are now verified live from a
    `gui/501` LaunchAgent daemon — see session 17, which also fixed the long-

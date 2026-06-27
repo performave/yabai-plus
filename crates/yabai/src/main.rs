@@ -653,6 +653,10 @@ fn refresh_live_display_state(
         return;
     }
 
+    // Snapshot the known displays before this refresh registers/removes any, so
+    // we can fire display_added / display_removed for the topology diff.
+    let prior_display_ids: HashSet<u32> = runtime.state.display_ids().into_iter().collect();
+
     let mut refreshed_frames = Vec::with_capacity(displays.len());
     let mut active_display_ids = HashSet::with_capacity(displays.len());
     let mut live_space_ids = HashSet::new();
@@ -717,6 +721,31 @@ fn refresh_live_display_state(
             let _ = runtime
                 .state
                 .handle_event(StateEvent::DisplayRemoved { display_id });
+        }
+    }
+
+    // Fire topology-change signals for the diff. display_added carries
+    // YABAI_DISPLAY_ID + YABAI_DISPLAY_INDEX; display_removed carries just the id
+    // (the display is already gone from state), mirroring `event_signal.c`.
+    for &display_id in &active_display_ids {
+        if !prior_display_ids.contains(&display_id) {
+            let mut env = vec![("YABAI_DISPLAY_ID", display_id.to_string())];
+            if let Some(index) = runtime.state.display_index(display_id) {
+                env.push(("YABAI_DISPLAY_INDEX", index.to_string()));
+            }
+            fire_signals(runtime, SignalEvent::DisplayAdded, &env, None, None, None);
+        }
+    }
+    for &display_id in &prior_display_ids {
+        if !active_display_ids.contains(&display_id) {
+            fire_signals(
+                runtime,
+                SignalEvent::DisplayRemoved,
+                &[("YABAI_DISPLAY_ID", display_id.to_string())],
+                None,
+                None,
+                None,
+            );
         }
     }
 

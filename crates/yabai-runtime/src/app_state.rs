@@ -15,9 +15,9 @@ use std::collections::{HashMap, HashSet};
 
 use regex_lite::Regex;
 use yabai_core::{
-    Area, ConfigOp, Layer, Message, NodeSplit, QueryCommand, QueryScopeKind, QueryTarget, Rule,
-    RuleApply, RuleCommand, RuleEffects, Selector, Signal, SignalCommand, SignalEvent, SpaceAction,
-    Tree, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
+    Area, ConfigOp, DisplayAction, Layer, Message, NodeSplit, QueryCommand, QueryScopeKind,
+    QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects, Selector, Signal, SignalCommand,
+    SignalEvent, SpaceAction, Tree, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -122,6 +122,9 @@ pub struct AppState {
     /// User-assigned space labels (`space --label <name>`), `sid -> label`.
     /// Labels are unique across spaces, so a label selector resolves to one sid.
     space_labels: HashMap<u64, String>,
+    /// User-assigned display labels (`display --label <name>`), `did -> label`,
+    /// also unique across displays.
+    display_labels: HashMap<u32, String>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -621,7 +624,7 @@ impl AppState {
             Message::Rule(cmd) => self.dispatch_rule(cmd),
             // Domains whose effects need the macOS layers are accepted but not
             // yet enacted here; report them rather than silently succeeding.
-            Message::Display(_) => Err("domain not yet handled by AppState".to_string()),
+            Message::Display(cmd) => self.dispatch_display(cmd.target.as_ref(), &cmd.actions),
         }
     }
 
@@ -789,6 +792,49 @@ impl AppState {
         }
         self.space_labels.retain(|_, existing| existing != label);
         self.space_labels.insert(sid, label.to_string());
+        Ok(())
+    }
+
+    fn dispatch_display(
+        &mut self,
+        target: Option<&Selector>,
+        actions: &[DisplayAction],
+    ) -> Response {
+        for action in actions {
+            match action {
+                DisplayAction::Label(label) => {
+                    let did = self.resolve_display_selector(target)?;
+                    self.set_display_label(did, label)?;
+                }
+                // Focus/move/etc. need the macOS layers (gesture / scripting addition).
+                _ => return Err("display action not yet handled by AppState".to_string()),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Set or clear (empty `label`) a display's label, mirroring the C
+    /// `parse_label` rules for displays: numeric labels and the reserved
+    /// direction/selector keywords are rejected, an empty label clears it, and
+    /// labels are unique across displays.
+    fn set_display_label(&mut self, did: u32, label: &str) -> Result<(), String> {
+        if label.is_empty() {
+            self.display_labels.remove(&did);
+            return Ok(());
+        }
+        if label.parse::<f64>().is_ok() {
+            return Err(format!("'{label}' cannot be used as a label.\n"));
+        }
+        const RESERVED: [&str; 10] = [
+            "north", "east", "south", "west", "prev", "next", "first", "last", "recent", "mouse",
+        ];
+        if RESERVED.contains(&label) {
+            return Err(format!(
+                "'{label}' is a reserved keyword and cannot be used as a label.\n"
+            ));
+        }
+        self.display_labels.retain(|_, existing| existing != label);
+        self.display_labels.insert(did, label.to_string());
         Ok(())
     }
 
@@ -1138,7 +1184,7 @@ impl AppState {
     fn query_displays(&self, cmd: &QueryCommand) -> Response {
         let properties = query_properties(
             &cmd.properties,
-            &["id", "index", "frame", "spaces", "has-focus"],
+            &["id", "label", "index", "frame", "spaces", "has-focus"],
             "display",
         )?;
 
@@ -1359,6 +1405,15 @@ impl AppState {
         for property in properties {
             match *property {
                 "id" => fields.push(format!("\t\"id\":{display_id}")),
+                "label" => fields.push(format!(
+                    "\t\"label\":\"{}\"",
+                    json_escape(
+                        self.display_labels
+                            .get(&display_id)
+                            .map(String::as_str)
+                            .unwrap_or("")
+                    )
+                )),
                 "index" => fields.push(format!(
                     "\t\"index\":{}",
                     self.display_index(display_id).unwrap_or(0)
@@ -1587,6 +1642,11 @@ impl AppState {
                     )
                 })
             }
+            Some(Selector::Label(label)) => self
+                .display_labels
+                .iter()
+                .find_map(|(&did, existing)| (existing == label).then_some(did))
+                .ok_or_else(|| format!("could not locate display with label '{label}'.\n")),
             Some(selector) => Err(format!(
                 "selector {selector:?} cannot be resolved without live display state"
             )),
@@ -2484,6 +2544,40 @@ mod tests {
             Ok(Some(
                 "{\n\t\"id\":1,\n\t\"type\":\"bsp\",\n\t\"windows\":[1, 2],\n\t\"first-window\":1,\n\t\"last-window\":2,\n\t\"has-focus\":true,\n\t\"is-visible\":true\n}\n".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn display_label_set_select_and_validation() {
+        let mut state = state_with_displays();
+        state.set_active_space(1);
+
+        // Label display 2 (arrangement index 2, id 77) and resolve it back.
+        assert_eq!(
+            state.handle_tokens(&toks(&["display", "2", "--label", "side"])),
+            Ok(None)
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&[
+                "query",
+                "--displays",
+                "id,label",
+                "--display",
+                "side"
+            ])),
+            Ok(Some(
+                "{\n\t\"id\":77,\n\t\"label\":\"side\"\n}\n".to_string()
+            ))
+        );
+
+        // Reserved direction keyword and numeric labels are rejected.
+        assert_eq!(
+            state.handle_tokens(&toks(&["display", "--label", "west"])),
+            Err("'west' is a reserved keyword and cannot be used as a label.\n".to_string())
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["display", "--label", "3"])),
+            Err("'3' cannot be used as a label.\n".to_string())
         );
     }
 

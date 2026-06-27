@@ -37,7 +37,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 151 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 152 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-06-26.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -48,6 +48,21 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-06-27 (session 24) — display labels
+
+- Implemented `display --label <name>` in the pure runtime, mirroring the space
+  label work. `Message::Display` is now dispatched (previously a blanket "not yet
+  handled"): `dispatch_display` handles `--label` (other display actions —
+  focus/move — still need the macOS gesture/scripting-addition layers and return
+  an explicit error). `AppState` gained `display_labels: HashMap<did, String>`;
+  `set_display_label` enforces the C display `parse_label` rules (numeric and the
+  reserved direction/selector keywords `north/east/south/west/prev/next/first/
+  last/recent/mouse` rejected, empty clears, unique across displays).
+  `resolve_display_selector` resolves a `Selector::Label`, and `query --displays`
+  gained the `label` property.
+- Added a pure test (label set, label-selector query resolution, reserved/numeric
+  rejection). 152 tests; fmt/clippy clean; release builds.
 
 ### 2026-06-27 (session 23) — `recent` selector (window + space)
 

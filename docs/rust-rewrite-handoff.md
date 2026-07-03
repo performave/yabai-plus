@@ -41,7 +41,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 161 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 162 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -52,6 +52,17 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 45) — pure `query --windows stack-index`
+
+- Added the `stack-index` property to the pure `query --windows` serializer. It
+  matches the C `window.c` behavior: 1-based position within a leaf whose
+  `window_list` has more than one window, otherwise `0`. This is backed entirely
+  by the runtime BSP/stack tree state, so no macOS or SA access is needed.
+- Added `AppState::window_stack_index` and a golden runtime test over `layout stack`
+  with three windows (`stack-index` 1/2/3).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (162 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 44) — `space_created` / `space_destroyed` signals from topology diff + verified live
 

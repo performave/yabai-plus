@@ -1588,6 +1588,7 @@ impl AppState {
                 "is-visible",
                 "split-type",
                 "split-child",
+                "stack-index",
                 "has-fullscreen-zoom",
                 "has-parent-zoom",
             ],
@@ -1779,6 +1780,10 @@ impl AppState {
                     "\t\"split-child\":\"{}\"",
                     self.window_split_info(frame.window_id).1
                 )),
+                "stack-index" => fields.push(format!(
+                    "\t\"stack-index\":{}",
+                    self.window_stack_index(frame.window_id)
+                )),
                 "has-fullscreen-zoom" => fields.push(format!(
                     "\t\"has-fullscreen-zoom\":{}",
                     json_bool(self.window_zoom(frame.window_id) == Some(ZoomKind::Fullscreen))
@@ -1843,6 +1848,24 @@ impl AppState {
             }
         }
         ("none", "none")
+    }
+
+    /// The 1-based index of a window within a stacked leaf, or 0 when the window
+    /// is not stacked, matching C `window_node_index_of_window(...) + 1`.
+    fn window_stack_index(&self, window_id: u32) -> usize {
+        for tree in self.spaces.values() {
+            if let Some(node_id) = tree.find_window_node(window_id) {
+                let list = &tree.node(node_id).window_list;
+                if list.len() > 1 {
+                    return list
+                        .iter()
+                        .position(|&wid| wid == window_id)
+                        .map(|idx| idx + 1)
+                        .unwrap_or(0);
+                }
+            }
+        }
+        0
     }
 
     /// The zoom state of a window, if any (used for `has-fullscreen-zoom` /
@@ -2808,6 +2831,25 @@ mod tests {
         assert_eq!(
             out,
             "[{\n\t\"id\":10,\n\t\"space\":1,\n\t\"display\":1,\n\t\"is-visible\":true,\n\t\"split-type\":\"vertical\",\n\t\"split-child\":\"first_child\",\n\t\"has-fullscreen-zoom\":false\n},{\n\t\"id\":20,\n\t\"space\":1,\n\t\"display\":1,\n\t\"is-visible\":true,\n\t\"split-type\":\"vertical\",\n\t\"split-child\":\"second_child\",\n\t\"has-fullscreen-zoom\":false\n}]\n"
+        );
+    }
+
+    #[test]
+    fn query_windows_serializes_stack_index() {
+        let mut state = state_with_space();
+        state
+            .handle_tokens(&toks(&["space", "--layout", "stack"]))
+            .unwrap();
+        state.add_window(10).unwrap();
+        state.add_window(20).unwrap();
+        state.add_window(30).unwrap();
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--windows", "id,stack-index"])),
+            Ok(Some(
+                "[{\n\t\"id\":10,\n\t\"stack-index\":1\n},{\n\t\"id\":20,\n\t\"stack-index\":2\n},{\n\t\"id\":30,\n\t\"stack-index\":3\n}]\n"
+                    .to_string()
+            ))
         );
     }
 

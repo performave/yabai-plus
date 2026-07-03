@@ -29,8 +29,8 @@ reconstructing context.
   `window_created`, `window_destroyed`, `window_focused`, `window_moved`,
   `window_resized`, `window_minimized`, `window_deminimized`,
   `window_title_changed`, `application_launched/terminated`, `space_changed`,
-  `application_activated/deactivated/hidden/visible`, `application_front_switched`,
-  `display_changed`, `display_added/removed`, `system_woke`,
+  `space_created`/`space_destroyed`, `application_activated/deactivated/hidden/visible`,
+  `application_front_switched`, `display_changed`, `display_added/removed`, `system_woke`,
   `menu_bar_hidden_changed`, and `dock_did_change_pref` actions, with `app`/`title`
   regex filters honored for the metadata-carrying categories and the `active`
   (front-app) context for the hidden/terminated categories. NSWorkspace
@@ -52,6 +52,24 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 44) — `space_created` / `space_destroyed` signals from topology diff + verified live
+
+- Wired `space_created` and `space_destroyed` signal firing into the existing live
+  topology refresh (`refresh_live_display_state`). The daemon snapshots known
+  spaces before re-reading displays/spaces, fires `space_created` for new live sids
+  with `YABAI_SPACE_ID` + `YABAI_SPACE_INDEX` (using Mission Control order), and
+  fires `space_destroyed` for removed sids with `YABAI_SPACE_ID`, mirroring the C
+  `event_signal.c` payloads. Destroyed-space signals only fire when the space
+  snapshot was complete, matching the existing conservative removal gate.
+- **Verified live on the remote (macOS 26.5.1)** with the SA-loaded Rust WM daemon
+  on an isolated socket: registered signal actions appending env vars to
+  `/tmp/yabai-space-signals.out`, ran `space --create`, detected new sid 83, then
+  ran `space 83 --destroy`. Captured output:
+  - `created:83:3`
+  - `destroyed:83`
+- Verification: `cargo fmt --all`; `cargo test --workspace` (161 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 43) — mouse drag drop actions (swap/stack/edge-warp) + verified live
 
@@ -2438,8 +2456,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters
    (including `!=` exclusion), and live firing of `window_created`,
    `window_destroyed`, `window_focused`, `application_launched/terminated`,
-   `space_changed`, `window_moved`, `window_resized`, `window_minimized`,
-   `window_deminimized`, `window_title_changed`, `application_activated`,
+   `space_changed`, `space_created`, `space_destroyed`, `window_moved`,
+   `window_resized`, `window_minimized`, `window_deminimized`, `window_title_changed`, `application_activated`,
    `application_deactivated`, `application_hidden`, `application_visible`, and
    `application_front_switched` (with `YABAI_*` env vars, incl.
    `YABAI_RECENT_PROCESS_ID`), plus the context-free `space_changed`,
@@ -2447,9 +2465,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `dock_did_change_pref`, and `display_added`/`display_removed` (from the display
    poll diff, not yet hot-plug-verified). `dock_did_restart` is wired but
    unverified (likely needs `[NSApp run]`; see session 20). Still to do:
-   `space_created`/`space_destroyed`, `display_moved`/`display_resized` (need a
-   CGDisplayReconfiguration callback), and `mission_control_enter`/`exit` (need
-   SLS/private notifications).
+   `display_moved`/`display_resized` (need a CGDisplayReconfiguration callback),
+   and `mission_control_enter`/`exit` (need SLS/private notifications).
    The NSWorkspace-driven application signals (launch/terminate/activate/
    deactivate/hide/visible) and app filters are now verified live from a
    `gui/501` LaunchAgent daemon — see session 17, which also fixed the long-

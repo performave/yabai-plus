@@ -687,9 +687,10 @@ fn refresh_live_display_state(
         return;
     }
 
-    // Snapshot the known displays before this refresh registers/removes any, so
-    // we can fire display_added / display_removed for the topology diff.
+    // Snapshot the known topology before this refresh registers/removes anything,
+    // so we can fire *_added / *_removed signals for the diff.
     let prior_display_ids: HashSet<u32> = runtime.state.display_ids().into_iter().collect();
+    let prior_space_ids: HashSet<u64> = runtime.state.space_ids().into_iter().collect();
 
     let mut refreshed_frames = Vec::with_capacity(displays.len());
     let mut active_display_ids = HashSet::with_capacity(displays.len());
@@ -758,7 +759,38 @@ fn refresh_live_display_state(
         }
     }
 
-    // Fire topology-change signals for the diff. display_added carries
+    // Fire topology-change signals for the diff. space_created carries
+    // YABAI_SPACE_ID + YABAI_SPACE_INDEX; space_destroyed carries just the id
+    // (the space is already gone from state), mirroring `event_signal.c`.
+    for &sid in &live_space_ids {
+        if !prior_space_ids.contains(&sid) {
+            let order = mission_control_spaces().unwrap_or_else(|_| runtime.state.space_ids());
+            let env = vec![
+                ("YABAI_SPACE_ID", sid.to_string()),
+                (
+                    "YABAI_SPACE_INDEX",
+                    mission_control_index(&order, sid).to_string(),
+                ),
+            ];
+            fire_signals(runtime, SignalEvent::SpaceCreated, &env, None, None, None);
+        }
+    }
+    if complete_space_snapshot {
+        for &sid in &prior_space_ids {
+            if !live_space_ids.contains(&sid) {
+                fire_signals(
+                    runtime,
+                    SignalEvent::SpaceDestroyed,
+                    &[("YABAI_SPACE_ID", sid.to_string())],
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    // display_added carries
     // YABAI_DISPLAY_ID + YABAI_DISPLAY_INDEX; display_removed carries just the id
     // (the display is already gone from state), mirroring `event_signal.c`.
     for &display_id in &active_display_ids {

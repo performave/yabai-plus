@@ -49,6 +49,48 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 37) — window `--sub-layer` / `--toggle sticky` / `--toggle shadow` via SA + verified live
+
+- Wired three SA-backed window ops through the WM daemon in
+  `try_scripting_addition`'s `Message::Window` arm:
+  - `window --sub-layer below|normal|above|auto` → `window_sub_layer_via_sa`,
+    mirroring the C `window --sub-layer` (`window_manager_set_window_layer` →
+    `scripting_addition_set_layer`). Maps the arg to the `CGWindowLevelKey` int the
+    SA opcode resolves via `CGWindowLevelForKey` (BELOW=3, NORMAL=4, ABOVE=5); `auto`
+    resolves to below for a managed/tiled window, normal otherwise (the C default;
+    the associated-child-window propagation is not modeled). Bad value → the C
+    "unknown value … for domain 'window'" string.
+  - `window --toggle sticky` → `window_toggle_sticky_via_sa`, mirroring
+    `window_manager_make_window_sticky`: `scripting_addition_set_sticky(!current)`,
+    then untile on make-sticky / re-tile on un-sticky. Toggle state is tracked in a
+    new `AppState.sticky` set; `assign_window_to_space` now skips sticky windows
+    (like floats) so reconcile never re-tiles them, and `set_window_sticky` mirrors
+    `set_window_floating`.
+  - `window --toggle shadow` → `window_toggle_shadow_via_sa`, mirroring
+    `window_manager_toggle_window_shadow`: `scripting_addition_set_shadow(!current)`,
+    purely visual (no re-tile). Toggle state tracked in a new `AppState.shadow_disabled`
+    set (`window_has_shadow`/`set_window_shadow`).
+  - Other `--toggle` values (float/zoom/native-fullscreen/…) still fall through to
+    the existing AX path; only `sticky`/`shadow` are intercepted for the SA.
+- **Verified live on the remote (two displays, macOS 26.5.1)** once the user
+  unlocked the screen (I disabled the screensaver auto-lock —
+  `com.apple.screensaver idleTime 0`, per-user, no sudo — so it stopped re-locking).
+  Daemon managing Finder window 821 on `space 1/display 1`:
+  - **Sticky:** `window 821 --toggle sticky` → 821 then appears on **both** of
+    display 1's spaces (1 and 61) via `--experimental-windows-on-space`, but not
+    display 2's space 64 (a window lives on one display), and it **drops from the
+    daemon tree** (`query` no longer lists it). A second `--toggle sticky` reverts:
+    back on space 1 only and back in the tree (`query` lists 821). Both exit 0.
+  - **Shadow:** `--toggle shadow` off then on, both exit 0; before/after
+    `screencapture -D 1` show the drop-shadow halo present then absent around the
+    tiled window (and the PNG byte size drops when the shadow is removed).
+  - **Sub-layer:** `--sub-layer below|normal|above|auto` all exit 0; a bogus value
+    (`--sub-layer sideways`) returns the faithful `unknown value 'sideways' given to
+    command '--sub-layer' for domain 'window'` (exit 1).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai` — all
+  clean; live end-to-end verified.
+
 ### 2026-07-03 (session 36) — `space --switch` wired through the SA + verified live (same- and cross-display)
 
 - Wired `space --switch <sel>` through the WM daemon, mirroring the C
@@ -2131,8 +2173,8 @@ discovered windows to the display/space they're physically on. Active-space
 changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
-float/zoom/native-fullscreen; opacity, move-to-space, and move-to-display (all via
-the SA); space focus (SA `focus_space`, gesture fallback), switch (SA focus /
+float/zoom/native-fullscreen, sticky, and shadow; opacity, sub-layer, move-to-space,
+and move-to-display (all via the SA); space focus (SA `focus_space`, gesture fallback), switch (SA focus /
 cross-display content swap), cross-display space move (SA `move_space_to_display`),
 intra-display space reorder + same/cross-display swap (SA `move_space_after_space` /
 `move_window_list_to_space`), and rotate/balance/mirror/layout;
@@ -2195,11 +2237,14 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `--minimize`, `--deminimize` for numeric ids and `first`/`last`; `--swap`
    already worked. `window --opacity <float>` is now wired through the SA
    (`set_opacity` + `config.window_opacity_duration`), verified live via the
-   `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback. Still to do:
+   `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback. `window --display`
+   (session 30), `--sub-layer below|normal|above|auto` (SA `set_layer`), `--toggle
+   sticky` (SA `set_sticky` + untile/re-tile) and `--toggle shadow` (SA `set_shadow`)
+   are all wired through the SA and verified live (session 37); the parser already
+   produces `--sub-layer` as `WindowAction::Raw`, so no grammar change was needed
+   (the C command is `--sub-layer`, not `--layer`). Still to do:
    remaining deminimize/native-fullscreen-exit selectors, focus without-raise,
-   sticky/scratchpad, `--layer` (not yet in the parser grammar) and
-   sticky/shadow (need toggle-state tracking) — all via `scripting_addition_set_*`;
-   mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
+   scratchpad, and mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    still needs a CGEventTap.
    Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters

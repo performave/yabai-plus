@@ -1416,6 +1416,32 @@ fn try_scripting_addition(
                     WindowAction::Raw { command, arg } if command == "--opacity" => {
                         return Some(window_opacity_via_sa(sa, runtime, cmd.target.as_ref(), arg));
                     }
+                    // `window --sub-layer below|normal|above|auto` sets the window's
+                    // SkyLight sub-level through the SA (purely visual, no re-tile).
+                    WindowAction::Raw { command, arg } if command == "--sub-layer" => {
+                        return Some(window_sub_layer_via_sa(
+                            sa,
+                            runtime,
+                            cmd.target.as_ref(),
+                            arg,
+                        ));
+                    }
+                    // `window --toggle sticky` / `--toggle shadow` need the SA and
+                    // toggle-state tracking; other toggles fall through to the AX path.
+                    WindowAction::Toggle(value) if value == "sticky" => {
+                        let result = window_toggle_sticky_via_sa(sa, runtime, cmd.target.as_ref());
+                        if result.is_ok() {
+                            refresh_live_display_state(runtime, display_frames);
+                        }
+                        return Some(result);
+                    }
+                    WindowAction::Toggle(value) if value == "shadow" => {
+                        return Some(window_toggle_shadow_via_sa(
+                            sa,
+                            runtime,
+                            cmd.target.as_ref(),
+                        ));
+                    }
                     _ => continue,
                 }
             }
@@ -1454,6 +1480,96 @@ fn window_opacity_via_sa(
                 "could not change opacity of window with id '{wid}' due to an error with the scripting-addition.\n"
             )
         })
+}
+
+// `CGWindowLevelKey` values passed to the SA layer opcode, which resolves them via
+// `CGWindowLevelForKey` (mirroring the C `LAYER_*` macros in `misc/macros.h`).
+// LAYER_AUTO (key 0) is always resolved to below/normal before sending, so it is
+// never passed to the SA directly.
+const CG_WINDOW_LEVEL_KEY_BACKSTOP: i32 = 3; // kCGBackstopMenuLevelKey (LAYER_BELOW)
+const CG_WINDOW_LEVEL_KEY_NORMAL: i32 = 4; // kCGNormalWindowLevelKey (LAYER_NORMAL)
+const CG_WINDOW_LEVEL_KEY_FLOATING: i32 = 5; // kCGFloatingWindowLevelKey (LAYER_ABOVE)
+
+/// Set the acting window's SkyLight sub-level through the SA, mirroring the C
+/// `window --sub-layer` (`window_manager_set_window_layer` →
+/// `scripting_addition_set_layer`). `auto` resolves to `below` for a managed
+/// (tiled) window and `normal` otherwise, matching the C default; the C's
+/// associated-child-window propagation is not modeled here (single-window sublevel).
+fn window_sub_layer_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    target: Option<&Selector>,
+    arg: &str,
+) -> Response {
+    let wid = runtime.state.resolve_window_selector(target)?;
+    let layer = match arg {
+        "below" => CG_WINDOW_LEVEL_KEY_BACKSTOP,
+        "normal" => CG_WINDOW_LEVEL_KEY_NORMAL,
+        "above" => CG_WINDOW_LEVEL_KEY_FLOATING,
+        "auto" => {
+            // LAYER_AUTO: a managed (tiled) window sinks below floats; otherwise normal.
+            if runtime.state.window_space_id(wid).is_some() && !runtime.state.is_floating(wid) {
+                CG_WINDOW_LEVEL_KEY_BACKSTOP
+            } else {
+                CG_WINDOW_LEVEL_KEY_NORMAL
+            }
+        }
+        _ => {
+            return Err(format!(
+                "unknown value '{arg}' given to command '--sub-layer' for domain 'window'\n"
+            ));
+        }
+    };
+    sa.set_layer(wid, layer).map(|()| None).map_err(|_| {
+        format!(
+            "could not change sub-layer of window with id '{wid}' due to an error with the scripting-addition.\n"
+        )
+    })
+}
+
+/// Toggle the acting window's sticky flag through the SA, mirroring the C
+/// `window --toggle sticky` (`window_manager_make_window_sticky`): making a window
+/// sticky untiles it (it now shows on every space); un-sticky re-tiles it into its
+/// space unless it is also floating. The daemon tracks the toggle state.
+fn window_toggle_sticky_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    target: Option<&Selector>,
+) -> Response {
+    let wid = runtime.state.resolve_window_selector(target)?;
+    let sticky = !runtime.state.is_sticky(wid);
+    sa.set_sticky(wid, sticky).map_err(|_| {
+        format!(
+            "could not change sticky of window with id '{wid}' due to an error with the scripting-addition.\n"
+        )
+    })?;
+    let sid = runtime
+        .state
+        .window_space_id(wid)
+        .or_else(|| runtime.state.active_space_id())
+        .unwrap_or(0);
+    runtime.state.set_window_sticky(wid, sticky, sid);
+    runtime.state.flush_all_active_to(&mut runtime.sink);
+    Ok(None)
+}
+
+/// Toggle the acting window's shadow through the SA, mirroring the C
+/// `window --toggle shadow` (`window_manager_toggle_window_shadow`). Purely visual,
+/// so no re-tile; the daemon tracks the toggle state.
+fn window_toggle_shadow_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    target: Option<&Selector>,
+) -> Response {
+    let wid = runtime.state.resolve_window_selector(target)?;
+    let has_shadow = !runtime.state.window_has_shadow(wid);
+    sa.set_shadow(wid, has_shadow).map_err(|_| {
+        format!(
+            "could not change shadow of window with id '{wid}' due to an error with the scripting-addition.\n"
+        )
+    })?;
+    runtime.state.set_window_shadow(wid, has_shadow);
+    Ok(None)
 }
 
 /// Move the acting (target/active) space to another display's active space

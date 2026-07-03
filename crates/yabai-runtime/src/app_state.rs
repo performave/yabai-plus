@@ -109,6 +109,14 @@ pub struct AppState {
     /// Windows the user floated (`window --toggle float`): kept out of every tree
     /// so they are never tiled, and skipped by reconcile's space assignment.
     floating: HashSet<u32>,
+    /// Windows made sticky (`window --toggle sticky`): shown on every space by the
+    /// scripting addition and, like floats, kept out of every tree / skipped by
+    /// reconcile's space assignment (mirrors the C untile on make-sticky).
+    sticky: HashSet<u32>,
+    /// Windows whose shadow the user turned off (`window --toggle shadow`). Windows
+    /// have a shadow by default, so membership here means "shadow disabled"; this
+    /// only tracks the toggle state (the visual change is applied via the SA).
+    shadow_disabled: HashSet<u32>,
     /// Each display's currently visible space. Every display tiles its own
     /// current space simultaneously, so the daemon flushes all of these, while
     /// `active_space` (the focused display's space) drives command dispatch.
@@ -473,9 +481,9 @@ impl AppState {
     /// Assign a window to `sid`, removing it from any previous tree first.
     pub fn assign_window_to_space(&mut self, window_id: u32, sid: u64) -> Result<(), String> {
         self.window_spaces.insert(window_id, sid);
-        // Floating windows are never tiled; this no-op is what keeps reconcile
-        // from re-adding them to a tree on every tick.
-        if self.floating.contains(&window_id) {
+        // Floating and sticky windows are never tiled; this no-op is what keeps
+        // reconcile from re-adding them to a tree on every tick.
+        if self.floating.contains(&window_id) || self.sticky.contains(&window_id) {
             return Ok(());
         }
         let previous_sid = self.window_space(window_id);
@@ -536,6 +544,41 @@ impl AppState {
             }
         } else if self.floating.remove(&window_id) {
             let _ = self.assign_window_to_space(window_id, sid);
+        }
+    }
+
+    /// Whether `window_id` is currently sticky (shown on all spaces, untiled).
+    pub fn is_sticky(&self, window_id: u32) -> bool {
+        self.sticky.contains(&window_id)
+    }
+
+    /// Make a window sticky or unsticky. Sticky drops it from every tree and marks
+    /// it so reconcile never re-tiles it (mirrors the C untile on make-sticky);
+    /// unsticky clears the mark and, unless the window is also floating, tiles it
+    /// back into `sid`.
+    pub fn set_window_sticky(&mut self, window_id: u32, sticky: bool, sid: u64) {
+        if sticky {
+            self.sticky.insert(window_id);
+            for tree in self.spaces.values_mut() {
+                tree.remove_window(window_id);
+            }
+        } else if self.sticky.remove(&window_id) && !self.floating.contains(&window_id) {
+            let _ = self.assign_window_to_space(window_id, sid);
+        }
+    }
+
+    /// Whether `window_id` currently has a shadow (the default; false once the user
+    /// has toggled it off via `window --toggle shadow`).
+    pub fn window_has_shadow(&self, window_id: u32) -> bool {
+        !self.shadow_disabled.contains(&window_id)
+    }
+
+    /// Record a window's shadow toggle state (the SA applies the visual change).
+    pub fn set_window_shadow(&mut self, window_id: u32, has_shadow: bool) {
+        if has_shadow {
+            self.shadow_disabled.remove(&window_id);
+        } else {
+            self.shadow_disabled.insert(window_id);
         }
     }
 

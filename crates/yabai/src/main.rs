@@ -2122,6 +2122,7 @@ fn center_mouse_on_focus(runtime: &Runtime<AxSink>, window_id: u32) {
 /// is over the already-focused window. The C's occlusion / gesture-debounce /
 /// mission-control refinements are not modeled here.
 fn handle_mouse_moved(
+    sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     last_focus_signal: &mut Option<u32>,
     point: Point,
@@ -2147,6 +2148,9 @@ fn handle_mouse_moved(
         return;
     }
     runtime.state.set_focused_window(Some(window_id));
+    if runtime.state.config.enable_window_opacity {
+        apply_auto_opacity(sa, runtime, Some(window_id));
+    }
     // Note: no `mouse_follows_focus` cursor warp here — the user is moving the
     // mouse, so warping it back would fight them.
     // Fire `window_focused` once per real change, de-duped with the observer /
@@ -2163,6 +2167,46 @@ fn handle_mouse_moved(
             None,
         );
     }
+}
+
+/// Apply auto window opacity (`window_opacity on`) across every managed window:
+/// `focused` → `active_window_opacity`, the rest → `normal_window_opacity`,
+/// mirroring the C `window_manager_set_window_opacity` on focus. When the feature
+/// is off, all windows are reset to fully opaque — an intentional divergence from
+/// the C, which leaves the last opacity in place (so windows would otherwise stay
+/// dimmed after disabling). Applying to all windows (rather than just the old/new
+/// pair) keeps it correct without tracking the previously focused window; it is a
+/// no-op on the SA side beyond the couple of windows whose opacity actually changes.
+fn apply_auto_opacity(sa: &ScriptingAddition, runtime: &Runtime<AxSink>, focused: Option<u32>) {
+    let c = &runtime.state.config;
+    let dur = c.window_opacity_duration;
+    let enabled = c.enable_window_opacity;
+    let active = c.active_window_opacity;
+    let normal = c.normal_window_opacity;
+    for wid in runtime.state.all_window_ids() {
+        let opacity = if !enabled {
+            1.0
+        } else if Some(wid) == focused {
+            active
+        } else {
+            normal
+        };
+        let _ = sa.set_opacity(wid, opacity, dur);
+    }
+}
+
+/// True if `tokens` is a `config` command that changes an opacity setting, so the
+/// daemon knows to re-apply auto opacity afterwards.
+fn is_opacity_config(tokens: &[String]) -> bool {
+    matches!(parse_message(tokens), Ok(Message::Config(cmd))
+    if cmd.ops.iter().any(|op| matches!(
+        op,
+        yabai_core::ConfigOp::Set(key, _)
+            if matches!(
+                key.as_str(),
+                "window_opacity" | "active_window_opacity" | "normal_window_opacity"
+            )
+    )))
 }
 
 fn observed_geometry_signal(
@@ -2667,6 +2711,9 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         // `window_focused` signal (observer-driven focus, e.g. a
                         // click). De-duplicated against the command path below.
                         if last_focus_signal != Some(window_id) {
+                            if runtime.state.config.enable_window_opacity {
+                                apply_auto_opacity(&scripting_addition, &runtime, Some(window_id));
+                            }
                             last_focus_signal = Some(window_id);
                             let meta = runtime.state.window_meta(window_id);
                             fire_signals(
@@ -2845,7 +2892,12 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     }
                 },
                 WmWork::MouseMoved(point) => {
-                    handle_mouse_moved(&mut runtime, &mut last_focus_signal, point);
+                    handle_mouse_moved(
+                        &scripting_addition,
+                        &mut runtime,
+                        &mut last_focus_signal,
+                        point,
+                    );
                 }
                 WmWork::Tick => {
                     refresh_live_display_state(&mut runtime, &mut display_frames);
@@ -2922,6 +2974,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             // not always produce an AX observer notification. De-dup
                             // with the observer path via `last_focus_signal`.
                             if last_focus_signal != Some(window_id) {
+                                if runtime.state.config.enable_window_opacity {
+                                    apply_auto_opacity(
+                                        &scripting_addition,
+                                        &runtime,
+                                        Some(window_id),
+                                    );
+                                }
                                 last_focus_signal = Some(window_id);
                                 let meta = runtime.state.window_meta(window_id);
                                 fire_signals(
@@ -2991,6 +3050,12 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                 }
                             }
                         }
+                    }
+                    // A `window_opacity` / `active`/`normal_window_opacity` change
+                    // re-applies auto opacity across all managed windows.
+                    if response.is_ok() && is_opacity_config(&tokens) {
+                        let focused = runtime.state.focused_window_id();
+                        apply_auto_opacity(&scripting_addition, &runtime, focused);
                     }
                     let _ = reply.send(response);
                 }

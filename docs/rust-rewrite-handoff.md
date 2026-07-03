@@ -49,6 +49,34 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 39) — `window_opacity` auto active/normal opacity on focus + verified live
+
+- Implemented `window_opacity on/off` (auto opacity), previously unparsed. Added the
+  `window_opacity` bool config key (`enable_window_opacity`), and on every focus
+  change the daemon fades the focused window to `active_window_opacity` and the rest
+  to `normal_window_opacity` via the SA (`apply_auto_opacity`), mirroring the C
+  `window_manager_set_window_opacity` on `window_did_receive_focus`. Wired into all
+  three focus paths (`window --focus` command, the AX `FocusedWindowChanged`
+  observer, and `focus_follows_mouse`), each gated on the same real-focus-change
+  condition. An opacity-related `config` change (`window_opacity` /
+  `active`/`normal_window_opacity`) re-applies across all managed windows via
+  `is_opacity_config`. Added `AppState::all_window_ids`.
+- **Design choice:** the routine sets the focused window to active and *all other*
+  managed windows to normal (not just the old/new pair), so it stays correct without
+  tracking the previously focused window (the first cut relied on `last_focus_signal`
+  and left the de-focused window dimmed when that lagged). Turning `window_opacity
+  off` resets every managed window to fully opaque — an intentional divergence from
+  the C, which leaves the last opacity in place.
+- **Verified live on the remote (macOS 26.5.1)** with two tiled Finder windows
+  (834, 821) via the `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback,
+  `active_window_opacity 0.6` / `normal_window_opacity 0.3`:
+  - `window_opacity on` (821 focused) → 821=0.6, 834=0.3.
+  - `window 834 --focus` → 834=0.6, 821=0.3 (the de-focused window resets correctly).
+  - `window 821 --focus` → 821=0.6, 834=0.3.
+  - `window_opacity off` → both 1.0.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 38) — `focus_follows_mouse` via a CGEventTap + verified live
 
 - Implemented `focus_follows_mouse` (`autofocus`/`autoraise`), previously parsed
@@ -2217,7 +2245,8 @@ intra-display space reorder + same/cross-display swap (SA `move_space_after_spac
 `signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
 deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus; `focus_follows_mouse`
-(autofocus/autoraise) via a mouse-moved `CGEventTap`.
+(autofocus/autoraise) via a mouse-moved `CGEventTap`; `window_opacity` auto
+active/normal opacity on focus change.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 

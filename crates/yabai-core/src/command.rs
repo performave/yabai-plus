@@ -124,6 +124,7 @@ fn config_value_kind(key: &str) -> Option<ValueKind> {
         | "window_sublayer_auto"
         | "manage"
         | "window_zoom_persist"
+        | "window_opacity"
         | "window_shadow" => ValueKind::Bool,
         "focus_follows_mouse" => ValueKind::Ffm,
         "layout" => ValueKind::Layout,

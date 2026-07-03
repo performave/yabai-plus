@@ -323,6 +323,12 @@ impl AppState {
         self.display_spaces(display_id)
     }
 
+    /// Every window the daemon currently tracks (assigned to a space). Used by the
+    /// `window_opacity` auto-opacity pass to reset the non-focused windows.
+    pub fn all_window_ids(&self) -> Vec<u32> {
+        self.window_spaces.keys().copied().collect()
+    }
+
     /// The display a space belongs to, if known. Public for daemon-side
     /// interception (e.g. the scripting-addition `space --display` path).
     pub fn space_display(&self, sid: u64) -> Option<u32> {

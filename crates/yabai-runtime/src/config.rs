@@ -19,6 +19,9 @@ pub struct Config {
     pub manage: bool,
     pub window_zoom_persist: bool,
     pub window_shadow: bool,
+    /// `window_opacity`: when on, the daemon auto-applies `active_window_opacity`
+    /// to the focused window and `normal_window_opacity` to the others.
+    pub enable_window_opacity: bool,
     pub focus_follows_mouse: FfmMode,
     pub layout: ViewType,
     pub split_type: NodeSplit,
@@ -47,6 +50,7 @@ impl Default for Config {
             manage: true,
             window_zoom_persist: true,
             window_shadow: true,
+            enable_window_opacity: false,
             focus_follows_mouse: FfmMode::Disabled,
             layout: ViewType::Bsp,
             split_type: NodeSplit::Auto,
@@ -103,6 +107,7 @@ impl Config {
             "manage" => bool_str(self.manage).to_string(),
             "window_zoom_persist" => bool_str(self.window_zoom_persist).to_string(),
             "window_shadow" => bool_str(self.window_shadow).to_string(),
+            "window_opacity" => bool_str(self.enable_window_opacity).to_string(),
             "focus_follows_mouse" => ffm_str(self.focus_follows_mouse).to_string(),
             "layout" => layout_str(self.layout).to_string(),
             "split_type" => split_type_str(self.split_type).to_string(),
@@ -133,6 +138,7 @@ impl Config {
             ("manage", ConfigValue::Bool(b)) => self.manage = *b,
             ("window_zoom_persist", ConfigValue::Bool(b)) => self.window_zoom_persist = *b,
             ("window_shadow", ConfigValue::Bool(b)) => self.window_shadow = *b,
+            ("window_opacity", ConfigValue::Bool(b)) => self.enable_window_opacity = *b,
             ("focus_follows_mouse", ConfigValue::Ffm(m)) => self.focus_follows_mouse = *m,
             ("layout", ConfigValue::Layout(l)) => self.layout = *l,
             ("split_type", ConfigValue::SplitType(s)) => self.split_type = *s,

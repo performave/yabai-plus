@@ -15,9 +15,10 @@ use std::collections::{HashMap, HashSet};
 
 use regex_lite::Regex;
 use yabai_core::{
-    Area, ConfigOp, DisplayAction, Layer, Message, NodeSplit, Point, QueryCommand, QueryScopeKind,
-    QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects, Selector, Signal, SignalCommand,
-    SignalEvent, SpaceAction, Tree, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
+    Area, Child, ConfigOp, Direction, DisplayAction, Layer, Message, MouseDropAction, NodeSplit,
+    Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects,
+    Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree, ViewType, WindowAction,
+    WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -25,6 +26,56 @@ use crate::config::Config;
 /// The outcome of dispatching a message: optional text to send back to the
 /// client (queries/gets), or an error message (the daemon's `daemon_fail`).
 pub type Response = Result<Option<String>, String>;
+
+fn center_drop_contains(frame: Area, point: Point) -> bool {
+    let center = Area::new(
+        frame.x + 0.25 * frame.w,
+        frame.y + 0.25 * frame.h,
+        0.50 * frame.w,
+        0.50 * frame.h,
+    );
+    center.contains_point(point)
+}
+
+fn triangle_contains_point(a: Point, b: Point, c: Point, p: Point) -> bool {
+    let area = 0.5 * (-b.y * c.x + a.y * (-b.x + c.x) + a.x * (b.y - c.y) + b.x * c.y);
+    if area == 0.0 {
+        return false;
+    }
+    let s = 1.0 / (2.0 * area) * (a.y * c.x - a.x * c.y + (c.y - a.y) * p.x + (a.x - c.x) * p.y);
+    let t = 1.0 / (2.0 * area) * (a.x * b.y - a.y * b.x + (a.y - b.y) * p.x + (b.x - a.x) * p.y);
+    s >= 0.0 && t >= 0.0 && (1.0 - s - t) >= 0.0
+}
+
+fn edge_drop_direction(frame: Area, point: Point) -> Option<Direction> {
+    let local = Point {
+        x: point.x - frame.x,
+        y: point.y - frame.y,
+    };
+    let top_left = Point { x: 0.0, y: 0.0 };
+    let top_right = Point { x: frame.w, y: 0.0 };
+    let bottom_right = Point {
+        x: frame.w,
+        y: frame.h,
+    };
+    let bottom_left = Point { x: 0.0, y: frame.h };
+    let mid = Point {
+        x: 0.5 * frame.w,
+        y: 0.5 * frame.h,
+    };
+
+    if triangle_contains_point(top_left, mid, top_right, local) {
+        Some(Direction::North)
+    } else if triangle_contains_point(top_right, mid, bottom_right, local) {
+        Some(Direction::East)
+    } else if triangle_contains_point(bottom_right, mid, bottom_left, local) {
+        Some(Direction::South)
+    } else if triangle_contains_point(bottom_left, mid, top_left, local) {
+        Some(Direction::West)
+    } else {
+        None
+    }
+}
 
 /// A system event with the payload [`AppState`] needs to update itself.
 ///
@@ -494,6 +545,84 @@ impl AppState {
         self.spaces
             .get_mut(&sid)
             .ok_or_else(|| "active space has no layout".to_string())
+    }
+
+    /// Resize the BSP tree containing `window_id`, if the window is currently
+    /// tiled. Public for daemon-side mouse-drag resize, which can target a visible
+    /// space on any display rather than only the globally active space.
+    pub fn resize_tiled_window(&mut self, window_id: u32, handle: u8, dx: f32, dy: f32) -> bool {
+        let Some(sid) = self.window_space(window_id) else {
+            return false;
+        };
+        let Some(tree) = self.spaces.get_mut(&sid) else {
+            return false;
+        };
+        tree.resize_window(window_id, handle, dx, dy)
+    }
+
+    /// Apply a tiled mouse-drag drop at `point`. Center drops perform the
+    /// configured swap/stack action; edge drops warp the source next to the target
+    /// using the C daemon's four triangular drop zones. This is intentionally
+    /// same-space only for now; cross-space/cross-display drops need live view
+    /// bookkeeping outside the pure tree.
+    pub fn drop_tiled_window_at_point(
+        &mut self,
+        window_id: u32,
+        point: Point,
+        action: MouseDropAction,
+    ) -> bool {
+        let Some(sid) = self.window_space(window_id) else {
+            return false;
+        };
+        let Some(tree) = self.spaces.get_mut(&sid) else {
+            return false;
+        };
+        let Some(src_node) = tree.find_window_node(window_id) else {
+            return false;
+        };
+        let src_is_single = tree.node(src_node).window_list.len() == 1;
+        let Some(target) = tree
+            .capture()
+            .into_iter()
+            .find(|frame| frame.window_id != window_id && frame.area.contains_point(point))
+        else {
+            return false;
+        };
+
+        if src_is_single && center_drop_contains(target.area, point) {
+            return match action {
+                MouseDropAction::Swap => tree.swap_windows(window_id, target.window_id),
+                MouseDropAction::Stack => tree.stack_window_onto(window_id, target.window_id),
+            };
+        }
+
+        match edge_drop_direction(target.area, point) {
+            Some(Direction::North) => tree.warp_window_directional(
+                window_id,
+                target.window_id,
+                NodeSplit::Horizontal,
+                Child::First,
+            ),
+            Some(Direction::East) => tree.warp_window_directional(
+                window_id,
+                target.window_id,
+                NodeSplit::Vertical,
+                Child::Second,
+            ),
+            Some(Direction::South) => tree.warp_window_directional(
+                window_id,
+                target.window_id,
+                NodeSplit::Horizontal,
+                Child::Second,
+            ),
+            Some(Direction::West) => tree.warp_window_directional(
+                window_id,
+                target.window_id,
+                NodeSplit::Vertical,
+                Child::First,
+            ),
+            None => false,
+        }
     }
 
     /// Add a window to the active space (respecting the current focus).

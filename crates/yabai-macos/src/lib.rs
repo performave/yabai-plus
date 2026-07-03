@@ -35,8 +35,9 @@ pub use display::{
 };
 #[cfg(target_os = "macos")]
 pub use mouse::{
-    MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT, MouseDragEvent,
-    observe_mouse_drag, observe_mouse_moved, post_mouse_drag, post_mouse_moved, set_drag_modifier,
+    MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT, MouseDragButton,
+    MouseDragEvent, observe_mouse_drag, observe_mouse_moved, post_mouse_drag, post_mouse_moved,
+    post_right_mouse_drag, set_drag_modifier,
 };
 #[cfg(target_os = "macos")]
 pub use observe::{ObservedEvent, observe_pid};

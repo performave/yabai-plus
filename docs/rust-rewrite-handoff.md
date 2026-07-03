@@ -20,7 +20,11 @@ reconstructing context.
   `first`, and `last` selectors restored from the daemon's minimized-window AX
   registry, and `window --close` is wired through the AX close button.
   `window --toggle native-fullscreen` enters/exits via the `AXFullScreen`
-  attribute with a fullscreen AX registry mirroring minimize. The `signal` domain
+  attribute with a fullscreen AX registry mirroring minimize. `mouse_action1` /
+  `mouse_action2` drags now move or resize windows via an active mouse event tap
+  (left/right button respectively), including persistent BSP-grid resize for tiled
+  windows and direct AX resize for floating windows. Tiled drag-to-move drops now
+  perform same-space swap/stack center drops and edge-zone warps. The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
   `window_created`, `window_destroyed`, `window_focused`, `window_moved`,
   `window_resized`, `window_minimized`, `window_deminimized`,
@@ -37,7 +41,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 158 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 161 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -48,6 +52,55 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 43) — mouse drag drop actions (swap/stack/edge-warp) + verified live
+
+- Implemented same-space tiled drop actions for drag-to-move release. A tiled move
+  now attempts a drop before snapping back: center drops use `mouse_drop_action`
+  (`swap` or `stack`), while edge drops use the C triangular target zones to warp
+  the dragged window top/right/bottom/left of the target. Floating drag-move and
+  tiled drag-resize behavior from sessions 41/42 is unchanged.
+- Added pure tree helpers: `Tree::stack_window_onto` (move source into target leaf
+  stack) and `Tree::warp_window_directional` (explicit split+child directional
+  warp). Added `AppState::drop_tiled_window_at_point`, including the C-style
+  center rectangle and edge triangle hit tests. Cross-space/cross-display drop
+  bookkeeping and insert-feedback overlays remain deferred.
+- **Verified live on the remote (macOS 26.5.1):**
+  - Center swap: dragged Finder window 893 onto 891; 893 moved from
+    (65,43,692,903) to 891's old frame (768,500,692,446), and 891 moved to 893's
+    old frame.
+  - Center stack: with `mouse_drop_action stack`, dragged 900 onto 898; both ended
+    with the same frame (768,43,692,903), confirming shared stack leaf capture.
+  - Top-edge warp: dragged 903 to the top edge of 901; 903 ended above 901 in the
+    same column, (768,43,692,446) above 901 at (768,500,692,446).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (161 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
+### 2026-07-03 (session 42) — mouse-drag resize (`mouse_action2` + right-drag) via active CGEventTap + verified live
+
+- Extended the active mouse drag tap to listen to right-button down/drag/up in
+  addition to left-button events. `MouseDragEvent::Down` now carries the starting
+  button, so the daemon selects `config.mouse_action1` for left-drag and
+  `config.mouse_action2` for right-drag, matching the C `mouse_handler` model.
+- Implemented drag-to-resize. On mouse-down the daemon chooses the resize handle
+  from the initial cursor quadrant relative to the target window midpoint (same as
+  C). Floating windows are resized directly through `AxSink::set_frame` and keep
+  the new frame; tiled windows call the new `AppState::resize_tiled_window` helper
+  to resize the BSP tree containing that window, then flush visible spaces so the
+  change persists. Tiled drag-to-move still snaps back on release because drop
+  actions remain deferred.
+- Added `post_right_mouse_drag` and the `--experimental-post-right-mouse-drag <x1
+  y1 x2 y2>` probe to synthesize `fn`+right-drag on the remote test box.
+- **Verified live on the remote (macOS 26.5.1):**
+  - Tiled Finder window 873: `fn`+right-drag from its bottom-right edge (737,926)
+    -> (857,926) resized bounds from (65,43,692,903) to (65,43,811,903), and the
+    size remained stable on a later readback (persistent BSP resize).
+  - Floating Finder window 873 after `--toggle float`: `fn`+right-drag
+    (856,926)->(946,996) resized bounds from (65,43,811,903) to
+    (65,43,901,913). Height growth was display-bottom-clamped; width and origin
+    verified direct AX resize persisted.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (159 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 41) — mouse-drag move (`mouse_modifier` + left-drag) via an active CGEventTap + verified live
 
@@ -2247,10 +2300,10 @@ chronological log and may describe earlier states.
   - `mouse.rs`: `observe_mouse_moved(tx)` — a listen-only `CGEventTap` on
     `kCGEventMouseMoved` (pumped on a dedicated run-loop thread) reporting cursor
     points for `focus_follows_mouse`; `observe_mouse_drag(tx)` — a second, *active*
-    tap on left down/dragged/up that consumes the click while the armed
+    tap on left/right down/dragged/up that consumes the click while the armed
     `mouse_modifier` is held (`set_drag_modifier`), reporting `MouseDragEvent`s for
-    drag-to-move; plus `post_mouse_moved` / `post_mouse_drag` (synthesize events for
-    testing).
+    drag-to-move/resize; plus `post_mouse_moved` / `post_mouse_drag` /
+    `post_right_mouse_drag` (synthesize events for testing).
   - `space.rs`: read-only SkyLight discovery for `current_space_for_display()`
     (`SLSManagedDisplayGetCurrentSpace`), `spaces_for_display()`
     (`SLSCopyManagedDisplaySpaces` + `id64` extraction), and
@@ -2305,9 +2358,10 @@ intra-display space reorder + same/cross-display swap (SA `move_space_after_spac
 `signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
 deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus; `focus_follows_mouse`
-(autofocus/autoraise) via a mouse-moved `CGEventTap`; `window_opacity` auto
-active/normal opacity on focus change; mouse drag-to-move (`mouse_modifier` +
-left-drag) via an active `CGEventTap`.
+    (autofocus/autoraise) via a mouse-moved `CGEventTap`; `window_opacity` auto
+    active/normal opacity on focus change; mouse drag-to-move/resize/drop
+    (`mouse_modifier` + left/right drag, `mouse_action1`/`mouse_action2`,
+    `mouse_drop_action`) via an active `CGEventTap`.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
@@ -2351,10 +2405,9 @@ left-drag) via an active `CGEventTap`.
    first-on-display (global mission-control order), verified live (reorder +
    reverse + both error strings). `space --swap <sel>` (same-display) is wired too
    (session 33): the C's five swap branches via `move_space_after_space`, verified
-   live (swap + swap-back + errors). Still to do: the **cross-display** `space
-   --swap`, which the C implements as a window-content swap (`space_window_list` +
-   `move_window_list_to_space`) — blocked by the macOS-26 `spaces_for_window` bug,
-   so currently rejected with a clear error.
+   live (swap + swap-back + errors). The **cross-display** `space --swap` content
+   swap is also done and verified live (session 35), using the macOS-26-safe
+   `windows_on_space` inverse mapping.
 3. App launch/termination are now observed directly through NSWorkspace; the 3s
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise
@@ -2371,9 +2424,11 @@ left-drag) via an active `CGEventTap`.
    produces `--sub-layer` as `WindowAction::Raw`, so no grammar change was needed
    (the C command is `--sub-layer`, not `--layer`). Still to do:
    remaining deminimize/native-fullscreen-exit selectors, and
-   scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag) is done
-   (session 41, active `CGEventTap`), verified live; still to do: drag-**resize**
-   (`mouse_action2`) and drop actions (swap/stack/warp + BSP-grid resize).
+   scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag),
+   drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
+   actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified
+   live (sessions 41-43). Still deferred: cross-space/cross-display mouse drops
+   and insertion-feedback overlays.
    `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    (`autofocus`/`autoraise`) is done too (session 38) via a `CGEventTap` on

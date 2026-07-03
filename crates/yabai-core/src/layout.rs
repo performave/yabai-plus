@@ -474,6 +474,31 @@ impl Tree {
         node.window_order.insert(0, window_id);
     }
 
+    /// Move `src` into `target`'s stack, matching the same-space core of
+    /// `mouse_drop_action_stack`. Returns false if either window is missing or the
+    /// source and target are already in the same leaf.
+    pub fn stack_window_onto(&mut self, src: u32, target: u32) -> bool {
+        if src == target {
+            return false;
+        }
+        let (Some(src_node), Some(target_node)) =
+            (self.find_window_node(src), self.find_window_node(target))
+        else {
+            return false;
+        };
+        if src_node == target_node {
+            return false;
+        }
+
+        self.remove_window(src);
+        let Some(target_node) = self.find_window_node(target) else {
+            return false;
+        };
+        self.stack_window(target_node, src);
+        self.update(self.root);
+        true
+    }
+
     /// `window_node_split`: turn leaf `id` into an intermediate with two leaves.
     fn split_node(&mut self, id: NodeId, window_id: u32) {
         let child = if self.nodes[id].child != Child::None {
@@ -912,6 +937,42 @@ impl Tree {
         true
     }
 
+    /// Mouse-drop edge warp: move `src` next to `target` using an explicit split
+    /// and child placement selected by the drop zone around the target window.
+    pub fn warp_window_directional(
+        &mut self,
+        src: u32,
+        target: u32,
+        split: NodeSplit,
+        child: Child,
+    ) -> bool {
+        if src == target || self.layout != ViewType::Bsp {
+            return false;
+        }
+        let (Some(src_node), Some(target_node)) =
+            (self.find_window_node(src), self.find_window_node(target))
+        else {
+            return false;
+        };
+        if src_node == target_node {
+            return false;
+        }
+
+        self.remove_window(src);
+        let Some(target_node) = self.find_window_node(target) else {
+            return false;
+        };
+        self.nodes[target_node].split = split;
+        self.nodes[target_node].child = child;
+        self.insertion_point = Some(target);
+        let added = self.add_window(src, Some(target)).is_some();
+        self.insertion_point = None;
+        if added {
+            self.update(self.root);
+        }
+        added
+    }
+
     // --- directional neighbor (view_find_window_node_in_direction) ---
 
     /// `view_find_window_node_in_direction`: closest leaf to `source` in
@@ -1106,6 +1167,20 @@ mod tests {
     }
 
     #[test]
+    fn stack_window_onto_moves_source_into_target_leaf() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        tree.add_window(2, Some(1));
+        tree.add_window(3, Some(2));
+
+        assert!(tree.stack_window_onto(1, 3));
+        let target = tree.find_window_node(3).unwrap();
+        assert_eq!(tree.node(target).window_list, vec![3, 1]);
+        assert_eq!(tree.node(target).window_order[0], 1);
+        assert_eq!(tree.window_list(), vec![2, 3, 1]);
+    }
+
+    #[test]
     fn swap_same_or_unmanaged_window_is_noop() {
         let mut tree = bsp();
         tree.add_window(1, None);
@@ -1129,6 +1204,22 @@ mod tests {
         let n3 = tree.find_window_node(3).unwrap();
         assert_eq!(tree.node(n1).parent, tree.node(n3).parent);
         assert!(tree.node(n1).parent.is_some());
+    }
+
+    #[test]
+    fn directional_warp_uses_requested_side() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        tree.add_window(2, Some(1));
+        tree.add_window(3, Some(2));
+
+        assert!(tree.warp_window_directional(1, 3, NodeSplit::Horizontal, Child::First));
+        let target = tree.find_window_node(3).unwrap();
+        let src = tree.find_window_node(1).unwrap();
+        let parent = tree.node(target).parent.unwrap();
+        assert_eq!(tree.node(parent).split, NodeSplit::Horizontal);
+        assert_eq!(tree.node(parent).left, Some(src));
+        assert_eq!(tree.node(parent).right, Some(target));
     }
 
     #[test]

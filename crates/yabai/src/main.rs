@@ -6,24 +6,26 @@ use std::sync::mpsc::{Sender, SyncSender, channel, sync_channel};
 use std::thread;
 use std::time::Duration;
 
+use yabai_core::layout::{HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
-    Area, FfmMode, Message, MouseModifier, Point, Selector, SignalEvent, SpaceAction, WindowAction,
-    parse_message, parse_selector,
+    Area, FfmMode, Message, MouseAction, MouseModifier, Point, Selector, SignalEvent, SpaceAction,
+    WindowAction, parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
     AxSink, MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT,
-    MouseDragEvent, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt,
-    active_displays, application_pids_with_windows, current_space_for_display, cursor_display_id,
-    cursor_location, display_for_space, focused_window, focused_window_diagnostics,
-    main_visible_frame, mission_control_spaces, move_focused_window, move_pid_window,
-    ns_application_load, observe_mouse_drag, observe_mouse_moved, observe_pid, observe_workspace,
-    pid_window_infos, post_mouse_drag, post_mouse_moved, regular_application_pids,
-    set_active_display, set_drag_modifier, spaces_for_display, spaces_for_window,
-    switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
-    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_bounds,
-    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
+    MouseDragButton, MouseDragEvent, ObservedEvent, WorkspaceEvent,
+    accessibility_trusted_with_prompt, active_displays, application_pids_with_windows,
+    current_space_for_display, cursor_display_id, cursor_location, display_for_space,
+    focused_window, focused_window_diagnostics, main_visible_frame, mission_control_spaces,
+    move_focused_window, move_pid_window, ns_application_load, observe_mouse_drag,
+    observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos, post_mouse_drag,
+    post_mouse_moved, post_right_mouse_drag, regular_application_pids, set_active_display,
+    set_drag_modifier, spaces_for_display, spaces_for_window, switch_space_by_gesture,
+    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
+    warp_cursor_to_point, window_alpha, window_bounds, windows_for_pid,
+    windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
@@ -75,6 +77,7 @@ fn main() -> ExitCode {
         Some("--experimental-windows-on-space") => run_windows_on_space(&args[1..]),
         Some("--experimental-post-mouse-moved") => run_post_mouse_moved(&args[1..]),
         Some("--experimental-post-mouse-drag") => run_post_mouse_drag(&args[1..]),
+        Some("--experimental-post-right-mouse-drag") => run_post_right_mouse_drag(&args[1..]),
         Some("--experimental-window-bounds") => run_window_bounds(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
@@ -1033,6 +1036,21 @@ fn run_post_mouse_drag(args: &[String]) -> ExitCode {
     };
     post_mouse_drag(Point { x: x1, y: y1 }, Point { x: x2, y: y2 });
     println!("posted fn+drag {x1},{y1} -> {x2},{y2}");
+    ExitCode::SUCCESS
+}
+
+fn run_post_right_mouse_drag(args: &[String]) -> ExitCode {
+    let coords: Vec<f32> = args
+        .iter()
+        .take(4)
+        .filter_map(|a| a.parse::<f32>().ok())
+        .collect();
+    let [x1, y1, x2, y2] = coords[..] else {
+        eprintln!("usage: --experimental-post-right-mouse-drag <x1> <y1> <x2> <y2>");
+        return ExitCode::from(64);
+    };
+    post_right_mouse_drag(Point { x: x1, y: y1 }, Point { x: x2, y: y2 });
+    println!("posted fn+right-drag {x1},{y1} -> {x2},{y2}");
     ExitCode::SUCCESS
 }
 
@@ -2222,12 +2240,66 @@ fn mouse_modifier_mask(modifier: MouseModifier) -> u8 {
 /// State captured while a `mouse_modifier`-armed drag is in progress.
 struct DragState {
     window_id: u32,
+    action: MouseAction,
     /// The window's frame when the drag began.
     origin: Area,
     /// The cursor point when the drag began.
     down: Point,
+    /// The last cursor point handled, for incremental tiled BSP resizing.
+    last: Point,
+    /// Resize handle selected from the initial cursor quadrant.
+    handle: u8,
     /// Whether the dragged window is tiled (managed in a tree) vs floating.
     tiled: bool,
+}
+
+fn resize_handle_for_point(frame: Area, point: Point) -> u8 {
+    let mid_x = frame.x + frame.w / 2.0;
+    let mid_y = frame.y + frame.h / 2.0;
+    let mut handle = 0;
+    if point.x < mid_x {
+        handle |= HANDLE_LEFT;
+    }
+    if point.x > mid_x {
+        handle |= HANDLE_RIGHT;
+    }
+    if point.y < mid_y {
+        handle |= HANDLE_TOP;
+    }
+    if point.y > mid_y {
+        handle |= HANDLE_BOTTOM;
+    }
+    handle
+}
+
+fn resized_frame(origin: Area, handle: u8, dx: f32, dy: f32) -> Area {
+    let x_mod = if handle & HANDLE_LEFT != 0 {
+        -1.0
+    } else if handle & HANDLE_RIGHT != 0 {
+        1.0
+    } else {
+        0.0
+    };
+    let y_mod = if handle & HANDLE_TOP != 0 {
+        -1.0
+    } else if handle & HANDLE_BOTTOM != 0 {
+        1.0
+    } else {
+        0.0
+    };
+    let w = (origin.w + dx * x_mod).max(1.0);
+    let h = (origin.h + dy * y_mod).max(1.0);
+    let x = if handle & HANDLE_LEFT != 0 {
+        origin.x + origin.w - w
+    } else {
+        origin.x
+    };
+    let y = if handle & HANDLE_TOP != 0 {
+        origin.y + origin.h - h
+    } else {
+        origin.y
+    };
+    Area::new(x, y, w, h)
 }
 
 /// The window under `point` eligible for a drag-move. Floating windows are checked
@@ -2254,44 +2326,82 @@ fn drag_window_at_point(runtime: &Runtime<AxSink>, point: Point) -> Option<(u32,
         .map(|wid| (wid, true))
 }
 
-/// Handle a `mouse_modifier`-armed drag event (`mouse_action1 = move`): follow the
-/// cursor by repositioning the window under it. A tiled window snaps back to its
-/// tile on release (drop actions — swap/stack/warp — are not modeled yet); a
-/// floating window keeps its new position.
+/// Handle a `mouse_modifier`-armed drag event: `mouse_action1` applies to the left
+/// button and `mouse_action2` to the right button. Floating windows keep direct AX
+/// move/resize changes; tiled moves attempt a drop action on release (or snap back
+/// when there is no target), while tiled resizes update the BSP tree and flush
+/// immediately.
 fn handle_drag(runtime: &mut Runtime<AxSink>, drag: &mut Option<DragState>, event: MouseDragEvent) {
-    // Only the `move` action is implemented; `resize` is deferred.
-    if runtime.state.config.mouse_action1 != yabai_core::MouseAction::Move {
-        return;
-    }
     match event {
-        MouseDragEvent::Down(point) => {
+        MouseDragEvent::Down(point, button) => {
+            let action = match button {
+                MouseDragButton::Left => runtime.state.config.mouse_action1,
+                MouseDragButton::Right => runtime.state.config.mouse_action2,
+            };
             *drag = drag_window_at_point(runtime, point).and_then(|(window_id, tiled)| {
                 let origin = runtime.sink.window_frame(window_id)?;
+                let handle = resize_handle_for_point(origin, point);
                 Some(DragState {
                     window_id,
+                    action,
                     origin,
                     down: point,
+                    last: point,
+                    handle,
                     tiled,
                 })
             });
         }
         MouseDragEvent::Dragged(point) => {
-            if let Some(state) = drag.as_ref() {
-                let moved = Area::new(
-                    state.origin.x + (point.x - state.down.x),
-                    state.origin.y + (point.y - state.down.y),
-                    state.origin.w,
-                    state.origin.h,
-                );
-                runtime.sink.set_frame(state.window_id, moved);
+            if let Some(state) = drag.as_mut() {
+                let dx = point.x - state.down.x;
+                let dy = point.y - state.down.y;
+                match state.action {
+                    MouseAction::Move => {
+                        let moved = Area::new(
+                            state.origin.x + dx,
+                            state.origin.y + dy,
+                            state.origin.w,
+                            state.origin.h,
+                        );
+                        runtime.sink.set_frame(state.window_id, moved);
+                    }
+                    MouseAction::Resize => {
+                        if state.tiled {
+                            let dx = point.x - state.last.x;
+                            let dy = point.y - state.last.y;
+                            if runtime.state.resize_tiled_window(
+                                state.window_id,
+                                state.handle,
+                                dx,
+                                dy,
+                            ) {
+                                runtime.state.flush_all_active_to(&mut runtime.sink);
+                                state.last = point;
+                            }
+                        } else {
+                            let resized = resized_frame(state.origin, state.handle, dx, dy);
+                            runtime.sink.set_frame(state.window_id, resized);
+                        }
+                    }
+                }
             }
         }
-        MouseDragEvent::Up(_) => {
+        MouseDragEvent::Up(point) => {
             if let Some(state) = drag.take() {
-                // A tiled window snaps back to its computed frame; a floating window
-                // keeps where it was dropped.
-                if state.tiled {
+                // A tiled move becomes a drop action when released over another
+                // tiled window; otherwise it snaps back. Floating changes and tiled
+                // resizes have already been applied.
+                if state.tiled && state.action == MouseAction::Move {
+                    let dropped = runtime.state.drop_tiled_window_at_point(
+                        state.window_id,
+                        point,
+                        runtime.state.config.mouse_drop_action,
+                    );
                     runtime.state.flush_all_active_to(&mut runtime.sink);
+                    if dropped {
+                        runtime.state.set_focused_window(Some(state.window_id));
+                    }
                 }
             }
         }
@@ -3310,6 +3420,8 @@ fn print_help() {
                                      Print live AX window lifecycle events.\n\
              --experimental-rust-wm-daemon <socket> <pid|all> [gap] [padding]\n\
                                      Dynamic tiling WM: tracks live window changes.\n\
+             --experimental-post-right-mouse-drag <x1> <y1> <x2> <y2>\n\
+                                     Synthesize a fn+right-drag for mouse_action2 tests.\n\
              --version, -v          Print Rust skeleton version to stdout and exit.\n\
              --help, -h             Print options to stdout and exit."
     );

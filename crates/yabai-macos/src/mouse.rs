@@ -35,8 +35,11 @@ struct CGPoint {
 // `CGEventType` values we care about (`CGEventTypes.h`).
 const K_CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
 const K_CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
+const K_CG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
+const K_CG_EVENT_RIGHT_MOUSE_UP: u32 = 4;
 const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
 const K_CG_EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
+const K_CG_EVENT_RIGHT_MOUSE_DRAGGED: u32 = 7;
 // The tap can be disabled by the system; these arrive as event "types" and must
 // be handled by re-enabling the tap.
 const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE; // (uint32)-2
@@ -47,6 +50,10 @@ const K_CG_SESSION_EVENT_TAP: u32 = 1; // kCGSessionEventTap
 const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0; // kCGHeadInsertEventTap
 const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1; // kCGEventTapOptionListenOnly
 const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0; // kCGEventTapOptionDefault (can consume)
+
+// `CGMouseButton` values.
+const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
+const K_CG_MOUSE_BUTTON_RIGHT: u32 = 1;
 
 // Our own compact modifier bitmask (both sides of the tap are ours, so the exact
 // bit values are arbitrary as long as they agree). Mirrors the C `MOUSE_MOD_*`.
@@ -110,13 +117,13 @@ unsafe extern "C" {
     fn CGEventPost(tap: u32, event: *const c_void);
 }
 
-fn post_mouse_event(event_type: u32, point: Point, flags: u64) {
+fn post_mouse_event(event_type: u32, point: Point, button: u32, flags: u64) {
     let position = CGPoint {
         x: point.x as f64,
         y: point.y as f64,
     };
     // SAFETY: a null source is valid; the returned event, if any, is released.
-    let event = unsafe { CGEventCreateMouseEvent(std::ptr::null(), event_type, position, 0) };
+    let event = unsafe { CGEventCreateMouseEvent(std::ptr::null(), event_type, position, button) };
     if event.is_null() {
         return;
     }
@@ -138,14 +145,45 @@ pub fn post_mouse_drag(from: Point, to: Point) {
     post_mouse_event(
         K_CG_EVENT_LEFT_MOUSE_DOWN,
         from,
+        K_CG_MOUSE_BUTTON_LEFT,
         K_CG_FLAG_MASK_SECONDARY_FN,
     );
     post_mouse_event(
         K_CG_EVENT_LEFT_MOUSE_DRAGGED,
         to,
+        K_CG_MOUSE_BUTTON_LEFT,
         K_CG_FLAG_MASK_SECONDARY_FN,
     );
-    post_mouse_event(K_CG_EVENT_LEFT_MOUSE_UP, to, K_CG_FLAG_MASK_SECONDARY_FN);
+    post_mouse_event(
+        K_CG_EVENT_LEFT_MOUSE_UP,
+        to,
+        K_CG_MOUSE_BUTTON_LEFT,
+        K_CG_FLAG_MASK_SECONDARY_FN,
+    );
+}
+
+/// Synthesize a full right-button drag with the `fn` modifier held, to exercise
+/// `mouse_action2` on a headless/remote box. A real right-drag produces the same
+/// tap events.
+pub fn post_right_mouse_drag(from: Point, to: Point) {
+    post_mouse_event(
+        K_CG_EVENT_RIGHT_MOUSE_DOWN,
+        from,
+        K_CG_MOUSE_BUTTON_RIGHT,
+        K_CG_FLAG_MASK_SECONDARY_FN,
+    );
+    post_mouse_event(
+        K_CG_EVENT_RIGHT_MOUSE_DRAGGED,
+        to,
+        K_CG_MOUSE_BUTTON_RIGHT,
+        K_CG_FLAG_MASK_SECONDARY_FN,
+    );
+    post_mouse_event(
+        K_CG_EVENT_RIGHT_MOUSE_UP,
+        to,
+        K_CG_MOUSE_BUTTON_RIGHT,
+        K_CG_FLAG_MASK_SECONDARY_FN,
+    );
 }
 
 /// Synthesize and post a `kCGEventMouseMoved` at `point` (top-left CG coords).
@@ -268,14 +306,21 @@ pub fn observe_mouse_moved(tx: Sender<Point>) -> Result<(), String> {
     Ok(())
 }
 
-// ---- mouse drag (move) via an active event tap ----------------------------
+// ---- mouse drag (move/resize) via an active event tap ---------------------
 
-/// A left-button mouse-drag event while the armed `mouse_modifier` is held. The
-/// tap consumes the underlying click so the app underneath doesn't also react.
+/// The mouse button that started a `mouse_modifier`-armed drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseDragButton {
+    Left,
+    Right,
+}
+
+/// A mouse-drag event while the armed `mouse_modifier` is held. The tap consumes
+/// the underlying click so the app underneath doesn't also react.
 #[derive(Debug, Clone, Copy)]
 pub enum MouseDragEvent {
     /// Drag began: the modifier-armed button went down at `point`.
-    Down(Point),
+    Down(Point, MouseDragButton),
     /// The pointer moved to `point` during an armed drag.
     Dragged(Point),
     /// The button came up at `point`, ending the drag.
@@ -352,23 +397,28 @@ extern "C" fn mouse_drag_callback(
     };
 
     match event_type {
-        K_CG_EVENT_LEFT_MOUSE_DOWN => {
+        K_CG_EVENT_LEFT_MOUSE_DOWN | K_CG_EVENT_RIGHT_MOUSE_DOWN => {
             let armed = ARMED_MOD.load(Ordering::Relaxed);
             // SAFETY: `event` is live for this callback.
             let mods = mouse_mod_from_cgflags(unsafe { CGEventGetFlags(event) });
             if armed != 0 && mods == armed {
                 DRAG_CONSUMING.store(true, Ordering::Relaxed);
-                send_drag(MouseDragEvent::Down(point));
+                let button = if event_type == K_CG_EVENT_LEFT_MOUSE_DOWN {
+                    MouseDragButton::Left
+                } else {
+                    MouseDragButton::Right
+                };
+                send_drag(MouseDragEvent::Down(point, button));
                 return std::ptr::null_mut(); // consume the click
             }
         }
-        K_CG_EVENT_LEFT_MOUSE_DRAGGED => {
+        K_CG_EVENT_LEFT_MOUSE_DRAGGED | K_CG_EVENT_RIGHT_MOUSE_DRAGGED => {
             if DRAG_CONSUMING.load(Ordering::Relaxed) {
                 send_drag(MouseDragEvent::Dragged(point));
                 return std::ptr::null_mut();
             }
         }
-        K_CG_EVENT_LEFT_MOUSE_UP => {
+        K_CG_EVENT_LEFT_MOUSE_UP | K_CG_EVENT_RIGHT_MOUSE_UP => {
             if DRAG_CONSUMING.swap(false, Ordering::Relaxed) {
                 send_drag(MouseDragEvent::Up(point));
                 return std::ptr::null_mut();
@@ -380,7 +430,7 @@ extern "C" fn mouse_drag_callback(
     event
 }
 
-/// Install an active `CGEventTap` for left mouse down/dragged/up and pump its run
+/// Install an active `CGEventTap` for mouse down/dragged/up and pump its run
 /// loop (blocks — call on a dedicated thread). While the armed `mouse_modifier`
 /// (set via [`set_drag_modifier`]) is held on mouse-down, the click is consumed and
 /// the drag is reported to `tx`. Requires Accessibility trust (the daemon has it).
@@ -392,7 +442,10 @@ pub fn observe_mouse_drag(tx: Sender<MouseDragEvent>) -> Result<(), String> {
 
     let events_of_interest: u64 = (1 << K_CG_EVENT_LEFT_MOUSE_DOWN)
         | (1 << K_CG_EVENT_LEFT_MOUSE_UP)
-        | (1 << K_CG_EVENT_LEFT_MOUSE_DRAGGED);
+        | (1 << K_CG_EVENT_LEFT_MOUSE_DRAGGED)
+        | (1 << K_CG_EVENT_RIGHT_MOUSE_DOWN)
+        | (1 << K_CG_EVENT_RIGHT_MOUSE_UP)
+        | (1 << K_CG_EVENT_RIGHT_MOUSE_DRAGGED);
     // SAFETY: valid constants and a valid callback; the tap re-enables itself via
     // the `DRAG_TAP_PORT` static set below.
     let port = unsafe {

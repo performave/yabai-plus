@@ -327,10 +327,11 @@ Property selection:
 - If no property token is provided, C behavior emits all fields.
 - Unknown property names fail.
 
-Rust cleanup candidate:
+Rust cleanup implemented:
 
-- Treat empty property segments like `id,,uuid` as invalid. The C parser mutates the
-  token in-place and may produce incidental behavior that should not be preserved.
+- Empty property segments like `id,,uuid`, `,id`, or `id,` are invalid. The C parser
+  mutates the token in-place and may produce incidental behavior that should not be
+  preserved.
 
 ## Rule domain
 

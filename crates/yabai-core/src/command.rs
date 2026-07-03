@@ -738,12 +738,21 @@ pub fn parse_query(tokens: &[String]) -> Result<QueryCommand, ParseError> {
 
     // An optional bare (non-`--`) token is the comma-separated property list.
     let properties = match iter.peek() {
-        Some(tok) if !tok.starts_with("--") => iter
-            .next()
-            .unwrap()
-            .split(',')
-            .map(str::to_string)
-            .collect(),
+        Some(tok) if !tok.starts_with("--") => {
+            let token = iter.next().unwrap();
+            let mut properties = Vec::new();
+            for property in token.split(',') {
+                if property.is_empty() {
+                    return Err(ParseError::UnknownValue {
+                        value: property.to_string(),
+                        command: query_target_str(target).to_string(),
+                        domain: Domain::Query,
+                    });
+                }
+                properties.push(property.to_string());
+            }
+            properties
+        }
         _ => Vec::new(),
     };
 
@@ -1389,6 +1398,17 @@ mod tests {
         // Scope qualifier with no selector (acts on the active entity).
         let cmd = parse_query(&toks(&["--windows", "--space"])).unwrap();
         assert_eq!(cmd.scope, Some((QueryScopeKind::Space, None)));
+    }
+
+    #[test]
+    fn query_empty_property_segment_errors() {
+        for properties in ["id,,frame", ",id", "id,"] {
+            let err = parse_query(&toks(&["--windows", properties])).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "unknown value '' given to command '--windows' for domain 'query'"
+            );
+        }
     }
 
     #[test]

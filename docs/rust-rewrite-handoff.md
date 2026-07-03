@@ -41,7 +41,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 162 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 163 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -52,6 +52,17 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 46) — reject empty query property segments
+
+- Implemented the compatibility cleanup for query property lists: empty segments in
+  comma-separated property tokens now fail during `query` parsing (`id,,frame`,
+  `,id`, `id,`) instead of falling through as an empty property name. This avoids
+  preserving C's incidental in-place token mutation behavior.
+- Added `query_empty_property_segment_errors` covering interior, leading, and
+  trailing empty segments.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (163 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 45) — pure `query --windows stack-index`
 

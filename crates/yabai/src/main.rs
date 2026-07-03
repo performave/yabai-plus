@@ -1345,6 +1345,9 @@ fn try_scripting_addition(
                     SpaceAction::Swap(selector) => {
                         space_swap_via_sa(sa, runtime, cmd.target.as_ref(), selector)
                     }
+                    SpaceAction::Switch(selector) => {
+                        space_switch_via_sa(sa, runtime, display_frames, selector)
+                    }
                     _ => continue,
                 };
                 if result.is_ok() {
@@ -1725,6 +1728,55 @@ fn space_swap_cross_display(
 
     // Re-tile every display's active space so the moved windows are laid out.
     runtime.state.flush_all_active_to(&mut runtime.sink);
+    Ok(None)
+}
+
+/// `space --switch <sel>`, mirroring the C `space_manager_switch_space`. The
+/// destination is resolved by mission-control index (like `space --focus`); the
+/// acting side is always the current active space. Same display → SA `focus_space`
+/// (SA-only, no gesture fallback, matching the C). Different display → swap the two
+/// spaces' window contents and keep focus on the source display (the C
+/// `swap_space_with_space_on_display` + `focus_display` branch).
+fn space_switch_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    selector: &Selector,
+) -> Response {
+    let spaces = match mission_control_spaces() {
+        Ok(spaces) if !spaces.is_empty() => spaces,
+        _ => return Err("could not enumerate spaces.\n".to_string()),
+    };
+    let cur_sid = runtime.state.active_space_id().or_else(|| {
+        display_frames
+            .first()
+            .and_then(|(display_id, _)| current_space_for_display(*display_id).ok())
+    });
+    let sid = resolve_space_target(&spaces, cur_sid, selector)?;
+    let cur_sid = cur_sid.ok_or_else(|| "could not locate the active space.\n".to_string())?;
+    if cur_sid == sid {
+        return Err("cannot focus an already focused space.\n".to_string());
+    }
+
+    let cur_did = runtime.state.space_display(cur_sid);
+    let did = runtime.state.space_display(sid);
+    if let (Some(cur_did), Some(did)) = (cur_did, did) {
+        if cur_did != did {
+            // Cross-display: swap the two spaces' window contents; focus stays on the
+            // source display (the content swap leaves each space current on its display).
+            space_swap_cross_display(sa, runtime, cur_sid, sid)?;
+            runtime.state.set_active_space(cur_sid);
+            return Ok(None);
+        }
+    }
+
+    // Same display: the SA `focus_space` opcode, matching the C (no gesture fallback).
+    sa.focus_space(sid).map_err(|_| {
+        "cannot focus space due to an error with the scripting-addition.\n".to_string()
+    })?;
+    activate_space_display_if_cross(sid)?;
+    refresh_all_active_spaces(runtime, display_frames);
+    runtime.state.set_active_space(sid);
     Ok(None)
 }
 

@@ -49,6 +49,35 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 36) — `space --switch` wired through the SA + verified live (same- and cross-display)
+
+- Wired `space --switch <sel>` through the WM daemon, mirroring the C
+  `space_manager_switch_space`. Added to `try_scripting_addition`'s `Message::Space`
+  arm via `space_switch_via_sa`. The destination is resolved by **mission-control
+  index** (via `resolve_space_target`, exactly like `space --focus`), and the acting
+  side is always the current active space (the C uses `space_manager_active_space`,
+  ignoring any target token). Rejects switching to the active space with `cannot
+  focus an already focused space.`.
+  - **Same display:** the SA `focus_space` opcode (SA-only, no gesture fallback —
+    matching the C), then `activate_space_display_if_cross` + `set_active_space`.
+  - **Different display:** swap the two spaces' window contents (reusing
+    `space_swap_cross_display`) and keep focus on the source display (the C
+    `swap_space_with_space_on_display` + `focus_display` branch) — the content swap
+    leaves each space current on its own display.
+- **Faithful-port note:** the mission-control-active / display-animating guards are
+  omitted (no cheap detection in the standalone daemon), as with the other space ops.
+- **Verified live on the remote (two displays, macOS 26.5.1):**
+  - Same-display: `space --switch 1` while on space 1 → `cannot focus an already
+    focused space.` (exit 1); `space --switch 2` moved display 1 to sid 61;
+    `space --switch 1` returned to sid 1 (probe `current_space` tracked each).
+  - Cross-display: with window 762 on `space 1/display 1` and 763 on
+    `space 64/display 2`, `space --switch 3` (sid 64 on display 2) swapped their
+    contents — `query` then reported 762→`space 64/display 2`, 763→`space 1/display
+    1` (confirmed by raw `windows_on_space`), while `current_space` **stayed** 1 on
+    display 1 / 64 on display 2 (focus kept on the source display, as designed).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 35) — Cross-display `space --swap` (content swap) implemented + verified live
 
 - Implemented the **cross-display** `space --swap` content swap, now unblocked by the
@@ -2103,9 +2132,10 @@ changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
 float/zoom/native-fullscreen; opacity, move-to-space, and move-to-display (all via
-the SA); space focus (SA `focus_space`, gesture fallback), cross-display space move
-(SA `move_space_to_display`), intra-display space reorder + same-display swap (SA
-`move_space_after_space`), and rotate/balance/mirror/layout;
+the SA); space focus (SA `focus_space`, gesture fallback), switch (SA focus /
+cross-display content swap), cross-display space move (SA `move_space_to_display`),
+intra-display space reorder + same/cross-display swap (SA `move_space_after_space` /
+`move_window_list_to_space`), and rotate/balance/mirror/layout;
 `signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
 deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus.
@@ -2121,9 +2151,11 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    activation; `--create`/`--destroy` (session 27), `--display` (cross-display
    space move, session 31), `--move` (intra-display reorder, session 32), and
    `--swap` (same-display, session 33) all work via the SA. Still to do:
-   `--switch`; the **cross-display** `--swap` (window-content swap) is done and
-   verified live (session 35, `space_swap_cross_display`); and, later, SLS
-   create/destroy notifications.
+   `--switch` (session 36 — SA `focus_space` same-display, content-swap
+   cross-display, verified live); the **cross-display** `--swap` (window-content
+   swap) is done and verified live (session 35, `space_swap_cross_display`); and,
+   later, SLS create/destroy notifications. The whole `space` domain's SA ops are
+   now wired: create/destroy/focus/switch/move/swap/display.
    **macOS-26 window→space bug — FIXED (session 34).** `SLSCopySpacesForWindows`
    only reports the *current* space on macOS 26, so the daemon used to mis-assign
    windows on non-current spaces to the active space. Fixed by enumerating the

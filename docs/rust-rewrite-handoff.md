@@ -49,6 +49,132 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 33) — `space --swap` (same-display) wired through the SA + verified live; cross-display swap deferred
+
+- Wired `space --swap <sel>` through the WM daemon via the scripting addition.
+  `try_scripting_addition`'s `Message::Space` arm now handles
+  `SpaceAction::Swap(selector)` via `space_swap_via_sa`, mirroring the
+  **same-display** path of the C `space_manager_swap_space_with_space`
+  (`space_manager.c`): reject `acting == selector` (`cannot swap space with
+  itself.`), then run the C's five reordering branches keyed on
+  first-on-display + mission-control-index adjacency, exchanging the two spaces'
+  slots with one or two `ScriptingAddition::move_space_after_space` calls (reusing
+  the `global_prev_space` / `mission_control_index` helpers from session 32). SA
+  failure → `cannot swap space due to an error with the scripting-addition.`.
+- **Cross-display swap intentionally deferred.** The C cross-display branch
+  (`space_manager_swap_space_with_space_on_display`) does not reorder slots — it
+  swaps the two spaces' **window contents** (`space_window_list` +
+  `space_manager_move_window_list_to_space`) plus their view/label/uuid bookkeeping.
+  That needs reliable per-space window enumeration, which the macOS-26
+  `spaces_for_window` bug blocks, so a cross-display `space --swap` returns a clear
+  error (`cannot swap spaces across displays: the standalone daemon does not yet
+  support the content-swap path.`) rather than silently doing the wrong thing.
+  Revisit once the macOS-26 space→window resolution is fixed.
+- **Verified live on the remote (two displays, macOS 26.5.1)**, confirmed by the
+  independent SkyLight `--experimental-space-probe`:
+  - `space 1 --swap 61` swapped display 1's order `[1, 61]` → `[61, 1]` (branch 1;
+    exit 0); running it again swapped back to `[1, 61]` (branch 2). Active/current
+    tracking stayed correct across both.
+  - Error paths: `space 1 --swap 1` → `cannot swap space with itself.` (exit 1);
+    `space 1 --swap 64` (spaces on different displays) → the cross-display deferral
+    error (exit 1).
+- Still to wire through the daemon: the cross-display `space --swap` content-swap
+  (needs the macOS-26 fix), and window `layer`/`sticky`/`shadow` (sticky/shadow
+  need toggle-state tracking; `--layer` is not in the parser grammar).
+- **Uncommitted:** sessions 31–33 are staged but not committed — local git SSH-signs
+  via 1Password and the agent returned `failed to fill whole buffer`; the user asked
+  to keep going without committing. Commit when signing works
+  (`crates/yabai/src/main.rs`, `crates/yabai-runtime/src/app_state.rs`,
+  `docs/rust-rewrite-handoff.md`).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
+### 2026-07-03 (session 32) — `space --move` (intra-display space reorder) wired through the SA + verified live
+
+- Wired `space --move <sel>` through the WM daemon via the scripting addition,
+  continuing the SA-wiring arc. `try_scripting_addition`'s `Message::Space` arm now
+  handles `SpaceAction::Move(selector)` via `space_move_via_sa`, mirroring the C
+  `space_manager_move_space_to_space` (`space_manager.c`): resolve acting
+  (target/active) + selector spaces; reject `acting == selector` (`cannot move
+  space to itself.`) and a cross-display pair (`cannot move space across display
+  boundaries. use --display instead.`); then apply the C's three reordering
+  branches keyed on whether each space is **first on its display** (computed from
+  the *global* mission-control order via the new `mission_control_spaces()`-backed
+  `global_prev_space` / `mission_control_index` helpers), issuing one or two
+  `ScriptingAddition::move_space_after_space` calls (with `focus = acting == active
+  space`). SA failure → `cannot move space due to an error with the
+  scripting-addition.`.
+- **Faithful-port note:** the C mission-control-active / display-animating guards
+  are omitted (no cheap detection in the standalone daemon), same as `space
+  --display`.
+- **Verified live on the remote (two displays, macOS 26.5.1)**, confirmed by the
+  independent SkyLight `--experimental-space-probe`:
+  - `space 61 --move 1` reordered display 1 from `[1, 61]` to `[61, 1]`
+    (mc-index 1→61, 2→1; exit 0); the reverse `space 1 --move 61` restored
+    `[1, 61]`. Exercises the `!acting_is_first && selector_is_first` branch (the
+    two-`move_space_after_space` case) in both directions.
+  - Error paths: `space 1 --move 1` → `cannot move space to itself.` (exit 1);
+    `space 1 --move 64` (spaces on different displays) → `cannot move space across
+    display boundaries. use --display instead.` (exit 1).
+  - The `acting_is_first && !selector_is_first` and both-mid-list branches aren't
+    exercised by a 2-space display but mirror the C directly.
+- Still to wire through the daemon (client methods exist): `space --swap` (the
+  cross- and same-display swap in the C `space_manager_swap_space_with_space` /
+  `..._on_display`), and window `layer`/`sticky`/`shadow` (sticky/shadow need
+  toggle-state tracking; `--layer` is not in the parser grammar).
+- **Uncommitted:** sessions 31 and 32 are staged but not committed — the local git
+  is set to SSH-sign via 1Password and the agent returned `failed to fill whole
+  buffer`; the user asked to keep going without committing. Commit both when
+  signing works again (`crates/yabai/src/main.rs`,
+  `crates/yabai-runtime/src/app_state.rs`, `docs/rust-rewrite-handoff.md`).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
+### 2026-07-03 (session 31) — `space --display` (cross-display space move) wired through the SA + verified live on two displays
+
+- Wired `space --display <sel>` through the WM daemon via the scripting addition,
+  continuing the SA-wiring arc. `try_scripting_addition`'s `Message::Space` arm now
+  handles `SpaceAction::Display(selector)` via a new `space_to_display_via_sa`
+  helper that mirrors the C `space_manager_move_space_to_display`
+  (`space_manager.c`): resolve the acting (target/active) space and the target
+  display, then validate in the C order —
+  - source display == target display → `acting space is already located on the
+    given display.`
+  - source space is the only user-space on its display → `acting space is the last
+    user-space on the source display and cannot be moved.`
+  - the target display has no known active space → `could not locate the active
+    space of the given display.`
+  then call `ScriptingAddition::move_space_to_display(acting_sid, dst_sid,
+  src_prev, focus)`, where `focus = (acting == active space)` and `src_prev` is the
+  source display's previous space **in live mission-control order** (via the new
+  `prev_space_on_display` daemon helper over `spaces_for_display`) so the SA
+  restores focus there after moving the active space away. SA failure maps to the C
+  `cannot send space to display due to an error with the scripting-addition.`.
+  Added public `AppState::space_display(sid) -> Option<u32>`.
+- **Faithful-port note:** the C mission-control-active and display-animating guards
+  (`SPACE_OP_ERROR_IN_MISSION_CONTROL` / `..._DISPLAY_IS_ANIMATING`) are
+  intentionally omitted — the standalone daemon has no cheap detection for them yet.
+- **Verified live end-to-end on the remote with two displays** (macOS 26.5.1;
+  display 1 = 1470×956 spaces `[1, 61]`, display 2 = 1920×1080 space `[64]`), all
+  confirmed independently by the SkyLight `--experimental-space-probe` (not just the
+  daemon's own view):
+  - Non-active move: `space 61 --display 2` → display 1 `[1]`, display 2 `[64, 61]`
+    (exit 0). Round-trip `space 61 --display 1` restored `[1, 61]` / `[64]`.
+  - **Focus (active-space) move:** focused space 61 (active), then `space --display 2`
+    (no target ⇒ active space, `focus=true`) → space 61 moved to display 2 **and the
+    source display 1 correctly fell back to its previous space (space 1 became
+    current)** — proving the `prev_space` argument. Log: `focused space 61 via
+    scripting addition`.
+  - Error paths: `space 1 --display 2` when space 1 is the last user-space on
+    display 1 → the last-user-space error (exit 1); `space 61 --display 2` when 61 is
+    already on display 2 → the already-located error (exit 1). Both faithful strings.
+- Still to wire through the daemon (client methods exist + proven): `space --move` /
+  `--swap` (intra-display reorder — the 3-way `move_space_after_space` logic in the C
+  `space_manager_move_space_to_space`), and window `layer`/`sticky`/`shadow`
+  (sticky/shadow need toggle-state tracking; `--layer` is not in the parser grammar).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 30) — `window --display` wired through the SA + verified live
 
 - Wired `window --display <sel>` through the WM daemon via the scripting
@@ -1909,7 +2035,9 @@ changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
 float/zoom/native-fullscreen; opacity, move-to-space, and move-to-display (all via
-the SA); space focus (SA `focus_space`, gesture fallback) and rotate/balance/mirror/layout;
+the SA); space focus (SA `focus_space`, gesture fallback), cross-display space move
+(SA `move_space_to_display`), intra-display space reorder + same-display swap (SA
+`move_space_after_space`), and rotate/balance/mirror/layout;
 `signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
 deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus.
@@ -1940,9 +2068,21 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    wired through the SA (session 30): it moves the acting window to the target
    display's active space via `move_window_to_space`, **verified live with a real
    two-display setup** (Finder window moved from `space 1, display 1` to `space 64,
-   display 2`, confirmed by both `query` and a `screencapture -D 2`). Still to do:
-   cross-display *space* moves (`space --move` / `space --display`, need the SA
-   client wired through — `move_space_to_display`/`move_space_after_space` exist).
+   display 2`, confirmed by both `query` and a `screencapture -D 2`).
+   `space --display <sel>` (cross-display *space* move) is also wired through the SA
+   (session 31): it moves the acting/active space to the target display's active
+   space via `move_space_to_display`, with the C validation order and the
+   live-mission-control `prev_space` for the focus case; verified live on two
+   displays (non-active + active-space moves, round-trip, and both error strings).
+   `space --move <sel>` (intra-display reorder) is also wired through the SA
+   (session 32): the C's three `move_space_after_space` branches keyed on
+   first-on-display (global mission-control order), verified live (reorder +
+   reverse + both error strings). `space --swap <sel>` (same-display) is wired too
+   (session 33): the C's five swap branches via `move_space_after_space`, verified
+   live (swap + swap-back + errors). Still to do: the **cross-display** `space
+   --swap`, which the C implements as a window-content swap (`space_window_list` +
+   `move_window_list_to_space`) — blocked by the macOS-26 `spaces_for_window` bug,
+   so currently rejected with a clear error.
 3. App launch/termination are now observed directly through NSWorkspace; the 3s
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise

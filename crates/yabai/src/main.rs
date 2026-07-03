@@ -1306,6 +1306,15 @@ fn try_scripting_addition(
                             Err(error) => Err(error),
                         }
                     }
+                    SpaceAction::Display(selector) => {
+                        space_to_display_via_sa(sa, runtime, cmd.target.as_ref(), selector)
+                    }
+                    SpaceAction::Move(selector) => {
+                        space_move_via_sa(sa, runtime, cmd.target.as_ref(), selector)
+                    }
+                    SpaceAction::Swap(selector) => {
+                        space_swap_via_sa(sa, runtime, cmd.target.as_ref(), selector)
+                    }
                     _ => continue,
                 };
                 if result.is_ok() {
@@ -1412,6 +1421,253 @@ fn window_opacity_via_sa(
                 "could not change opacity of window with id '{wid}' due to an error with the scripting-addition.\n"
             )
         })
+}
+
+/// Move the acting (target/active) space to another display's active space
+/// through the scripting addition, mirroring the C `space --display`
+/// (`space_manager_move_space_to_display`). Faithful to the C validation order
+/// and `daemon_fail` strings (the mission-control / display-animating guards are
+/// omitted — the standalone daemon has no cheap detection for them).
+fn space_to_display_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    target: Option<&Selector>,
+    selector: &Selector,
+) -> Response {
+    let acting_sid = runtime.state.resolve_space(target)?;
+    let did = runtime.state.resolve_display(Some(selector))?;
+    let src_did = runtime
+        .state
+        .space_display(acting_sid)
+        .ok_or_else(|| "could not locate the space to act on.\n".to_string())?;
+    if src_did == did {
+        return Err("acting space is already located on the given display.\n".to_string());
+    }
+    if runtime.state.space_ids_for_display(src_did).len() <= 1 {
+        return Err(
+            "acting space is the last user-space on the source display and cannot be moved.\n"
+                .to_string(),
+        );
+    }
+    let dst_sid = runtime
+        .state
+        .display_active_space_id(did)
+        .ok_or_else(|| "could not locate the active space of the given display.\n".to_string())?;
+    // The C focuses the source display's previous space after moving away its
+    // active space; pass that previous space (in live mission-control order) so
+    // the SA can restore focus there. For a non-active source space, `0`.
+    let focus = runtime.state.active_space_id() == Some(acting_sid);
+    let src_prev = if focus {
+        prev_space_on_display(src_did, acting_sid)
+    } else {
+        0
+    };
+    sa.move_space_to_display(acting_sid, dst_sid, src_prev, focus)
+        .map(|()| None)
+        .map_err(|_| {
+            "cannot send space to display due to an error with the scripting-addition.\n"
+                .to_string()
+        })
+}
+
+/// The space immediately before `sid` on `did` in live mission-control order
+/// (`0` if none / on lookup failure) — used to tell the SA which space the
+/// source display should focus after its active space is moved away.
+fn prev_space_on_display(did: u32, sid: u64) -> u64 {
+    let spaces = match spaces_for_display(did) {
+        Ok(spaces) => spaces,
+        Err(_) => return 0,
+    };
+    match spaces.iter().position(|&s| s == sid) {
+        Some(index) if index > 0 => spaces[index - 1],
+        _ => 0,
+    }
+}
+
+/// Reorder the acting (target/active) space relative to the selected space on the
+/// same display through the scripting addition, mirroring the C `space --move`
+/// (`space_manager_move_space_to_space`). Faithful to the C validation order,
+/// the "is this space first on its display?" test (global mission-control order),
+/// the three reordering branches, and the `daemon_fail` strings. The
+/// mission-control-active / display-animating guards are omitted (no cheap
+/// detection in the standalone daemon).
+fn space_move_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    target: Option<&Selector>,
+    selector: &Selector,
+) -> Response {
+    let acting_sid = runtime.state.resolve_space(target)?;
+    let selector_sid = runtime.state.resolve_space(Some(selector))?;
+    if acting_sid == selector_sid {
+        return Err("cannot move space to itself.\n".to_string());
+    }
+    let acting_did = runtime
+        .state
+        .space_display(acting_sid)
+        .ok_or_else(|| "could not locate the space to act on.\n".to_string())?;
+    let selector_did = runtime
+        .state
+        .space_display(selector_sid)
+        .ok_or_else(|| "could not locate the space to act on.\n".to_string())?;
+    if acting_did != selector_did {
+        return Err(
+            "cannot move space across display boundaries. use --display instead.\n".to_string(),
+        );
+    }
+
+    // The reordering decision needs the global mission-control order (each
+    // display's spaces flattened in turn), matching the C
+    // `space_manager_prev_space` / `space_manager_mission_control_index`.
+    let order = mission_control_spaces().unwrap_or_default();
+    let acting_prev = global_prev_space(&order, acting_sid);
+    let selector_prev = global_prev_space(&order, selector_sid);
+    // A space is "first on its display" when it has no global predecessor, or its
+    // predecessor lives on a different display.
+    let acting_is_first =
+        acting_prev.is_none_or(|prev| runtime.state.space_display(prev) != Some(acting_did));
+    let selector_is_first =
+        selector_prev.is_none_or(|prev| runtime.state.space_display(prev) != Some(selector_did));
+    let focus = runtime.state.active_space_id() == Some(acting_sid);
+
+    let ok = if acting_is_first && !selector_is_first {
+        sa.move_space_after_space(acting_sid, selector_sid, focus)
+            .is_ok()
+    } else if !acting_is_first && selector_is_first {
+        sa.move_space_after_space(acting_sid, selector_sid, focus)
+            .is_ok()
+            && sa
+                .move_space_after_space(selector_sid, acting_sid, false)
+                .is_ok()
+    } else if !acting_is_first && !selector_is_first {
+        // Both mid-list: insert acting after the selector, or after the selector's
+        // predecessor when acting currently sits later in the order.
+        let acting_mci = mission_control_index(&order, acting_sid);
+        let selector_mci = mission_control_index(&order, selector_sid);
+        let anchor = if acting_mci > selector_mci {
+            selector_prev.unwrap_or(0)
+        } else {
+            selector_sid
+        };
+        sa.move_space_after_space(acting_sid, anchor, focus).is_ok()
+    } else {
+        // Both first on the same display is impossible (one predecessor test),
+        // so this is a no-op that still reports success.
+        true
+    };
+
+    if ok {
+        Ok(None)
+    } else {
+        Err("cannot move space due to an error with the scripting-addition.\n".to_string())
+    }
+}
+
+/// Swap the acting (target/active) space with the selected space through the
+/// scripting addition, mirroring the **same-display** path of the C `space --swap`
+/// (`space_manager_swap_space_with_space`): the 5-branch reordering that exchanges
+/// the two spaces' slots via `move_space_after_space`. The C's *cross-display* swap
+/// instead exchanges the two spaces' window contents (`space_window_list` +
+/// `move_window_list_to_space`), which needs reliable per-space window enumeration —
+/// blocked by the macOS-26 `spaces_for_window` bug — so it is rejected here for now.
+/// The mission-control-active / display-animating guards are omitted (no cheap
+/// detection in the standalone daemon).
+fn space_swap_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    target: Option<&Selector>,
+    selector: &Selector,
+) -> Response {
+    let acting_sid = runtime.state.resolve_space(target)?;
+    let selector_sid = runtime.state.resolve_space(Some(selector))?;
+    if acting_sid == selector_sid {
+        return Err("cannot swap space with itself.\n".to_string());
+    }
+    let acting_did = runtime
+        .state
+        .space_display(acting_sid)
+        .ok_or_else(|| "could not locate the space to act on.\n".to_string())?;
+    let selector_did = runtime
+        .state
+        .space_display(selector_sid)
+        .ok_or_else(|| "could not locate the space to act on.\n".to_string())?;
+    if acting_did != selector_did {
+        // The C swaps window contents across displays; unsupported here (see above).
+        return Err(
+            "cannot swap spaces across displays: the standalone daemon does not yet support the content-swap path.\n"
+                .to_string(),
+        );
+    }
+
+    let order = mission_control_spaces().unwrap_or_default();
+    let acting_prev = global_prev_space(&order, acting_sid);
+    let selector_prev = global_prev_space(&order, selector_sid);
+    let acting_is_first =
+        acting_prev.is_none_or(|prev| runtime.state.space_display(prev) != Some(acting_did));
+    let selector_is_first =
+        selector_prev.is_none_or(|prev| runtime.state.space_display(prev) != Some(selector_did));
+    let acting_mci = mission_control_index(&order, acting_sid) as i64;
+    let selector_mci = mission_control_index(&order, selector_sid) as i64;
+    let focus_acting = runtime.state.active_space_id() == Some(acting_sid);
+    let focus_selector = runtime.state.active_space_id() == Some(selector_sid);
+    let acting_prev = acting_prev.unwrap_or(0);
+    let selector_prev = selector_prev.unwrap_or(0);
+
+    // The five branches of the C same-display swap, in order.
+    let ok = if acting_is_first && !selector_is_first && selector_mci - acting_mci == 1 {
+        sa.move_space_after_space(acting_sid, selector_sid, focus_acting)
+            .is_ok()
+    } else if !acting_is_first && selector_is_first && acting_mci - selector_mci == 1 {
+        sa.move_space_after_space(selector_sid, acting_sid, focus_selector)
+            .is_ok()
+    } else if acting_is_first && !selector_is_first {
+        sa.move_space_after_space(selector_sid, acting_sid, false)
+            .is_ok()
+            && sa
+                .move_space_after_space(acting_sid, selector_prev, focus_acting)
+                .is_ok()
+    } else if !acting_is_first && selector_is_first {
+        sa.move_space_after_space(acting_sid, selector_sid, focus_acting)
+            .is_ok()
+            && sa
+                .move_space_after_space(selector_sid, acting_prev, false)
+                .is_ok()
+    } else if acting_mci > selector_mci {
+        sa.move_space_after_space(selector_sid, acting_sid, false)
+            .is_ok()
+            && sa
+                .move_space_after_space(acting_sid, selector_prev, focus_acting)
+                .is_ok()
+    } else {
+        sa.move_space_after_space(acting_sid, selector_sid, focus_acting)
+            .is_ok()
+            && sa
+                .move_space_after_space(selector_sid, acting_prev, false)
+                .is_ok()
+    };
+
+    if ok {
+        Ok(None)
+    } else {
+        Err("cannot swap space due to an error with the scripting-addition.\n".to_string())
+    }
+}
+
+/// The space immediately before `sid` in the global mission-control order, if any.
+fn global_prev_space(order: &[u64], sid: u64) -> Option<u64> {
+    match order.iter().position(|&s| s == sid) {
+        Some(index) if index > 0 => Some(order[index - 1]),
+        _ => None,
+    }
+}
+
+/// The 1-based mission-control index of `sid` in the global order (`0` if absent),
+/// matching the C `space_manager_mission_control_index`.
+fn mission_control_index(order: &[u64], sid: u64) -> usize {
+    order
+        .iter()
+        .position(|&s| s == sid)
+        .map_or(0, |index| index + 1)
 }
 
 fn try_space_focus(

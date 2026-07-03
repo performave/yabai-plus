@@ -315,6 +315,12 @@ impl AppState {
         self.display_spaces(display_id)
     }
 
+    /// The display a space belongs to, if known. Public for daemon-side
+    /// interception (e.g. the scripting-addition `space --display` path).
+    pub fn space_display(&self, sid: u64) -> Option<u32> {
+        self.space_displays.get(&sid).copied()
+    }
+
     /// Public space-selector resolution for daemon-side interception (e.g. the
     /// scripting-addition `space --destroy/--move` paths). `None` resolves to the
     /// active space.

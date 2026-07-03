@@ -49,6 +49,38 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 38) — `focus_follows_mouse` via a CGEventTap + verified live
+
+- Implemented `focus_follows_mouse` (`autofocus`/`autoraise`), previously parsed
+  but not enacted. Added `yabai_macos::mouse` — a listen-only `CGEventTap` on
+  `kCGEventMouseMoved` pumped on a dedicated run-loop thread (mirroring the C
+  `mouse_handler.c` tap), fanning each cursor point out through a static sender
+  list (like `workspace.rs`) and re-enabling itself if the system disables the tap.
+  The daemon spawns the tap, forwards points as a new `WmWork::MouseMoved(Point)`,
+  and `handle_mouse_moved` focuses the managed window under the cursor when it
+  differs from the focused one: `autoraise` → `AxSink::focus_window` (raise),
+  `autofocus` → the new `AxSink::focus_window_without_raise` (front/key window, no
+  `AXRaise` — mirroring the C `window_manager_focus_window_without_raise`). Fires
+  `window_focused` (de-duped via `last_focus_signal`); no `mouse_follows_focus`
+  warp (the user is moving the mouse). The C occlusion / gesture-debounce /
+  mission-control refinements are not modeled.
+- Added `AppState::managed_window_at_point` (public; resolves the display-under-
+  cursor's *visible* space first so a hidden space at the same coords can't shadow
+  the hit) and a `--experimental-post-mouse-moved <x> <y>` probe
+  (`post_mouse_moved`, synthesizes a `kCGEventMouseMoved`) so FFM is testable on a
+  headless/remote box where the physical cursor can't be driven.
+- **Verified live on the remote (macOS 26.5.1)** with two tiled Finder windows
+  (834 left @center 411,494; 821 right @center 1114,494):
+  - `autoraise`: posting mouse-moved over the left window focused 834, over the
+    right focused 821 (`query` `has-focus` flips each time).
+  - `autofocus`: posting over the left window focused 834 (focus changes without a
+    raise).
+  - `off`: with 821 focused, posting over 834 left focus on 821 — the move is
+    ignored. All confirmed via `query --windows`.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets` (clean, no warnings);
+  `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 37) — window `--sub-layer` / `--toggle sticky` / `--toggle shadow` via SA + verified live
 
 - Wired three SA-backed window ops through the WM daemon in
@@ -2127,6 +2159,10 @@ chronological log and may describe earlier states.
     `ObservedEvent`s over a channel (`WindowCreated`/`Destroyed`/
     `FocusedWindowChanged`). NOTE: `AXUIElementDestroyed` is unreliable; use set
     reconciliation, not the notification.
+  - `mouse.rs`: `observe_mouse_moved(tx)` — a listen-only `CGEventTap` on
+    `kCGEventMouseMoved` (pumped on a dedicated run-loop thread) reporting cursor
+    points for `focus_follows_mouse`; plus `post_mouse_moved(point)` (synthesizes a
+    move for testing).
   - `space.rs`: read-only SkyLight discovery for `current_space_for_display()`
     (`SLSManagedDisplayGetCurrentSpace`), `spaces_for_display()`
     (`SLSCopyManagedDisplaySpaces` + `id64` extraction), and
@@ -2180,7 +2216,8 @@ intra-display space reorder + same/cross-display swap (SA `move_space_after_spac
 `move_window_list_to_space`), and rotate/balance/mirror/layout;
 `signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
 deminimize/title-change events and app/title filters for metadata-carrying events;
-`mouse_follows_focus` cursor centering on focus.
+`mouse_follows_focus` cursor centering on focus; `focus_follows_mouse`
+(autofocus/autoraise) via a mouse-moved `CGEventTap`.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
@@ -2243,10 +2280,13 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    are all wired through the SA and verified live (session 37); the parser already
    produces `--sub-layer` as `WindowAction::Raw`, so no grammar change was needed
    (the C command is `--sub-layer`, not `--layer`). Still to do:
-   remaining deminimize/native-fullscreen-exit selectors, focus without-raise,
+   remaining deminimize/native-fullscreen-exit selectors,
    scratchpad, and mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
-   still needs a CGEventTap.
+   (`autofocus`/`autoraise`) is done too (session 38) via a `CGEventTap` on
+   mouse-moved (`yabai_macos::mouse`), with `AxSink::focus_window_without_raise` for
+   `autofocus`, verified live. The C occlusion / gesture-debounce / mission-control
+   refinements are not modeled.
    Signals: mostly done — `signal --add/--list/--remove`, app/title regex filters
    (including `!=` exclusion), and live firing of `window_created`,
    `window_destroyed`, `window_focused`, `application_launched/terminated`,

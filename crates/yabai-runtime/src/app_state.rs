@@ -383,6 +383,26 @@ impl AppState {
             .find_map(|(&did, info)| info.frame.contains_point(point).then_some(did))
     }
 
+    /// The managed window whose tiled frame contains `point`, resolving the
+    /// currently-visible space of each display first so overlapping non-visible
+    /// spaces don't shadow it. Public for `focus_follows_mouse`.
+    pub fn managed_window_at_point(&self, point: Point) -> Option<u32> {
+        // Prefer the visible space on the display under the point, so a window on a
+        // hidden space at the same coordinates is never chosen.
+        if let Some(did) = self.display_at_point(point) {
+            if let Some(sid) = self.display_active_space_id(did).or(self.active_space) {
+                if let Some(tree) = self.spaces.get(&sid) {
+                    if let Some(wid) = tree.capture().into_iter().find_map(|frame| {
+                        frame.area.contains_point(point).then_some(frame.window_id)
+                    }) {
+                        return Some(wid);
+                    }
+                }
+            }
+        }
+        self.window_at_point(point)
+    }
+
     /// The managed window whose tiled frame contains `point` (the `mouse` window).
     fn window_at_point(&self, point: Point) -> Option<u32> {
         self.spaces.values().find_map(|tree| {

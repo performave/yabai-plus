@@ -7,6 +7,8 @@ pub mod cgwindow;
 #[cfg(target_os = "macos")]
 pub mod display;
 #[cfg(target_os = "macos")]
+pub mod mouse;
+#[cfg(target_os = "macos")]
 pub mod objc;
 #[cfg(target_os = "macos")]
 pub mod observe;
@@ -31,6 +33,8 @@ pub use display::{
     MacDisplay, active_displays, cursor_display_id, cursor_location, set_active_display,
     warp_cursor_to_display_center, warp_cursor_to_point,
 };
+#[cfg(target_os = "macos")]
+pub use mouse::{observe_mouse_moved, post_mouse_moved};
 #[cfg(target_os = "macos")]
 pub use observe::{ObservedEvent, observe_pid};
 #[cfg(target_os = "macos")]

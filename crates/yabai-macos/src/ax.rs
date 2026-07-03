@@ -1240,6 +1240,34 @@ impl AxSink {
         true
     }
 
+    /// Focus a window without raising it (make it the front/key window but leave
+    /// z-order untouched), mirroring the C `window_manager_focus_window_without_raise`
+    /// used by `focus_follows_mouse autofocus`. Identical to [`Self::focus_window`]
+    /// minus the `AXRaise` action.
+    pub fn focus_window_without_raise(&self, window_id: u32) -> bool {
+        let Some(window) = self.windows.get(&window_id) else {
+            return false;
+        };
+        let Some(pid) = ax_pid(window.element) else {
+            return false;
+        };
+
+        let mut psn = ProcessSerialNumber { high: 0, low: 0 };
+        // SAFETY: `psn` is a valid out pointer; GetProcessForPID fills it for a
+        // live pid and returns non-zero (`procNotFound`) otherwise.
+        if unsafe { GetProcessForPID(pid, &mut psn) } != 0 {
+            return false;
+        }
+
+        // SAFETY: `psn` is a valid Carbon PSN for a live process; the make-key
+        // event-record bytes mirror the C daemon's `g_event_bytes` layout exactly.
+        unsafe {
+            _SLPSSetFrontProcessWithOptions(&mut psn, window_id, K_CPS_USER_GENERATED);
+            make_key_window(&mut psn, window_id);
+        }
+        true
+    }
+
     /// Close a managed window by pressing its `AXCloseButton`, matching
     /// `window_manager_close_window` in the C daemon.
     pub fn close_window(&self, window_id: u32) -> bool {

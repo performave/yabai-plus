@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use yabai_core::{
-    Area, Message, Point, Selector, SignalEvent, SpaceAction, WindowAction, parse_message,
+    Area, FfmMode, Message, Point, Selector, SignalEvent, SpaceAction, WindowAction, parse_message,
     parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
@@ -16,11 +16,12 @@ use yabai_macos::{
     AxSink, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt, active_displays,
     application_pids_with_windows, current_space_for_display, cursor_display_id, cursor_location,
     display_for_space, focused_window, focused_window_diagnostics, main_visible_frame,
-    mission_control_spaces, move_focused_window, move_pid_window, ns_application_load, observe_pid,
-    observe_workspace, pid_window_infos, regular_application_pids, set_active_display,
-    spaces_for_display, spaces_for_window, switch_space_by_gesture, tileable_pid_windows,
-    visible_frame_for_display, warp_cursor_to_display_center, warp_cursor_to_point, window_alpha,
-    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
+    mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
+    observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos, post_mouse_moved,
+    regular_application_pids, set_active_display, spaces_for_display, spaces_for_window,
+    switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
+    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, windows_for_pid,
+    windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
         Some("--experimental-sa-focus-space") => run_sa_focus_space(&args[1..]),
         Some("--experimental-window-alpha") => run_window_alpha(&args[1..]),
         Some("--experimental-windows-on-space") => run_windows_on_space(&args[1..]),
+        Some("--experimental-post-mouse-moved") => run_post_mouse_moved(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -567,6 +569,8 @@ fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
 enum WmWork {
     Observed(ObservedEvent),
     Workspace(WorkspaceEvent),
+    /// The cursor moved to `point` (from the `focus_follows_mouse` event tap).
+    MouseMoved(Point),
     /// Periodic self-heal: re-reconcile known apps and (in `all` mode) discover
     /// apps launched after startup.
     Tick,
@@ -992,6 +996,19 @@ fn run_window_alpha(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn run_post_mouse_moved(args: &[String]) -> ExitCode {
+    let (Some(x), Some(y)) = (
+        args.first().and_then(|a| a.parse::<f32>().ok()),
+        args.get(1).and_then(|a| a.parse::<f32>().ok()),
+    ) else {
+        eprintln!("usage: --experimental-post-mouse-moved <x> <y>");
+        return ExitCode::from(64);
+    };
+    post_mouse_moved(Point { x, y });
+    println!("posted mouse-moved at {x} {y}");
+    ExitCode::SUCCESS
 }
 
 fn run_windows_on_space(args: &[String]) -> ExitCode {
@@ -2099,6 +2116,55 @@ fn center_mouse_on_focus(runtime: &Runtime<AxSink>, window_id: u32) {
     let _ = warp_cursor_to_point(center);
 }
 
+/// `focus_follows_mouse`: when the cursor moves over a different managed window,
+/// focus it — without raising (`autofocus`) or with a raise (`autoraise`),
+/// mirroring the C `MOUSE_MOVED` handler. No-op when the mode is off or the cursor
+/// is over the already-focused window. The C's occlusion / gesture-debounce /
+/// mission-control refinements are not modeled here.
+fn handle_mouse_moved(
+    runtime: &mut Runtime<AxSink>,
+    last_focus_signal: &mut Option<u32>,
+    point: Point,
+) {
+    let mode = runtime.state.config.focus_follows_mouse;
+    if mode == FfmMode::Disabled {
+        return;
+    }
+    runtime.state.set_cursor_point(point);
+    let Some(window_id) = runtime.state.managed_window_at_point(point) else {
+        return;
+    };
+    if runtime.state.focused_window_id() == Some(window_id) {
+        return;
+    }
+
+    let focused = match mode {
+        FfmMode::Autoraise => runtime.sink.focus_window(window_id),
+        FfmMode::Autofocus => runtime.sink.focus_window_without_raise(window_id),
+        FfmMode::Disabled => return,
+    };
+    if !focused {
+        return;
+    }
+    runtime.state.set_focused_window(Some(window_id));
+    // Note: no `mouse_follows_focus` cursor warp here — the user is moving the
+    // mouse, so warping it back would fight them.
+    // Fire `window_focused` once per real change, de-duped with the observer /
+    // command-focus paths via `last_focus_signal`.
+    if *last_focus_signal != Some(window_id) {
+        *last_focus_signal = Some(window_id);
+        let meta = runtime.state.window_meta(window_id);
+        fire_signals(
+            runtime,
+            SignalEvent::WindowFocused,
+            &[("YABAI_WINDOW_ID", window_id.to_string())],
+            meta.map(|m| m.app.as_str()),
+            meta.map(|m| m.title.as_str()),
+            None,
+        );
+    }
+}
+
 fn observed_geometry_signal(
     runtime: &Runtime<AxSink>,
     event: &ObservedEvent,
@@ -2532,6 +2598,26 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
         });
     }
 
+    // Mouse-moved event tap for `focus_follows_mouse`. The tap always runs (it is
+    // cheap and listen-only); the handler no-ops unless the mode is enabled. A
+    // dedicated thread pumps the tap's run loop and forwards points as `WmWork`.
+    {
+        let (mtx, mrx) = channel::<Point>();
+        thread::spawn(move || {
+            if let Err(error) = observe_mouse_moved(mtx) {
+                eprintln!("yabai-rust: focus_follows_mouse tap unavailable: {error}");
+            }
+        });
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for point in mrx {
+                if tx.send(WmWork::MouseMoved(point)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     // The main thread keeps `tx` alive, so the loop runs until the process dies.
     eprintln!(
         "yabai-rust: WM daemon up on {socket_path} — target {target}, {} app(s), {initial} window(s), {} display(s), active space {active_sid:?}, {space_count} discovered space(s), gap {gap}, padding {padding}",
@@ -2758,6 +2844,9 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         );
                     }
                 },
+                WmWork::MouseMoved(point) => {
+                    handle_mouse_moved(&mut runtime, &mut last_focus_signal, point);
+                }
                 WmWork::Tick => {
                     refresh_live_display_state(&mut runtime, &mut display_frames);
                     // In `all` mode, pick up apps launched after startup via the live

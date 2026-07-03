@@ -41,7 +41,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 163 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 164 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -52,6 +52,18 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 47) — pure `query --windows has-shadow`
+
+- Added the `has-shadow` property to the pure `query --windows` serializer, backed
+  by the runtime's existing shadow toggle state (`true` by default, `false` after
+  `window --toggle shadow` records a disabled shadow). This is state the daemon
+  already owns from the SA-backed shadow command, so no live AX/SkyLight read is
+  needed for managed windows still in the tree.
+- Added `query_windows_serializes_has_shadow` covering the default and
+  shadow-disabled states.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (164 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 46) — reject empty query property segments
 

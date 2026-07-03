@@ -1589,6 +1589,7 @@ impl AppState {
                 "split-type",
                 "split-child",
                 "stack-index",
+                "has-shadow",
                 "has-fullscreen-zoom",
                 "has-parent-zoom",
             ],
@@ -1783,6 +1784,10 @@ impl AppState {
                 "stack-index" => fields.push(format!(
                     "\t\"stack-index\":{}",
                     self.window_stack_index(frame.window_id)
+                )),
+                "has-shadow" => fields.push(format!(
+                    "\t\"has-shadow\":{}",
+                    json_bool(self.window_has_shadow(frame.window_id))
                 )),
                 "has-fullscreen-zoom" => fields.push(format!(
                     "\t\"has-fullscreen-zoom\":{}",
@@ -2848,6 +2853,22 @@ mod tests {
             state.handle_tokens(&toks(&["query", "--windows", "id,stack-index"])),
             Ok(Some(
                 "[{\n\t\"id\":10,\n\t\"stack-index\":1\n},{\n\t\"id\":20,\n\t\"stack-index\":2\n},{\n\t\"id\":30,\n\t\"stack-index\":3\n}]\n"
+                    .to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn query_windows_serializes_has_shadow() {
+        let mut state = state_with_space();
+        state.add_window(10).unwrap();
+        state.add_window(20).unwrap();
+        state.set_window_shadow(20, false);
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--windows", "id,has-shadow"])),
+            Ok(Some(
+                "[{\n\t\"id\":10,\n\t\"has-shadow\":true\n},{\n\t\"id\":20,\n\t\"has-shadow\":false\n}]\n"
                     .to_string()
             ))
         );

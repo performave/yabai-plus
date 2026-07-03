@@ -38,7 +38,7 @@ reconstructing context.
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
   deferred. 158 workspace tests pass. The shipped C `make` flow is unchanged.
-- Last updated: 2026-06-27.
+- Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
     longer a primary constraint for this track.
@@ -48,6 +48,61 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 30) — `window --display` wired through the SA + verified live
+
+- Wired `window --display <sel>` through the WM daemon via the scripting
+  addition, continuing the SA-wiring arc. `try_scripting_addition` now also
+  intercepts `WindowAction::Display(selector)`: it resolves the acting
+  (target/focused) window, resolves the display selector to a display id, looks up
+  that display's currently-visible space (`AppState::display_active_space_id`), and
+  reuses the same `ScriptingAddition::move_window_to_space` opcode as
+  `window --space`. This mirrors the C `window --display`
+  (`message.c`), which resolves the display's `display_space_id` and delegates to
+  `window_manager_send_window_to_space`. SA failures map to the same
+  `could not move window to space: <err>` string as the `--space` path.
+- Added a public `AppState::resolve_display(selector)` (thin wrapper over the
+  existing private `resolve_display_selector`) so the daemon can resolve a display
+  selector for interception, matching the existing public `resolve_space` /
+  `resolve_window_selector` helpers. A missing display's active space yields
+  `could not locate the active space of display '<did>'.`
+- **Faithful-port note:** the C fullscreen guard (`can not move window to a macOS
+  fullscreen space!`) is intentionally deferred — the daemon has no cheap
+  fullscreen-space detection yet; document + revisit with the macOS-26
+  space-tracking fix.
+- **Verified live end-to-end on the remote (macOS 26.5.1), first single-display,
+  then with a real second display attached.**
+  - Single-display pass (before the 2nd display): exercised the full path by
+    moving a window to a *different space* on display 1 — one Finder window (id
+    595) on a clean two-space layout (sid 1 + an SA-created sid 61), focused the
+    empty space 2, ran `window 595 --display 1` (display 1's active space is now
+    sid 61); before/after screenshots show the window appearing on space 2, tiled.
+  - **True cross-display pass (2nd display connected):** displays were `display 1`
+    (x=0, 1470×956, current space 1) and `display 2` (x=1470, 1920×1080, current
+    space sid 64). With one Finder window (id 666) on `space 1, display 1`, ran
+    `window 666 --display 2` → `query --windows` then reported `space 64, display
+    2`, and a `screencapture -D 2` of display 2 showed the Finder window filling
+    the previously-empty second display. Genuine cross-display move confirmed.
+    (NOTE: over SSH, `--experimental-space-probe` reports `no active displays`
+    until the display is woken — run `caffeinate -d -u` first, per the runbook.)
+  - Error/resolution paths confirmed live: `--display 5` returns the faithful
+    `could not locate display with arrangement index '5'.` (exit 1); `--display
+    mouse` resolves the cursor's display (exit 0). (Before the 2nd display was
+    attached, `--display 2` also returned that not-found error, as expected.)
+- **Gotcha logged:** the macOS-26 `spaces_for_window` bug makes
+  `query --windows` report the *current* space for every window, so it cannot
+  confirm a cross-space move — a screenshot on the destination space is the
+  reliable check. Also, closing every Finder window collapsed the fullscreen
+  spaces (18/36) down to one space; prefer the SA `space --create` to make a clean
+  extra space for testing rather than fullscreening apps. `space --focus` resolves
+  its selector by **mission-control index** (1-based), whereas `window --space` /
+  `--display` resolve raw sids — keep that distinction in mind when scripting tests.
+- Still to wire through the daemon (client methods exist + proven): `space
+  --move` / `--display` (cross-display space moves), and window `layer`/`sticky`/
+  `shadow` (sticky/shadow need toggle-state tracking; `--layer` is not yet in the
+  parser grammar).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-06-27 (session 29) — `space --focus` uses SA `focus_space` (gesture fallback) + SA installed on remote
 
@@ -1853,7 +1908,8 @@ discovered windows to the display/space they're physically on. Active-space
 changes are notified through NSWorkspace; app launch/termination are notified
 too; space add/remove is refreshed by polling before daemon work. Window ops:
 focus (raise), close, swap, warp, minimize/deminimize, toggle
-float/zoom/native-fullscreen; space focus (gesture) and rotate/balance/mirror/layout;
+float/zoom/native-fullscreen; opacity, move-to-space, and move-to-display (all via
+the SA); space focus (SA `focus_space`, gesture fallback) and rotate/balance/mirror/layout;
 `signal` add/list/remove with live firing on focus/app/space/move/resize/minimize/
 deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus.
@@ -1880,9 +1936,13 @@ deminimize/title-change events and app/title filters for metadata-carrying event
 2. Multi-display: done — the daemon tiles every display's current space at once,
    each in its own usable frame, routing windows to the display they're on.
    Display hot-plug is handled by polling/reconcile before daemon work and on the
-   3s tick (physically verified unplug/replug). Still to do: cross-display
-   window/space moves (`window --display` / `space --display`, need the scripting
-   addition).
+   3s tick (physically verified unplug/replug). `window --display <sel>` is now
+   wired through the SA (session 30): it moves the acting window to the target
+   display's active space via `move_window_to_space`, **verified live with a real
+   two-display setup** (Finder window moved from `space 1, display 1` to `space 64,
+   display 2`, confirmed by both `query` and a `screencapture -D 2`). Still to do:
+   cross-display *space* moves (`space --move` / `space --display`, need the SA
+   client wired through — `move_space_to_display`/`move_space_after_space` exist).
 3. App launch/termination are now observed directly through NSWorkspace; the 3s
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise

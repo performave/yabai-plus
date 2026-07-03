@@ -322,6 +322,13 @@ impl AppState {
         self.resolve_space_selector(selector)
     }
 
+    /// Public display-selector resolution for daemon-side interception (e.g. the
+    /// scripting-addition `window --display` path). `None` resolves to the active
+    /// display.
+    pub fn resolve_display(&self, selector: Option<&Selector>) -> Result<u32, String> {
+        self.resolve_display_selector(selector)
+    }
+
     /// Public window-selector resolution for daemon-side interception (e.g. the
     /// scripting-addition `window --space/--display` paths). `None` resolves to the
     /// focused window.

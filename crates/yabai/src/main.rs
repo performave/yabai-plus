@@ -1338,6 +1338,37 @@ fn try_scripting_addition(
                         }
                         return Some(result);
                     }
+                    WindowAction::Display(selector) => {
+                        // Move the acting window to the selected display's active space,
+                        // mirroring the C `window --display` (which resolves the display's
+                        // current space and reuses `send_window_to_space`). Same SA opcode
+                        // as `window --space`.
+                        let result = match (
+                            runtime.state.resolve_window_selector(cmd.target.as_ref()),
+                            runtime
+                                .state
+                                .resolve_display(Some(selector))
+                                .and_then(|did| {
+                                    runtime.state.display_active_space_id(did).ok_or_else(|| {
+                                        format!(
+                                            "could not locate the active space of display '{did}'.\n"
+                                        )
+                                    })
+                                }),
+                        ) {
+                            (Ok(wid), Ok(sid)) => sa
+                                .move_window_to_space(sid, wid)
+                                .map(|()| None)
+                                .map_err(|error| {
+                                    format!("could not move window to space: {error}\n")
+                                }),
+                            (Err(error), _) | (_, Err(error)) => Err(error),
+                        };
+                        if result.is_ok() {
+                            refresh_live_display_state(runtime, display_frames);
+                        }
+                        return Some(result);
+                    }
                     // `window --opacity <float>` sets the window alpha through the SA;
                     // it is purely visual, so no tree re-flow is needed.
                     WindowAction::Raw { command, arg } if command == "--opacity" => {

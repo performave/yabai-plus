@@ -28,7 +28,8 @@ use yabai_macos::{
     windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
-    Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
+    Actor, AppState, DropResult, LayoutSink, RecordingSink, Response, Runtime, StateEvent,
+    WindowMeta,
 };
 use yabai_sa::{ScriptingAddition, ScriptingAdditionStatus};
 
@@ -2425,14 +2426,36 @@ fn handle_drag(runtime: &mut Runtime<AxSink>, drag: &mut Option<DragState>, even
                 // tiled window; otherwise it snaps back. Floating changes and tiled
                 // resizes have already been applied.
                 if state.tiled && state.action == MouseAction::Move {
-                    let dropped = runtime.state.drop_tiled_window_at_point(
+                    let result = runtime.state.drop_tiled_window_at_point(
                         state.window_id,
                         point,
                         runtime.state.config.mouse_drop_action,
                     );
-                    runtime.state.flush_all_active_to(&mut runtime.sink);
-                    if dropped {
-                        runtime.state.set_focused_window(Some(state.window_id));
+                    
+                    match result {
+                        DropResult::CrossSpace { dragged_id, dragged_new_sid, swapped_id, swapped_new_sid } => {
+                            let sa = yabai_sa::ScriptingAddition::for_user(
+                                &std::env::var("USER").unwrap_or_else(|_| "eric".to_string()),
+                            );
+                            
+                            // Move the dragged window
+                            let _ = sa.move_window_to_space(dragged_new_sid, dragged_id);
+                            
+                            // Move the swapped window (if any)
+                            if let (Some(swapped_id), Some(swapped_new_sid)) = (swapped_id, swapped_new_sid) {
+                                let _ = sa.move_window_to_space(swapped_new_sid, swapped_id);
+                            }
+                            
+                            runtime.state.flush_all_active_to(&mut runtime.sink);
+                            runtime.state.set_focused_window(Some(state.window_id));
+                        }
+                        DropResult::SameSpace => {
+                            runtime.state.flush_all_active_to(&mut runtime.sink);
+                            runtime.state.set_focused_window(Some(state.window_id));
+                        }
+                        DropResult::Ignored => {
+                            runtime.state.flush_all_active_to(&mut runtime.sink);
+                        }
                     }
                 }
             }

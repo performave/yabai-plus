@@ -7,7 +7,8 @@
 //! [`LayoutConfig`] for the per-space trees via [`Config::layout_config`].
 
 use yabai_core::{
-    Child, ConfigOp, ConfigValue, FfmMode, InsertionPolicy, LayoutConfig, NodeSplit, ViewType,
+    Child, ConfigOp, ConfigValue, FfmMode, InsertionPolicy, LayoutConfig, MouseAction,
+    MouseDropAction, MouseModifier, NodeSplit, ViewType,
 };
 
 /// All daemon-configurable settings the command model understands.
@@ -23,6 +24,10 @@ pub struct Config {
     /// to the focused window and `normal_window_opacity` to the others.
     pub enable_window_opacity: bool,
     pub focus_follows_mouse: FfmMode,
+    pub mouse_modifier: MouseModifier,
+    pub mouse_action1: MouseAction,
+    pub mouse_action2: MouseAction,
+    pub mouse_drop_action: MouseDropAction,
     pub layout: ViewType,
     pub split_type: NodeSplit,
     pub auto_balance: NodeSplit,
@@ -52,6 +57,10 @@ impl Default for Config {
             window_shadow: true,
             enable_window_opacity: false,
             focus_follows_mouse: FfmMode::Disabled,
+            mouse_modifier: MouseModifier::Fn,
+            mouse_action1: MouseAction::Move,
+            mouse_action2: MouseAction::Resize,
+            mouse_drop_action: MouseDropAction::Swap,
             layout: ViewType::Bsp,
             split_type: NodeSplit::Auto,
             auto_balance: NodeSplit::None,
@@ -109,6 +118,10 @@ impl Config {
             "window_shadow" => bool_str(self.window_shadow).to_string(),
             "window_opacity" => bool_str(self.enable_window_opacity).to_string(),
             "focus_follows_mouse" => ffm_str(self.focus_follows_mouse).to_string(),
+            "mouse_modifier" => mouse_mod_str(self.mouse_modifier).to_string(),
+            "mouse_action1" => mouse_action_str(self.mouse_action1).to_string(),
+            "mouse_action2" => mouse_action_str(self.mouse_action2).to_string(),
+            "mouse_drop_action" => mouse_drop_str(self.mouse_drop_action).to_string(),
             "layout" => layout_str(self.layout).to_string(),
             "split_type" => split_type_str(self.split_type).to_string(),
             "auto_balance" => auto_balance_str(self.auto_balance).to_string(),
@@ -139,6 +152,10 @@ impl Config {
             ("window_zoom_persist", ConfigValue::Bool(b)) => self.window_zoom_persist = *b,
             ("window_shadow", ConfigValue::Bool(b)) => self.window_shadow = *b,
             ("window_opacity", ConfigValue::Bool(b)) => self.enable_window_opacity = *b,
+            ("mouse_modifier", ConfigValue::MouseMod(m)) => self.mouse_modifier = *m,
+            ("mouse_action1", ConfigValue::MouseAction(a)) => self.mouse_action1 = *a,
+            ("mouse_action2", ConfigValue::MouseAction(a)) => self.mouse_action2 = *a,
+            ("mouse_drop_action", ConfigValue::MouseDrop(a)) => self.mouse_drop_action = *a,
             ("focus_follows_mouse", ConfigValue::Ffm(m)) => self.focus_follows_mouse = *m,
             ("layout", ConfigValue::Layout(l)) => self.layout = *l,
             ("split_type", ConfigValue::SplitType(s)) => self.split_type = *s,
@@ -175,6 +192,30 @@ fn ffm_str(mode: FfmMode) -> &'static str {
         FfmMode::Disabled => "off",
         FfmMode::Autofocus => "autofocus",
         FfmMode::Autoraise => "autoraise",
+    }
+}
+
+fn mouse_mod_str(modifier: MouseModifier) -> &'static str {
+    match modifier {
+        MouseModifier::Alt => "alt",
+        MouseModifier::Shift => "shift",
+        MouseModifier::Cmd => "cmd",
+        MouseModifier::Ctrl => "ctrl",
+        MouseModifier::Fn => "fn",
+    }
+}
+
+fn mouse_action_str(action: MouseAction) -> &'static str {
+    match action {
+        MouseAction::Move => "move",
+        MouseAction::Resize => "resize",
+    }
+}
+
+fn mouse_drop_str(action: MouseDropAction) -> &'static str {
+    match action {
+        MouseDropAction::Swap => "swap",
+        MouseDropAction::Stack => "stack",
     }
 }
 

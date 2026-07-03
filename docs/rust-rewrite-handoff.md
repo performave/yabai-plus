@@ -49,6 +49,31 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 40) — mouse-drag config model (`mouse_modifier`/`mouse_action1`/`mouse_action2`/`mouse_drop_action`)
+
+- Added the config model + parser for the four mouse-drag settings, previously
+  unparsed: `mouse_modifier` (`alt`/`shift`/`cmd`/`ctrl`/`fn`, default `fn`),
+  `mouse_action1` / `mouse_action2` (`move`/`resize`, defaults `move`/`resize`), and
+  `mouse_drop_action` (`swap`/`stack`, default `swap`). New `yabai-core` enums
+  `MouseModifier` / `MouseAction` / `MouseDropAction`, `ConfigValue`/`ValueKind`
+  variants, key→kind mapping, value parsing (bad values report the C-faithful
+  "unknown value … for domain 'config'"), and `Config` fields + get/set + defaults.
+  Unit-tested (`config_mouse_settings_parse`).
+- **Behavior deferred (next step):** the actual mouse-drag *move* — an
+  input-consuming `CGEventTap` (`kCGEventLeftMouseDown/Dragged/Up`, consuming the
+  click only while the armed modifier is held, like the C `mouse_handler`), a drag
+  state machine (capture the window + frame under the cursor on down, move it live
+  via AX on drag, finalize on up), starting with `mouse_action1 = move` and
+  deferring resize / drop actions (swap/stack/warp + BSP-grid resize). This is a
+  larger, higher-risk piece (an active tap can consume input) and is kept separate
+  from the listen-only `focus_follows_mouse` tap (session 38) to avoid regressing it.
+  Plan: a second active tap in `yabai_macos::mouse`, an armed-modifier `AtomicU8`
+  set by the daemon from `config.mouse_modifier`, `WmWork::MouseDown/Dragged/Up`,
+  and verify via synthesized down/drag/up events (`CGEventSetFlags` for the
+  modifier) checking the window frame moved.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (159 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 39) — `window_opacity` auto active/normal opacity on focus + verified live
 
 - Implemented `window_opacity on/off` (auto opacity), previously unparsed. Added the

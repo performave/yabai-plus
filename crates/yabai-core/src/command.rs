@@ -68,6 +68,31 @@ pub enum FfmMode {
     Autoraise,
 }
 
+/// The keyboard modifier that arms mouse drag actions (`mouse_modifier`). Mirrors
+/// the C `MOUSE_MOD_*` (a single modifier; `fn` is the default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseModifier {
+    Alt,
+    Shift,
+    Cmd,
+    Ctrl,
+    Fn,
+}
+
+/// A mouse drag action (`mouse_action1` / `mouse_action2`). Mirrors `MOUSE_MODE_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    Move,
+    Resize,
+}
+
+/// What happens when a dragged window is dropped onto another (`mouse_drop_action`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseDropAction {
+    Swap,
+    Stack,
+}
+
 /// A typed config value, resolved according to the setting's expected type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigValue {
@@ -78,6 +103,9 @@ pub enum ConfigValue {
     AutoBalance(NodeSplit),
     Placement(Child),
     InsertionPoint(InsertionPolicy),
+    MouseMod(MouseModifier),
+    MouseAction(MouseAction),
+    MouseDrop(MouseDropAction),
     Float(f32),
     Int(i32),
 }
@@ -109,6 +137,9 @@ enum ValueKind {
     AutoBalance,
     Placement,
     InsertionPoint,
+    MouseMod,
+    MouseAction,
+    MouseDrop,
     Float,
     Int,
 }
@@ -132,6 +163,9 @@ fn config_value_kind(key: &str) -> Option<ValueKind> {
         "auto_balance" => ValueKind::AutoBalance,
         "window_placement" => ValueKind::Placement,
         "window_insertion_point" => ValueKind::InsertionPoint,
+        "mouse_modifier" => ValueKind::MouseMod,
+        "mouse_action1" | "mouse_action2" => ValueKind::MouseAction,
+        "mouse_drop_action" => ValueKind::MouseDrop,
         "split_ratio"
         | "window_opacity_duration"
         | "window_animation_duration"
@@ -164,6 +198,24 @@ fn parse_config_value(kind: ValueKind, value: &str) -> Option<ConfigValue> {
         ValueKind::AutoBalance => parse_auto_balance(value).map(ConfigValue::AutoBalance),
         ValueKind::Placement => parse_window_placement(value).map(ConfigValue::Placement),
         ValueKind::InsertionPoint => parse_insertion_policy(value).map(ConfigValue::InsertionPoint),
+        ValueKind::MouseMod => match value {
+            "alt" => Some(ConfigValue::MouseMod(MouseModifier::Alt)),
+            "shift" => Some(ConfigValue::MouseMod(MouseModifier::Shift)),
+            "cmd" => Some(ConfigValue::MouseMod(MouseModifier::Cmd)),
+            "ctrl" => Some(ConfigValue::MouseMod(MouseModifier::Ctrl)),
+            "fn" => Some(ConfigValue::MouseMod(MouseModifier::Fn)),
+            _ => None,
+        },
+        ValueKind::MouseAction => match value {
+            "move" => Some(ConfigValue::MouseAction(MouseAction::Move)),
+            "resize" => Some(ConfigValue::MouseAction(MouseAction::Resize)),
+            _ => None,
+        },
+        ValueKind::MouseDrop => match value {
+            "swap" => Some(ConfigValue::MouseDrop(MouseDropAction::Swap)),
+            "stack" => Some(ConfigValue::MouseDrop(MouseDropAction::Stack)),
+            _ => None,
+        },
         ValueKind::Float => value.parse::<f32>().ok().map(ConfigValue::Float),
         ValueKind::Int => value.parse::<i32>().ok().map(ConfigValue::Int),
     }
@@ -1073,6 +1125,40 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unknown value 'grid' given to command 'layout' for domain 'config'"
+        );
+    }
+
+    #[test]
+    fn config_mouse_settings_parse() {
+        let cmd = parse_config(&toks(&["mouse_modifier", "cmd"])).unwrap();
+        assert_eq!(
+            cmd.ops,
+            vec![ConfigOp::Set(
+                "mouse_modifier".to_string(),
+                ConfigValue::MouseMod(MouseModifier::Cmd)
+            )]
+        );
+        let cmd = parse_config(&toks(&["mouse_action1", "move"])).unwrap();
+        assert_eq!(
+            cmd.ops,
+            vec![ConfigOp::Set(
+                "mouse_action1".to_string(),
+                ConfigValue::MouseAction(MouseAction::Move)
+            )]
+        );
+        let cmd = parse_config(&toks(&["mouse_drop_action", "stack"])).unwrap();
+        assert_eq!(
+            cmd.ops,
+            vec![ConfigOp::Set(
+                "mouse_drop_action".to_string(),
+                ConfigValue::MouseDrop(MouseDropAction::Stack)
+            )]
+        );
+        // A bad value reports the C-faithful error.
+        let err = parse_config(&toks(&["mouse_modifier", "hyper"])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unknown value 'hyper' given to command 'mouse_modifier' for domain 'config'"
         );
     }
 

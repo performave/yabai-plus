@@ -1594,17 +1594,17 @@ fn space_move_via_sa(
 }
 
 /// Swap the acting (target/active) space with the selected space through the
-/// scripting addition, mirroring the **same-display** path of the C `space --swap`
-/// (`space_manager_swap_space_with_space`): the 5-branch reordering that exchanges
-/// the two spaces' slots via `move_space_after_space`. The C's *cross-display* swap
-/// instead exchanges the two spaces' window contents (`space_window_list` +
-/// `move_window_list_to_space`), which needs reliable per-space window enumeration —
-/// blocked by the macOS-26 `spaces_for_window` bug — so it is rejected here for now.
-/// The mission-control-active / display-animating guards are omitted (no cheap
-/// detection in the standalone daemon).
+/// scripting addition, mirroring the C `space --swap`
+/// (`space_manager_swap_space_with_space`). Same-display: the 5-branch reordering
+/// that exchanges the two spaces' slots via `move_space_after_space`.
+/// Cross-display: exchange the two spaces' window contents (like the C
+/// `..._on_display`, which moves each space's window list to the other) — now
+/// enabled by the macOS-26 window→space fix. The mission-control-active /
+/// display-animating guards are omitted (no cheap detection in the standalone
+/// daemon).
 fn space_swap_via_sa(
     sa: &ScriptingAddition,
-    runtime: &Runtime<AxSink>,
+    runtime: &mut Runtime<AxSink>,
     target: Option<&Selector>,
     selector: &Selector,
 ) -> Response {
@@ -1622,11 +1622,7 @@ fn space_swap_via_sa(
         .space_display(selector_sid)
         .ok_or_else(|| "could not locate the space to act on.\n".to_string())?;
     if acting_did != selector_did {
-        // The C swaps window contents across displays; unsupported here (see above).
-        return Err(
-            "cannot swap spaces across displays: the standalone daemon does not yet support the content-swap path.\n"
-                .to_string(),
-        );
+        return space_swap_cross_display(sa, runtime, acting_sid, selector_sid);
     }
 
     let order = mission_control_spaces().unwrap_or_default();
@@ -1681,6 +1677,55 @@ fn space_swap_via_sa(
     } else {
         Err("cannot swap space due to an error with the scripting-addition.\n".to_string())
     }
+}
+
+/// Cross-display `space --swap`: exchange the two spaces' window contents,
+/// mirroring the C `space_manager_swap_space_with_space_on_display` (which moves
+/// each space's window list to the other space). Only the daemon's *managed* app
+/// windows are moved (from the per-space trees, now correct on macOS 26 thanks to
+/// `windows_on_space`), so desktop/helper windows are never disturbed. The model is
+/// updated to match and both displays' active spaces are re-tiled.
+fn space_swap_cross_display(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    acting_sid: u64,
+    selector_sid: u64,
+) -> Response {
+    let acting_windows = runtime
+        .state
+        .space(acting_sid)
+        .map(|tree| tree.window_list())
+        .unwrap_or_default();
+    let selector_windows = runtime
+        .state
+        .space(selector_sid)
+        .map(|tree| tree.window_list())
+        .unwrap_or_default();
+
+    // Physically move each space's windows to the other space via the SA.
+    let swap_err =
+        || "cannot swap space due to an error with the scripting-addition.\n".to_string();
+    if !acting_windows.is_empty() {
+        sa.move_window_list_to_space(selector_sid, &acting_windows)
+            .map_err(|_| swap_err())?;
+    }
+    if !selector_windows.is_empty() {
+        sa.move_window_list_to_space(acting_sid, &selector_windows)
+            .map_err(|_| swap_err())?;
+    }
+
+    // Reflect the swap in the daemon model (captured lists are disjoint, so the
+    // reassignments don't interfere).
+    for wid in &acting_windows {
+        let _ = runtime.state.assign_window_to_space(*wid, selector_sid);
+    }
+    for wid in &selector_windows {
+        let _ = runtime.state.assign_window_to_space(*wid, acting_sid);
+    }
+
+    // Re-tile every display's active space so the moved windows are laid out.
+    runtime.state.flush_all_active_to(&mut runtime.sink);
+    Ok(None)
 }
 
 /// The space immediately before `sid` in the global mission-control order, if any.

@@ -49,6 +49,35 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 35) — Cross-display `space --swap` (content swap) implemented + verified live
+
+- Implemented the **cross-display** `space --swap` content swap, now unblocked by the
+  session-34 window→space fix. `space_swap_via_sa` no longer rejects the
+  cross-display case: it calls the new `space_swap_cross_display`, mirroring the C
+  `space_manager_swap_space_with_space_on_display` (which moves each space's window
+  list to the other space). Implementation: read each space's **managed** app
+  windows from the daemon's per-space trees (`AppState::space` → `Tree::window_list`
+  — correct on macOS 26 now, and safe because only tracked app windows move, never
+  desktop/helper windows), move them via `ScriptingAddition::move_window_list_to_space`
+  (acting→selector, selector→acting), mirror the swap in the model with
+  `assign_window_to_space`, then `flush_all_active_to` to re-tile both displays.
+  `space_swap_via_sa` now takes `&mut Runtime`.
+- **Verified live end-to-end on the remote (two displays, macOS 26.5.1)** once the
+  user unlocked the screen (AX window discovery needs an unlocked session — note
+  `--experimental-ax-debug`'s `focused_app_pid` reads `None` over SSH regardless,
+  as it uses NSWorkspace; use `--experimental-ax-windows-for-pid` to confirm AX is
+  live). Setup: two managed Finder windows, one placed on each display's current
+  space (763 on `space 1/display 1`, 762 on `space 64/display 2` via
+  `window --display`). `space 1 --swap 64` then traded them: `query` reported
+  762→`space 1/display 1` and 763→`space 64/display 2`; the raw SkyLight
+  `--experimental-windows-on-space` confirmed 762 on space 1 and 763 on space 64;
+  and `screencapture -D 1/-D 2` showed each window re-tiled on its new display.
+  The SA opcode used (`move_window_list_to_space`) is the same family as the
+  already-verified `move_window_to_space` (session 27) / `window --display`.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai` — all
+  clean; live end-to-end verified.
+
 ### 2026-07-03 (session 34) — Fixed the macOS-26 window→space mis-assignment (`spaces_for_window` bug)
 
 - **Root-caused and fixed the long-standing macOS-26 bug** where windows on
@@ -2092,8 +2121,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    activation; `--create`/`--destroy` (session 27), `--display` (cross-display
    space move, session 31), `--move` (intra-display reorder, session 32), and
    `--swap` (same-display, session 33) all work via the SA. Still to do:
-   `--switch`, the **cross-display** `--swap` (window-content swap — now unblocked
-   by the session-34 fix below but not yet implemented), and, later, SLS
+   `--switch`; the **cross-display** `--swap` (window-content swap) is done and
+   verified live (session 35, `space_swap_cross_display`); and, later, SLS
    create/destroy notifications.
    **macOS-26 window→space bug — FIXED (session 34).** `SLSCopySpacesForWindows`
    only reports the *current* space on macOS 26, so the daemon used to mis-assign

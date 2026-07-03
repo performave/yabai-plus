@@ -7,21 +7,23 @@ use std::thread;
 use std::time::Duration;
 
 use yabai_core::{
-    Area, FfmMode, Message, Point, Selector, SignalEvent, SpaceAction, WindowAction, parse_message,
-    parse_selector,
+    Area, FfmMode, Message, MouseModifier, Point, Selector, SignalEvent, SpaceAction, WindowAction,
+    parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
-    AxSink, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt, active_displays,
-    application_pids_with_windows, current_space_for_display, cursor_display_id, cursor_location,
-    display_for_space, focused_window, focused_window_diagnostics, main_visible_frame,
-    mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
-    observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos, post_mouse_moved,
-    regular_application_pids, set_active_display, spaces_for_display, spaces_for_window,
+    AxSink, MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT,
+    MouseDragEvent, ObservedEvent, WorkspaceEvent, accessibility_trusted_with_prompt,
+    active_displays, application_pids_with_windows, current_space_for_display, cursor_display_id,
+    cursor_location, display_for_space, focused_window, focused_window_diagnostics,
+    main_visible_frame, mission_control_spaces, move_focused_window, move_pid_window,
+    ns_application_load, observe_mouse_drag, observe_mouse_moved, observe_pid, observe_workspace,
+    pid_window_infos, post_mouse_drag, post_mouse_moved, regular_application_pids,
+    set_active_display, set_drag_modifier, spaces_for_display, spaces_for_window,
     switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
-    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, windows_for_pid,
-    windows_for_pid_diagnostics, windows_on_space,
+    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_bounds,
+    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
@@ -72,6 +74,8 @@ fn main() -> ExitCode {
         Some("--experimental-window-alpha") => run_window_alpha(&args[1..]),
         Some("--experimental-windows-on-space") => run_windows_on_space(&args[1..]),
         Some("--experimental-post-mouse-moved") => run_post_mouse_moved(&args[1..]),
+        Some("--experimental-post-mouse-drag") => run_post_mouse_drag(&args[1..]),
+        Some("--experimental-window-bounds") => run_window_bounds(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -571,6 +575,8 @@ enum WmWork {
     Workspace(WorkspaceEvent),
     /// The cursor moved to `point` (from the `focus_follows_mouse` event tap).
     MouseMoved(Point),
+    /// A mouse-drag event (down/dragged/up) while the `mouse_modifier` is held.
+    Drag(MouseDragEvent),
     /// Periodic self-heal: re-reconcile known apps and (in `all` mode) discover
     /// apps launched after startup.
     Tick,
@@ -996,6 +1002,38 @@ fn run_window_alpha(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn run_window_bounds(args: &[String]) -> ExitCode {
+    let Some(wid) = args.first().and_then(|a| a.parse::<u32>().ok()) else {
+        eprintln!("usage: --experimental-window-bounds <window_id>");
+        return ExitCode::from(64);
+    };
+    match window_bounds(wid) {
+        Ok((x, y, w, h)) => {
+            println!("window {wid} bounds {x} {y} {w} {h}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_post_mouse_drag(args: &[String]) -> ExitCode {
+    let coords: Vec<f32> = args
+        .iter()
+        .take(4)
+        .filter_map(|a| a.parse::<f32>().ok())
+        .collect();
+    let [x1, y1, x2, y2] = coords[..] else {
+        eprintln!("usage: --experimental-post-mouse-drag <x1> <y1> <x2> <y2>");
+        return ExitCode::from(64);
+    };
+    post_mouse_drag(Point { x: x1, y: y1 }, Point { x: x2, y: y2 });
+    println!("posted fn+drag {x1},{y1} -> {x2},{y2}");
+    ExitCode::SUCCESS
 }
 
 fn run_post_mouse_moved(args: &[String]) -> ExitCode {
@@ -2169,6 +2207,97 @@ fn handle_mouse_moved(
     }
 }
 
+/// Map the configured `mouse_modifier` to the compact `MOUSE_MOD_*` mask the drag
+/// event tap compares against.
+fn mouse_modifier_mask(modifier: MouseModifier) -> u8 {
+    match modifier {
+        MouseModifier::Alt => MOUSE_MOD_ALT,
+        MouseModifier::Shift => MOUSE_MOD_SHIFT,
+        MouseModifier::Cmd => MOUSE_MOD_CMD,
+        MouseModifier::Ctrl => MOUSE_MOD_CTRL,
+        MouseModifier::Fn => MOUSE_MOD_FN,
+    }
+}
+
+/// State captured while a `mouse_modifier`-armed drag is in progress.
+struct DragState {
+    window_id: u32,
+    /// The window's frame when the drag began.
+    origin: Area,
+    /// The cursor point when the drag began.
+    down: Point,
+    /// Whether the dragged window is tiled (managed in a tree) vs floating.
+    tiled: bool,
+}
+
+/// The window under `point` eligible for a drag-move. Floating windows are checked
+/// first (they sit above tiles in z-order), by hit-testing their live AX frames;
+/// otherwise the tiled window on the visible space. Returns `(window_id, tiled)`.
+fn drag_window_at_point(runtime: &Runtime<AxSink>, point: Point) -> Option<(u32, bool)> {
+    let floating = runtime
+        .state
+        .all_window_ids()
+        .into_iter()
+        .filter(|&wid| runtime.state.is_floating(wid))
+        .find(|&wid| {
+            runtime
+                .sink
+                .window_frame(wid)
+                .is_some_and(|f| f.contains_point(point))
+        });
+    if let Some(wid) = floating {
+        return Some((wid, false));
+    }
+    runtime
+        .state
+        .managed_window_at_point(point)
+        .map(|wid| (wid, true))
+}
+
+/// Handle a `mouse_modifier`-armed drag event (`mouse_action1 = move`): follow the
+/// cursor by repositioning the window under it. A tiled window snaps back to its
+/// tile on release (drop actions — swap/stack/warp — are not modeled yet); a
+/// floating window keeps its new position.
+fn handle_drag(runtime: &mut Runtime<AxSink>, drag: &mut Option<DragState>, event: MouseDragEvent) {
+    // Only the `move` action is implemented; `resize` is deferred.
+    if runtime.state.config.mouse_action1 != yabai_core::MouseAction::Move {
+        return;
+    }
+    match event {
+        MouseDragEvent::Down(point) => {
+            *drag = drag_window_at_point(runtime, point).and_then(|(window_id, tiled)| {
+                let origin = runtime.sink.window_frame(window_id)?;
+                Some(DragState {
+                    window_id,
+                    origin,
+                    down: point,
+                    tiled,
+                })
+            });
+        }
+        MouseDragEvent::Dragged(point) => {
+            if let Some(state) = drag.as_ref() {
+                let moved = Area::new(
+                    state.origin.x + (point.x - state.down.x),
+                    state.origin.y + (point.y - state.down.y),
+                    state.origin.w,
+                    state.origin.h,
+                );
+                runtime.sink.set_frame(state.window_id, moved);
+            }
+        }
+        MouseDragEvent::Up(_) => {
+            if let Some(state) = drag.take() {
+                // A tiled window snaps back to its computed frame; a floating window
+                // keeps where it was dropped.
+                if state.tiled {
+                    runtime.state.flush_all_active_to(&mut runtime.sink);
+                }
+            }
+        }
+    }
+}
+
 /// Apply auto window opacity (`window_opacity on`) across every managed window:
 /// `focused` → `active_window_opacity`, the rest → `normal_window_opacity`,
 /// mirroring the C `window_manager_set_window_opacity` on focus. When the feature
@@ -2584,6 +2713,8 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
     // Most-recently signaled focused window, so `window_focused` fires once per
     // real focus change whether the change came from a command or an AX observer.
     let mut last_focus_signal: Option<u32> = None;
+    // In-progress `mouse_modifier`-armed drag (drag-to-move), if any.
+    let mut drag_state: Option<DragState> = None;
     // The front (active) app pid, tracked from NSWorkspace activate notifications.
     // Used as the `active` context for application_hidden/terminated signals and
     // as `YABAI_RECENT_PROCESS_ID` for application_front_switched.
@@ -2656,6 +2787,26 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
         thread::spawn(move || {
             for point in mrx {
                 if tx.send(WmWork::MouseMoved(point)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Active mouse-drag tap for `mouse_modifier` + drag to move. It consumes the
+    // click only while the armed modifier is held. Arm it from the current config.
+    set_drag_modifier(mouse_modifier_mask(runtime.state.config.mouse_modifier));
+    {
+        let (dtx, drx) = channel::<MouseDragEvent>();
+        thread::spawn(move || {
+            if let Err(error) = observe_mouse_drag(dtx) {
+                eprintln!("yabai-rust: mouse-drag tap unavailable: {error}");
+            }
+        });
+        let tx = tx.clone();
+        thread::spawn(move || {
+            for event in drx {
+                if tx.send(WmWork::Drag(event)).is_err() {
                     break;
                 }
             }
@@ -2899,6 +3050,9 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         point,
                     );
                 }
+                WmWork::Drag(event) => {
+                    handle_drag(&mut runtime, &mut drag_state, event);
+                }
                 WmWork::Tick => {
                     refresh_live_display_state(&mut runtime, &mut display_frames);
                     // In `all` mode, pick up apps launched after startup via the live
@@ -3056,6 +3210,10 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     if response.is_ok() && is_opacity_config(&tokens) {
                         let focused = runtime.state.focused_window_id();
                         apply_auto_opacity(&scripting_addition, &runtime, focused);
+                    }
+                    // Keep the drag tap's armed modifier in sync with `mouse_modifier`.
+                    if response.is_ok() {
+                        set_drag_modifier(mouse_modifier_mask(runtime.state.config.mouse_modifier));
                     }
                     let _ = reply.send(response);
                 }

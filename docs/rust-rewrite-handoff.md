@@ -49,6 +49,38 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 41) — mouse-drag move (`mouse_modifier` + left-drag) via an active CGEventTap + verified live
+
+- Implemented drag-to-move on top of the session-40 config model. Added a second,
+  **active** (input-consuming) `CGEventTap` in `yabai_macos::mouse`
+  (`observe_mouse_drag`) on left mouse down/dragged/up: it consumes the click only
+  while the armed `mouse_modifier` is held (an `AtomicU8` the daemon sets via
+  `set_drag_modifier` from `config.mouse_modifier`, re-armed on config change),
+  mirroring the C `mouse_handler`. Kept separate from the listen-only
+  `focus_follows_mouse` tap (session 38) so that stays untouched. Events flow as
+  `WmWork::Drag(MouseDragEvent::{Down,Dragged,Up})`.
+- `handle_drag` (daemon) captures the window under the cursor on down (floating
+  windows first — they sit above tiles — by hit-testing their live AX frames, else
+  the tiled window on the visible space), moves it live via the new
+  `AxSink::set_frame` by the drag delta, and on release: a **floating** window keeps
+  its new position; a **tiled** window snaps back (`flush_all_active_to`). Only
+  `mouse_action1 = move` is implemented; **resize (`mouse_action2`) and drop actions
+  (swap/stack/warp + BSP-grid resize) are deferred** (the C `mouse_drop_action_*` /
+  `mouse_drop_try_adjust_bsp_grid`).
+- Added test/verification helpers: `post_mouse_drag` (synthesizes a full fn+drag
+  sequence with `CGEventSetFlags`), the `--experimental-post-mouse-drag <x1 y1 x2 y2>`
+  probe, and `window_bounds` (`SLSGetWindowBounds`) + `--experimental-window-bounds`
+  to read any window's on-screen frame (tiled or floating).
+- **Verified live on the remote (macOS 26.5.1):**
+  - Floating window 834: `fn`+drag (300,300)→(500,450) moved it (65,43)→(265,193)
+    (exactly +200,+150, size preserved) and it **persisted**; a second fn+drag moved
+    it +100,+50 more.
+  - Modifier gating: with `mouse_modifier cmd`, a fn+drag left 834 unchanged; back at
+    `fn` it moved again.
+  - Tiled window 821: fn+drag left its bounds unchanged (snap-back), as designed.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (159 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 40) — mouse-drag config model (`mouse_modifier`/`mouse_action1`/`mouse_action2`/`mouse_drop_action`)
 
 - Added the config model + parser for the four mouse-drag settings, previously
@@ -2214,8 +2246,11 @@ chronological log and may describe earlier states.
     reconciliation, not the notification.
   - `mouse.rs`: `observe_mouse_moved(tx)` — a listen-only `CGEventTap` on
     `kCGEventMouseMoved` (pumped on a dedicated run-loop thread) reporting cursor
-    points for `focus_follows_mouse`; plus `post_mouse_moved(point)` (synthesizes a
-    move for testing).
+    points for `focus_follows_mouse`; `observe_mouse_drag(tx)` — a second, *active*
+    tap on left down/dragged/up that consumes the click while the armed
+    `mouse_modifier` is held (`set_drag_modifier`), reporting `MouseDragEvent`s for
+    drag-to-move; plus `post_mouse_moved` / `post_mouse_drag` (synthesize events for
+    testing).
   - `space.rs`: read-only SkyLight discovery for `current_space_for_display()`
     (`SLSManagedDisplayGetCurrentSpace`), `spaces_for_display()`
     (`SLSCopyManagedDisplaySpaces` + `id64` extraction), and
@@ -2271,7 +2306,8 @@ intra-display space reorder + same/cross-display swap (SA `move_space_after_spac
 deminimize/title-change events and app/title filters for metadata-carrying events;
 `mouse_follows_focus` cursor centering on focus; `focus_follows_mouse`
 (autofocus/autoraise) via a mouse-moved `CGEventTap`; `window_opacity` auto
-active/normal opacity on focus change.
+active/normal opacity on focus change; mouse drag-to-move (`mouse_modifier` +
+left-drag) via an active `CGEventTap`.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 
@@ -2334,8 +2370,11 @@ active/normal opacity on focus change.
    are all wired through the SA and verified live (session 37); the parser already
    produces `--sub-layer` as `WindowAction::Raw`, so no grammar change was needed
    (the C command is `--sub-layer`, not `--layer`). Still to do:
-   remaining deminimize/native-fullscreen-exit selectors,
-   scratchpad, and mouse drag move/resize/swap. `mouse_follows_focus` is done (cursor warps to the
+   remaining deminimize/native-fullscreen-exit selectors, and
+   scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag) is done
+   (session 41, active `CGEventTap`), verified live; still to do: drag-**resize**
+   (`mouse_action2`) and drop actions (swap/stack/warp + BSP-grid resize).
+   `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    (`autofocus`/`autoraise`) is done too (session 38) via a `CGEventTap` on
    mouse-moved (`yabai_macos::mouse`), with `AxSink::focus_window_without_raise` for

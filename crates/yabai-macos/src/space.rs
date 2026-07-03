@@ -595,6 +595,33 @@ pub fn window_alpha(window_id: u32) -> io::Result<f32> {
     }
 }
 
+/// Read a window's on-screen bounds `(x, y, w, h)` via SkyLight — works for any
+/// window id (floating or tiled) regardless of the daemon's own tree, used to
+/// verify mouse-drag moves.
+pub fn window_bounds(window_id: u32) -> io::Result<(f32, f32, f32, f32)> {
+    let mut frame = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: 0.0,
+            height: 0.0,
+        },
+    };
+    // SAFETY: `frame` is a valid out pointer SkyLight fills on success (err == 0).
+    let err = unsafe { SLSGetWindowBounds(SLSMainConnectionID(), window_id, &mut frame) };
+    if err != 0 {
+        Err(io::Error::other(format!(
+            "failed to read bounds for window {window_id} (SkyLight error {err})"
+        )))
+    } else {
+        Ok((
+            frame.origin.x as f32,
+            frame.origin.y as f32,
+            frame.size.width as f32,
+            frame.size.height as f32,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::active_displays;

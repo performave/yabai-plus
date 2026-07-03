@@ -34,7 +34,10 @@ pub use display::{
     warp_cursor_to_display_center, warp_cursor_to_point,
 };
 #[cfg(target_os = "macos")]
-pub use mouse::{observe_mouse_moved, post_mouse_moved};
+pub use mouse::{
+    MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT, MouseDragEvent,
+    observe_mouse_drag, observe_mouse_moved, post_mouse_drag, post_mouse_moved, set_drag_modifier,
+};
 #[cfg(target_os = "macos")]
 pub use observe::{ObservedEvent, observe_pid};
 #[cfg(target_os = "macos")]
@@ -42,7 +45,7 @@ pub use screen::{main_visible_frame, visible_frame_for_display};
 #[cfg(target_os = "macos")]
 pub use space::{
     current_space_for_display, display_for_space, mission_control_spaces, spaces_for_display,
-    spaces_for_window, switch_space_by_gesture, window_alpha, windows_on_space,
+    spaces_for_window, switch_space_by_gesture, window_alpha, window_bounds, windows_on_space,
 };
 #[cfg(target_os = "macos")]
 pub use workspace::{

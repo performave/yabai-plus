@@ -1300,6 +1300,17 @@ impl AxSink {
             .and_then(|window| read_window_frame(window.element))
     }
 
+    /// Directly set a registered window's frame (position + size) via AX, outside
+    /// the layout flush — used for live mouse-drag move/resize. Returns `false` if
+    /// the window is not registered.
+    pub fn set_frame(&self, window_id: u32, area: Area) -> bool {
+        let Some(window) = self.windows.get(&window_id) else {
+            return false;
+        };
+        set_window_frame(window.element, self.position_attr, self.size_attr, area);
+        true
+    }
+
     /// Minimize or de-minimize a managed window by toggling its
     /// `AXMinimized` attribute, like `window_manager_{minimize,deminimize}_window`.
     /// Returns `false` if the window is not registered. A minimized window is no

@@ -19,13 +19,13 @@ use yabai_macos::{
     accessibility_trusted_with_prompt, active_displays, application_pids_with_windows,
     current_space_for_display, cursor_display_id, cursor_location, display_for_space,
     focused_window, focused_window_diagnostics, main_visible_frame, mission_control_spaces,
-    move_focused_window, move_pid_window, ns_application_load, observe_mouse_drag,
-    observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos, post_mouse_drag,
-    post_mouse_moved, post_right_mouse_drag, regular_application_pids, set_active_display,
-    set_drag_modifier, spaces_for_display, spaces_for_window, switch_space_by_gesture,
-    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
-    warp_cursor_to_point, window_alpha, window_bounds, windows_for_pid,
-    windows_for_pid_diagnostics, windows_on_space,
+    move_focused_window, move_pid_window, ns_application_load, observe_display_reconfiguration,
+    observe_mouse_drag, observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
+    post_mouse_drag, post_mouse_moved, post_right_mouse_drag, regular_application_pids,
+    set_active_display, set_drag_modifier, spaces_for_display, spaces_for_window,
+    switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
+    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_bounds,
+    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
@@ -3157,6 +3157,50 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         refresh_live_display_state(&mut runtime, &mut display_frames);
                         fire_signals(&runtime, SignalEvent::DisplayChanged, &[], None, None, None);
                     }
+                    WorkspaceEvent::DisplayAdded(did) => {
+                        refresh_live_display_state(&mut runtime, &mut display_frames);
+                        fire_signals(
+                            &runtime,
+                            SignalEvent::DisplayAdded,
+                            &[("YABAI_DISPLAY_ID", did.to_string())],
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                    WorkspaceEvent::DisplayRemoved(did) => {
+                        refresh_live_display_state(&mut runtime, &mut display_frames);
+                        fire_signals(
+                            &runtime,
+                            SignalEvent::DisplayRemoved,
+                            &[("YABAI_DISPLAY_ID", did.to_string())],
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                    WorkspaceEvent::DisplayMoved(did) => {
+                        refresh_live_display_state(&mut runtime, &mut display_frames);
+                        fire_signals(
+                            &runtime,
+                            SignalEvent::DisplayMoved,
+                            &[("YABAI_DISPLAY_ID", did.to_string())],
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                    WorkspaceEvent::DisplayResized(did) => {
+                        refresh_live_display_state(&mut runtime, &mut display_frames);
+                        fire_signals(
+                            &runtime,
+                            SignalEvent::DisplayResized,
+                            &[("YABAI_DISPLAY_ID", did.to_string())],
+                            None,
+                            None,
+                            None,
+                        );
+                    }
                     WorkspaceEvent::SystemWoke => {
                         fire_signals(&runtime, SignalEvent::SystemWoke, &[], None, None, None);
                     }
@@ -3368,6 +3412,8 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
     // launch/terminate/activate/deactivate/hide/unhide and active-space changes).
     // This mirrors `[NSApp run]` on the C daemon's main thread while its event
     // loop runs on a worker pthread.
+    ns_application_load();
+    observe_display_reconfiguration().unwrap();
     let _ = observe_workspace(workspace_tx);
     let _ = worker.join();
     ExitCode::SUCCESS

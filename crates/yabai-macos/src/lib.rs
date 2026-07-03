@@ -30,8 +30,9 @@ pub use ax::{
 pub use cgwindow::{CgWindow, application_pids_with_windows, on_screen_windows};
 #[cfg(target_os = "macos")]
 pub use display::{
-    MacDisplay, active_displays, cursor_display_id, cursor_location, set_active_display,
-    warp_cursor_to_display_center, warp_cursor_to_point,
+    MacDisplay, active_displays, cursor_display_id, cursor_location,
+    observe_display_reconfiguration, set_active_display, warp_cursor_to_display_center,
+    warp_cursor_to_point,
 };
 #[cfg(target_os = "macos")]
 pub use mouse::{

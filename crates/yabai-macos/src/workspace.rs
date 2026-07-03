@@ -71,13 +71,17 @@ pub enum WorkspaceEvent {
     ApplicationHidden { pid: i32, app: String },
     ApplicationVisible { pid: i32, app: String },
     DisplayChanged,
+    DisplayAdded(u32),
+    DisplayRemoved(u32),
+    DisplayMoved(u32),
+    DisplayResized(u32),
     SystemWoke,
     DockDidRestart,
     DockDidChangePref,
     MenuBarHiddenChanged,
 }
 
-fn send_workspace_event(event: WorkspaceEvent) {
+pub(crate) fn send_workspace_event(event: WorkspaceEvent) {
     let Some(senders) = WORKSPACE_EVENT_SENDERS.get() else {
         return;
     };
@@ -351,7 +355,7 @@ pub fn regular_application_pids() -> Vec<i32> {
 }
 
 /// Observe active-space changes on the current thread, forwarding events to
-/// `tx`. This blocks in `CFRunLoopRun`; run it on a dedicated thread.
+/// `tx`. This blocks in `NSApp run`; run it on a dedicated thread.
 pub fn observe_workspace(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
     let Some(observer_class) = workspace_observer_class() else {
         return Err("failed to create workspace observer class".to_string());
@@ -475,7 +479,8 @@ pub fn observe_workspace(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
             }
         }
 
-        CFRunLoopRun();
+        let app: Id = msg0(class(c"NSApplication"), sel(c"sharedApplication"));
+        let _: Id = msg0(app, sel(c"run"));
     }
 
     Ok(())

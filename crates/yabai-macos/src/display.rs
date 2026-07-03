@@ -8,6 +8,7 @@
 use std::ffi::c_void;
 use std::io;
 
+use crate::workspace::{WorkspaceEvent, send_workspace_event};
 use yabai_core::{Area, Point};
 
 type CFTypeRef = *const c_void;
@@ -251,6 +252,55 @@ pub fn set_active_display(display_id: u32) -> io::Result<()> {
     } else {
         Err(io::Error::other(format!(
             "failed to activate display {display_id} ({err})"
+        )))
+    }
+}
+
+const K_CG_DISPLAY_MOVED_FLAG: u32 = 1 << 1;
+const K_CG_DISPLAY_ADD_FLAG: u32 = 1 << 4;
+const K_CG_DISPLAY_REMOVE_FLAG: u32 = 1 << 5;
+const K_CG_DISPLAY_DESKTOP_SHAPE_CHANGED_FLAG: u32 = 1 << 12;
+
+type CGDisplayReconfigurationCallBack =
+    extern "C" fn(display: u32, flags: u32, user_info: *mut c_void);
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGDisplayRegisterReconfigurationCallback(
+        callback: CGDisplayReconfigurationCallBack,
+        user_info: *mut c_void,
+    ) -> i32;
+    fn CGDisplayRemoveReconfigurationCallback(
+        callback: CGDisplayReconfigurationCallBack,
+        user_info: *mut c_void,
+    ) -> i32;
+}
+
+extern "C" fn display_reconfiguration_callback(display: u32, flags: u32, _user_info: *mut c_void) {
+    if flags & K_CG_DISPLAY_ADD_FLAG != 0 {
+        send_workspace_event(WorkspaceEvent::DisplayAdded(display));
+    } else if flags & K_CG_DISPLAY_REMOVE_FLAG != 0 {
+        send_workspace_event(WorkspaceEvent::DisplayRemoved(display));
+    } else if flags & K_CG_DISPLAY_MOVED_FLAG != 0 {
+        send_workspace_event(WorkspaceEvent::DisplayMoved(display));
+    } else if flags & K_CG_DISPLAY_DESKTOP_SHAPE_CHANGED_FLAG != 0 {
+        send_workspace_event(WorkspaceEvent::DisplayResized(display));
+    }
+}
+
+pub fn observe_display_reconfiguration() -> io::Result<()> {
+    // SAFETY: We pass a valid function pointer and null user_info.
+    let err = unsafe {
+        CGDisplayRegisterReconfigurationCallback(
+            display_reconfiguration_callback,
+            std::ptr::null_mut(),
+        )
+    };
+    if err == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "CGDisplayRegisterReconfigurationCallback failed with {err}"
         )))
     }
 }

@@ -119,6 +119,14 @@ unsafe extern "C" {
     fn SLSCopyManagedDisplayForSpace(cid: i32, sid: u64) -> CFStringRef;
     fn SLSCopyManagedDisplaySpaces(cid: i32) -> CFArrayRef;
     fn SLSCopySpacesForWindows(cid: i32, selector: i32, window_list: CFArrayRef) -> CFArrayRef;
+    fn SLSCopyWindowsWithOptionsAndTags(
+        cid: i32,
+        owner: u32,
+        spaces: CFArrayRef,
+        options: u32,
+        set_tags: *mut u64,
+        clear_tags: *mut u64,
+    ) -> CFArrayRef;
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
     fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
 }
@@ -193,6 +201,24 @@ fn owned_cfnumber_i32(value: i32) -> io::Result<OwnedCf> {
             std::ptr::null(),
             K_CF_NUMBER_SINT32_TYPE,
             &value as *const i32 as *const c_void,
+        )
+    };
+    if number.is_null() {
+        Err(io::Error::other("failed to create CoreFoundation number"))
+    } else {
+        Ok(OwnedCf(number))
+    }
+}
+
+fn owned_cfnumber_i64(value: u64) -> io::Result<OwnedCf> {
+    let value = value as i64;
+    // SAFETY: `value` is a valid out-of-line scalar for CoreFoundation to copy
+    // into an owned 64-bit CFNumber (space ids are 64-bit).
+    let number = unsafe {
+        CFNumberCreate(
+            std::ptr::null(),
+            K_CF_NUMBER_SINT64_TYPE,
+            &value as *const i64 as *const c_void,
         )
     };
     if number.is_null() {
@@ -498,6 +524,55 @@ pub fn spaces_for_window(window_id: u32) -> io::Result<Vec<u64>> {
     } else {
         Ok(result)
     }
+}
+
+/// Return the window ids present on `sid`, via `SLSCopyWindowsWithOptionsAndTags`
+/// (the inverse of `spaces_for_window`). Unlike `SLSCopySpacesForWindows` — which
+/// on macOS 26 only ever reports the *current* space — this enumerates a specific
+/// space's windows directly and is therefore correct for non-visible spaces too.
+/// Options `0x2` matches the C `space_window_list` non-minimized query (`owner = 0`
+/// = all connections); the raw window-server ids returned include child/helper
+/// windows, which is fine for membership tests against a known managed id.
+pub fn windows_on_space(sid: u64) -> io::Result<Vec<u32>> {
+    let sid_number = owned_cfnumber_i64(sid)?;
+    let space_list = owned_single_value_array(&sid_number)?;
+    let mut set_tags: u64 = 0;
+    let mut clear_tags: u64 = 0;
+
+    // SAFETY: `space_list` is a valid CFArray of one SInt64 space id; `set_tags` /
+    // `clear_tags` are valid in/out pointers. The returned array, if any, is owned.
+    let window_list = unsafe {
+        SLSCopyWindowsWithOptionsAndTags(
+            SLSMainConnectionID(),
+            0,
+            space_list.as_ptr() as CFArrayRef,
+            0x2,
+            &mut set_tags,
+            &mut clear_tags,
+        )
+    };
+    if window_list.is_null() {
+        return Err(io::Error::other(format!(
+            "failed to copy windows for space {sid}"
+        )));
+    }
+    let window_list = OwnedCf(window_list);
+
+    let mut result = Vec::new();
+    // SAFETY: `window_list` is a valid CFArray of borrowed CFNumber window ids;
+    // each entry is null-checked by `cfnumber_u64` before use.
+    unsafe {
+        let count = CFArrayGetCount(window_list.as_ptr() as CFArrayRef);
+        for index in 0..count {
+            let wid_ref =
+                CFArrayGetValueAtIndex(window_list.as_ptr() as CFArrayRef, index) as CFNumberRef;
+            if let Some(wid) = cfnumber_u64(wid_ref) {
+                result.push(wid as u32);
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// Read a window's current alpha (opacity in `0.0..=1.0`) via SkyLight.

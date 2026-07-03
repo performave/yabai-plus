@@ -20,7 +20,7 @@ use yabai_macos::{
     observe_workspace, pid_window_infos, regular_application_pids, set_active_display,
     spaces_for_display, spaces_for_window, switch_space_by_gesture, tileable_pid_windows,
     visible_frame_for_display, warp_cursor_to_display_center, warp_cursor_to_point, window_alpha,
-    windows_for_pid, windows_for_pid_diagnostics,
+    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, LayoutSink, RecordingSink, Response, Runtime, StateEvent, WindowMeta,
@@ -69,6 +69,7 @@ fn main() -> ExitCode {
         Some("--experimental-sa-window-to-space") => run_sa_window_to_space(&args[1..]),
         Some("--experimental-sa-focus-space") => run_sa_focus_space(&args[1..]),
         Some("--experimental-window-alpha") => run_window_alpha(&args[1..]),
+        Some("--experimental-windows-on-space") => run_windows_on_space(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -612,6 +613,18 @@ fn start_workspace_bridge(tx: &Sender<WmWork>) -> Sender<WorkspaceEvent> {
 }
 
 fn managed_space_for_window(state: &AppState, window_id: u32) -> Option<u64> {
+    // Authoritative on macOS 26: ask each known space which windows it contains
+    // (`windows_on_space` / `SLSCopyWindowsWithOptionsAndTags`). `SLSCopySpacesForWindows`
+    // (below) only ever reports the *current* space on macOS 26, so a window on a
+    // non-visible space would otherwise be mis-assigned to the active space.
+    for sid in state.space_ids() {
+        if windows_on_space(sid).is_ok_and(|windows| windows.contains(&window_id)) {
+            return Some(sid);
+        }
+    }
+
+    // Fallback for older macOS (or if the enumeration missed the window): trust
+    // `spaces_for_window`, preferring the active space when it is a candidate.
     let spaces = spaces_for_window(window_id).ok()?;
     if let Some(active_sid) = state.active_space_id() {
         if spaces.contains(&active_sid) {
@@ -972,6 +985,23 @@ fn run_window_alpha(args: &[String]) -> ExitCode {
     match window_alpha(wid) {
         Ok(alpha) => {
             println!("window {wid} alpha {alpha}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_windows_on_space(args: &[String]) -> ExitCode {
+    let Some(sid) = args.first().and_then(|a| a.parse::<u64>().ok()) else {
+        eprintln!("usage: --experimental-windows-on-space <space_id>");
+        return ExitCode::from(64);
+    };
+    match windows_on_space(sid) {
+        Ok(windows) => {
+            println!("space {sid} windows {windows:?}");
             ExitCode::SUCCESS
         }
         Err(error) => {

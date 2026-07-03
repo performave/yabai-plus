@@ -49,6 +49,41 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 34) — Fixed the macOS-26 window→space mis-assignment (`spaces_for_window` bug)
+
+- **Root-caused and fixed the long-standing macOS-26 bug** where windows on
+  non-visible spaces were mis-assigned to the active space. `SLSCopySpacesForWindows`
+  (used by `yabai_macos::space::spaces_for_window`) only ever reports the *current*
+  space on macOS 26, and the daemon's `managed_space_for_window` then fell back to
+  the display's current space — so any window on a non-current space looked like it
+  was on the active space, leaving per-space trees for non-visible spaces empty and
+  breaking multi-space tiling / cross-display `space --swap` verification.
+- **Fix:** enumerate the inverse mapping instead. Added
+  `yabai_macos::space::windows_on_space(sid)` wrapping the private
+  `SLSCopyWindowsWithOptionsAndTags(cid, owner=0, [sid], options=0x2, …)` — the same
+  primitive the C `space_window_list` uses — which lists the windows *on a given
+  space* correctly regardless of which space is current. `managed_space_for_window`
+  now walks the daemon's known spaces and returns the one whose `windows_on_space`
+  contains the target window, keeping the old `spaces_for_window` path only as a
+  fallback for older macOS. Added `owned_cfnumber_i64` (space ids are 64-bit) and
+  the `--experimental-windows-on-space <sid>` probe.
+- **Verified live on the remote (two displays, macOS 26.5.1):**
+  - Isolated probe: `--experimental-windows-on-space` returned *distinct* window
+    lists per space — non-current space 61 reported its own `[705, 728]`, not the
+    current space's windows (the exact case `SLSCopySpacesForWindows` gets wrong).
+  - End-to-end: moved Finder window 730 to the non-current space 61
+    (`window 730 --space 61`); raw enumeration confirmed 730 now on space 61
+    (`[705, 730, 728]`), and after focusing space 61 the daemon `query --windows`
+    correctly reported window 730 on **space 61, display 1** — previously (session
+    30) this same scenario mis-reported the space.
+- This unblocks reliable per-space trees on macOS 26 and is the prerequisite for the
+  deferred cross-display `space --swap` content-swap (session 33). Note
+  `query --windows`'s `space` field is now correct even for windows on non-visible
+  spaces once discovered; a window moved to a non-current space simply isn't in a
+  visible tree until that space is focused (expected).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (158 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 33) — `space --swap` (same-display) wired through the SA + verified live; cross-display swap deferred
 
 - Wired `space --swap <sel>` through the WM daemon via the scripting addition.
@@ -1996,7 +2031,9 @@ chronological log and may describe earlier states.
     (`SLSManagedDisplayGetCurrentSpace`), `spaces_for_display()`
     (`SLSCopyManagedDisplaySpaces` + `id64` extraction), and
     `spaces_for_window()` (`SLSCopySpacesForWindows(..., 0x7, ...)` with the C
-    fallback to the window display's current space).
+    fallback to the window display's current space — unreliable on macOS 26, see
+    below), and `windows_on_space()` (`SLSCopyWindowsWithOptionsAndTags`, the
+    inverse mapping used as the macOS-26-correct window→space resolver).
 - `crates/yabai-osax-common`, `-osax-legacy`, `-sa` — still scaffolding/constants.
 
 THE LIVE WM DAEMON (in `crates/yabai/src/main.rs`):
@@ -2021,7 +2058,9 @@ Other experimental flags in `main.rs`: `--experimental-ax-{focused-window,debug,
 windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
 `--experimental-cursor-location` (prints the live cursor point),
 `--experimental-window-alpha <wid>` (read-only `SLSGetWindowAlpha` opacity
-readback — verifies the SA opacity opcode), `--experimental-sa-{status,opacity,
+readback — verifies the SA opacity opcode),
+`--experimental-windows-on-space <sid>` (read-only `SLSCopyWindowsWithOptionsAndTags`
+dump — verifies the macOS-26 window→space resolver), `--experimental-sa-{status,opacity,
 create-space,destroy-space,window-to-space,focus-space}` (direct SA opcode
 probes — do NOT run the mutating ones against the user's live machine),
 `--experimental-rust-{daemon,tile-daemon}` (the tile-daemon is the older
@@ -2050,17 +2089,20 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `space --focus <sel>` uses the SA `focus_space` opcode whenever the SA is
    loaded (SA-first, unconditional), falling back to the dock-swipe gesture only
    on SA error (incl. SA absent), with cross-display cursor warp/display
-   activation; `--create`/`--destroy` work via the SA (session 27). Still to do:
-   `--switch`/`--move`/`--swap`/`--display` (cross-display space moves need the SA
-   wired through; the client methods exist), and, later, SLS create/destroy
-   notifications.
-   **macOS-26 bug to fix (found session 29):** `yabai_macos::space::spaces_for_window`
-   (`SLSCopySpacesForWindows`) returns only the *current* space on macOS 26, so
-   the daemon mis-assigns windows on non-current spaces to the active space — per-
-   space trees for non-visible spaces look empty. This breaks multi-space tiling
-   on macOS 26 and was the reason the first `space --focus` design (gate the SA
-   path on "destination has a managed window") was wrong and got removed. Fix the
-   window→space resolution before relying on per-space trees on macOS 26.
+   activation; `--create`/`--destroy` (session 27), `--display` (cross-display
+   space move, session 31), `--move` (intra-display reorder, session 32), and
+   `--swap` (same-display, session 33) all work via the SA. Still to do:
+   `--switch`, the **cross-display** `--swap` (window-content swap — now unblocked
+   by the session-34 fix below but not yet implemented), and, later, SLS
+   create/destroy notifications.
+   **macOS-26 window→space bug — FIXED (session 34).** `SLSCopySpacesForWindows`
+   only reports the *current* space on macOS 26, so the daemon used to mis-assign
+   windows on non-current spaces to the active space. Fixed by enumerating the
+   inverse mapping via `yabai_macos::space::windows_on_space`
+   (`SLSCopyWindowsWithOptionsAndTags`, the C `space_window_list` primitive);
+   `managed_space_for_window` now resolves a window's true space and per-space trees
+   for non-visible spaces are correct. `spaces_for_window` remains only as an
+   older-macOS fallback.
 2. Multi-display: done — the daemon tiles every display's current space at once,
    each in its own usable frame, routing windows to the display they're on.
    Display hot-plug is handled by polling/reconcile before daemon work and on the

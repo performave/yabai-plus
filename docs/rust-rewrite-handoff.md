@@ -44,7 +44,8 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 178 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. Per-space `space --gap`/`--padding` (abs/rel) are dispatched and
+  survive reconciles. 181 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -55,6 +56,46 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 55) — per-space `space --gap` / `space --padding` (abs/rel) + verified live
+
+- Wired `space --gap type:gap` and `space --padding type:t:b:l:r` through
+  `AppState::dispatch_space`, previously parsed but unhandled (the parser has
+  understood both since the Phase-2 grammar port). Both act on the **selected (or
+  active) space** itself — like `--label` — not the active-space tree the other
+  space actions mutate.
+- `set_space_gap` mirrors C `space_manager_set_gap_for_space`: `abs` sets, `rel`
+  adjusts and clamps to zero (`add_and_clamp_to_zero`), stored on the tree's
+  `LayoutConfig::gap`, then re-tiles. `set_space_padding` mirrors
+  `space_manager_set_padding_for_space`: `abs` sets all four, `rel` adjusts each
+  clamped-to-zero, then re-insets the root area and re-tiles.
+- **Persistence across reconciles.** C keeps per-space gap/padding on the `view`,
+  so it survives re-layout. Rust keeps the gap on the surviving `Tree` (the daemon
+  reconciles via the guarded `add_space_to_display`, which never recreates an
+  existing tree) and the padding in a new `space_paddings: HashMap<sid,[i32;4]>`
+  consulted by `set_space_frame` on every reconcile — plus `space_usable:
+  HashMap<sid,Area>` caching the last un-padded frame so a `--padding` change
+  re-insets immediately without waiting for the next reconcile. `set_space_frame`
+  now reads the per-space override via `space_padding(sid)` (override else global
+  config), so global-config padding still applies to spaces without an override.
+- Errors: both report the C strings `cannot set gap for a non-managed space.` /
+  `cannot set padding for a non-managed space.` on a float space.
+- Added runtime tests `space_gap_dispatch_sets_and_adjusts`,
+  `space_padding_dispatch_reinsets_from_usable_frame`, and
+  `space_gap_and_padding_error_on_float_space` (abs + rel + float error).
+- **Verified live on the remote (macOS 26.5.1):** daemon up with baseline gap 10 /
+  padding 10, a 2×2 Finder grid on space 1.
+  - `space --gap abs:40` grew the inter-window gaps from ~11 to ~41px (columns
+    65..742 | 783..1460), outer padding untouched (top-left still (65,43)).
+  - `space --padding abs:80:80:80:80` moved the outer inset 10→80 on all edges:
+    top-left window origin (65,43)→(135,113) (exactly +70,+70) and the right edge
+    at 1390 = 1470−80.
+  - `space --padding rel:-40:…` (→40): left inset 135→95 (=55+40), top 113→73.
+    `space --gap rel:-30` (→10): rc 0.
+  - On a `--layout float` space both commands returned the exact C error strings
+    with exit 1.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (181 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 54) — pure `window --insert` (north/east/south/west/stack) + verified live
 

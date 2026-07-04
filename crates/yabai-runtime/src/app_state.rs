@@ -202,6 +202,13 @@ pub struct AppState {
     /// Last known cursor location (top-left CG coords), set by the daemon before
     /// dispatching a command so the `mouse` selector can resolve.
     cursor_point: Option<Point>,
+    /// Per-space padding override (`space --padding`), `sid -> [top, bottom, left,
+    /// right]`. Absent means fall back to the global `config` padding. Consulted by
+    /// [`Self::set_space_frame`] so the override survives every reconcile.
+    space_paddings: HashMap<u64, [i32; 4]>,
+    /// The last un-padded (usable) frame the daemon handed each space, so a later
+    /// `space --padding` can re-inset without waiting for the next reconcile.
+    space_usable: HashMap<u64, Area>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -835,18 +842,87 @@ impl AppState {
     /// configured paddings (as the C view does when the space manager sets the
     /// root area), then re-flow the tree.
     pub fn set_space_frame(&mut self, sid: u64, display_frame: Area) -> Result<(), String> {
-        let c = &self.config;
+        self.space_usable.insert(sid, display_frame);
+        let [top, bottom, left, right] = self.space_padding(sid);
         let area = Area::new(
-            display_frame.x + c.left_padding as f32,
-            display_frame.y + c.top_padding as f32,
-            display_frame.w - (c.left_padding + c.right_padding) as f32,
-            display_frame.h - (c.top_padding + c.bottom_padding) as f32,
+            display_frame.x + left as f32,
+            display_frame.y + top as f32,
+            display_frame.w - (left + right) as f32,
+            display_frame.h - (top + bottom) as f32,
         );
         let tree = self
             .spaces
             .get_mut(&sid)
             .ok_or_else(|| "space has no layout".to_string())?;
         tree.set_root_area(area);
+        Ok(())
+    }
+
+    /// The effective `[top, bottom, left, right]` padding for a space: its
+    /// `space --padding` override if set, else the global config padding.
+    fn space_padding(&self, sid: u64) -> [i32; 4] {
+        self.space_paddings.get(&sid).copied().unwrap_or([
+            self.config.top_padding,
+            self.config.bottom_padding,
+            self.config.left_padding,
+            self.config.right_padding,
+        ])
+    }
+
+    /// `space_manager_set_gap_for_space`: set (`abs`) or adjust (`rel`, clamped to
+    /// zero) a space's own window gap and re-tile. Errors on a float space.
+    fn set_space_gap(&mut self, sid: u64, kind: ValueType, gap: i32) -> Result<(), String> {
+        let tree = self
+            .spaces
+            .get_mut(&sid)
+            .filter(|tree| tree.layout != ViewType::Float)
+            .ok_or_else(|| "cannot set gap for a non-managed space.".to_string())?;
+        tree.config.gap = match kind {
+            ValueType::Abs => gap,
+            ValueType::Rel => (tree.config.gap + gap).max(0),
+        };
+        let root = tree.root();
+        tree.update(root);
+        Ok(())
+    }
+
+    /// `space_manager_set_padding_for_space`: set (`abs`) or adjust (`rel`, clamped
+    /// to zero) a space's own four paddings, then re-inset its root area from the
+    /// last usable frame and re-tile. Errors on a float space.
+    fn set_space_padding(
+        &mut self,
+        sid: u64,
+        kind: ValueType,
+        top: i32,
+        bottom: i32,
+        left: i32,
+        right: i32,
+    ) -> Result<(), String> {
+        let is_float = self
+            .spaces
+            .get(&sid)
+            .ok_or_else(|| "cannot set padding for a non-managed space.".to_string())?
+            .layout
+            == ViewType::Float;
+        if is_float {
+            return Err("cannot set padding for a non-managed space.".to_string());
+        }
+        let new = match kind {
+            ValueType::Abs => [top, bottom, left, right],
+            ValueType::Rel => {
+                let [ct, cb, cl, cr] = self.space_padding(sid);
+                [
+                    (ct + top).max(0),
+                    (cb + bottom).max(0),
+                    (cl + left).max(0),
+                    (cr + right).max(0),
+                ]
+            }
+        };
+        self.space_paddings.insert(sid, new);
+        if let Some(usable) = self.space_usable.get(&sid).copied() {
+            self.set_space_frame(sid, usable)?;
+        }
         Ok(())
     }
 
@@ -1137,10 +1213,28 @@ impl AppState {
 
     fn dispatch_space(&mut self, target: Option<&Selector>, actions: &[SpaceAction]) -> Response {
         for action in actions {
-            // `--label` acts on the selected (or active) space, not the tree.
+            // `--label`/`--gap`/`--padding` act on the selected (or active) space
+            // itself, not the active-space tree the other actions mutate.
             if let SpaceAction::Label(label) = action {
                 let sid = self.resolve_space_selector(target)?;
                 self.set_space_label(sid, label)?;
+                continue;
+            }
+            if let SpaceAction::Gap { kind, gap } = action {
+                let sid = self.resolve_space_selector(target)?;
+                self.set_space_gap(sid, *kind, *gap)?;
+                continue;
+            }
+            if let SpaceAction::Padding {
+                kind,
+                top,
+                bottom,
+                left,
+                right,
+            } = action
+            {
+                let sid = self.resolve_space_selector(target)?;
+                self.set_space_padding(sid, *kind, *top, *bottom, *left, *right)?;
                 continue;
             }
             let tree = self.active_tree_mut()?;
@@ -2616,6 +2710,76 @@ mod tests {
         let right = tree.node(leaves[1]).area;
         // left ends at ~495, right starts at ~505 -> a 10px gap.
         assert!((right.x - (left.x + left.w)) as i32 >= 9);
+    }
+
+    #[test]
+    fn space_gap_dispatch_sets_and_adjusts() {
+        let mut state = state_with_space();
+        // Absolute set.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--gap", "abs:10"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(1).unwrap().config.gap, 10);
+        // Relative adjust accumulates.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--gap", "rel:5"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(1).unwrap().config.gap, 15);
+        // Relative adjust clamps to zero (C add_and_clamp_to_zero).
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--gap", "rel:-100"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(1).unwrap().config.gap, 0);
+    }
+
+    #[test]
+    fn space_padding_dispatch_reinsets_from_usable_frame() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        // Seed the usable frame so the per-space padding re-insets immediately
+        // (mirrors the daemon handing each space its usable frame on reconcile).
+        state
+            .set_space_frame(1, Area::new(0.0, 0.0, 1000.0, 1000.0))
+            .unwrap();
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--padding", "abs:20:20:10:10"])),
+            Ok(None)
+        );
+        let frame = state.flush(1).unwrap()[0].area;
+        // Single window fills the padded area: x=left, y=top, w=1000-l-r, h=1000-t-b.
+        assert_eq!(
+            (
+                frame.x as i32,
+                frame.y as i32,
+                frame.w as i32,
+                frame.h as i32
+            ),
+            (10, 20, 980, 960)
+        );
+        // Relative adds to the current override (10 more on left/right each).
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--padding", "rel:0:0:10:10"])),
+            Ok(None)
+        );
+        let frame = state.flush(1).unwrap()[0].area;
+        assert_eq!((frame.x as i32, frame.w as i32), (20, 960));
+    }
+
+    #[test]
+    fn space_gap_and_padding_error_on_float_space() {
+        let mut state = state_with_space();
+        state.spaces.get_mut(&1).unwrap().layout = ViewType::Float;
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--gap", "abs:10"])),
+            Err("cannot set gap for a non-managed space.".to_string())
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--padding", "abs:1:1:1:1"])),
+            Err("cannot set padding for a non-managed space.".to_string())
+        );
     }
 
     #[test]

@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use yabai_core::layout::{HANDLE_ABS, HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
-    Area, FfmMode, Layer, Message, MouseAction, MouseModifier, Point, ScratchpadAction, Selector,
-    SignalEvent, SpaceAction, ValueType, WindowAction, grid_frame, parse_message, parse_selector,
+    Area, FfmMode, Layer, Message, MouseAction, MouseModifier, Point, RuleCommand,
+    ScratchpadAction, Selector, SignalEvent, SpaceAction, ValueType, WindowAction, grid_frame,
+    parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
@@ -29,8 +30,8 @@ use yabai_macos::{
     windows_on_space,
 };
 use yabai_runtime::{
-    Actor, AppState, DropResult, LayoutSink, RecordingSink, Response, Runtime, StateEvent,
-    WindowMeta,
+    Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, RecordingSink, Response, Runtime,
+    StateEvent, WindowMeta,
 };
 use yabai_sa::{ScriptingAddition, ScriptingAdditionStatus};
 
@@ -1304,6 +1305,7 @@ fn resolve_deminimize_target(
 /// minimized windows from BSP trees, while the macOS sink keeps their AX element
 /// so this path can restore the window and re-reconcile its app.
 fn try_window_deminimize(
+    sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
     signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
@@ -1334,7 +1336,7 @@ fn try_window_deminimize(
         )));
     }
 
-    reconcile_pid(runtime, managed, signaled, pid);
+    reconcile_pid(sa, runtime, managed, signaled, pid);
     let meta = runtime.state.window_meta(window_id).or_else(|| {
         signaled
             .get(&pid)
@@ -1407,6 +1409,7 @@ fn window_fullscreen_exit_target(tokens: &[String], fullscreen_ids: &[u32]) -> O
 /// `None` for an *enter* request (no fullscreen target), letting the normal
 /// command path validate the focused window so the post-step enters fullscreen.
 fn try_window_native_fullscreen_exit(
+    sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
     signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
@@ -1432,7 +1435,7 @@ fn try_window_native_fullscreen_exit(
         )));
     }
 
-    reconcile_pid(runtime, managed, signaled, pid);
+    reconcile_pid(sa, runtime, managed, signaled, pid);
     Some(Ok(None))
 }
 
@@ -1938,7 +1941,41 @@ fn try_scripting_addition(
             }
             None
         }
+        Ok(Message::Rule(RuleCommand::Apply(apply))) => {
+            let result = runtime
+                .state
+                .apply_rule_and_collect_effects(apply)
+                .map(|applications| {
+                    apply_rule_effects_via_sa(sa, runtime, &applications);
+                    runtime.state.flush_all_active_to(&mut runtime.sink);
+                    None
+                });
+            if result.is_ok() {
+                refresh_live_display_state(runtime, display_frames);
+            }
+            Some(result)
+        }
         _ => None,
+    }
+}
+
+fn apply_rule_effects_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    applications: &[AppliedRuleEffects],
+) {
+    for application in applications {
+        let wid = application.window_id;
+        let effects = &application.effects;
+        if let Some(sticky) = effects.sticky {
+            let _ = window_set_sticky_via_sa(sa, runtime, wid, sticky, application.sid);
+        }
+        if let Some(layer) = effects.layer {
+            let _ = window_sub_layer_for_id_via_sa(sa, runtime, wid, layer);
+        }
+        if let Some(opacity) = effects.opacity {
+            let _ = window_opacity_for_id_via_sa(sa, runtime, wid, opacity);
+        }
     }
 }
 
@@ -1953,9 +1990,17 @@ fn window_opacity_via_sa(
     opacity: f32,
 ) -> Response {
     let wid = runtime.state.resolve_window_selector(target)?;
+    window_opacity_for_id_via_sa(sa, runtime, wid, opacity).map(|()| None)
+}
+
+fn window_opacity_for_id_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    wid: u32,
+    opacity: f32,
+) -> Result<(), String> {
     let duration = runtime.state.config.window_opacity_duration;
     sa.set_opacity(wid, opacity, duration)
-        .map(|()| None)
         .map_err(|_| {
             format!(
                 "could not change opacity of window with id '{wid}' due to an error with the scripting-addition.\n"
@@ -2012,6 +2057,15 @@ fn window_sub_layer_via_sa(
     layer: Layer,
 ) -> Response {
     let wid = runtime.state.resolve_window_selector(target)?;
+    window_sub_layer_for_id_via_sa(sa, runtime, wid, layer).map(|()| None)
+}
+
+fn window_sub_layer_for_id_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    wid: u32,
+    layer: Layer,
+) -> Result<(), String> {
     let layer = match layer {
         Layer::Below => CG_WINDOW_LEVEL_KEY_BACKSTOP,
         Layer::Normal => CG_WINDOW_LEVEL_KEY_NORMAL,
@@ -2025,7 +2079,7 @@ fn window_sub_layer_via_sa(
             }
         }
     };
-    sa.set_layer(wid, layer).map(|()| None).map_err(|_| {
+    sa.set_layer(wid, layer).map_err(|_| {
         format!(
             "could not change sub-layer of window with id '{wid}' due to an error with the scripting-addition.\n"
         )
@@ -2190,19 +2244,29 @@ fn window_toggle_sticky_via_sa(
 ) -> Response {
     let wid = runtime.state.resolve_window_selector(target)?;
     let sticky = !runtime.state.is_sticky(wid);
-    sa.set_sticky(wid, sticky).map_err(|_| {
-        format!(
-            "could not change sticky of window with id '{wid}' due to an error with the scripting-addition.\n"
-        )
-    })?;
     let sid = runtime
         .state
         .window_space_id(wid)
         .or_else(|| runtime.state.active_space_id())
         .unwrap_or(0);
+    window_set_sticky_via_sa(sa, runtime, wid, sticky, sid).map(|()| None)
+}
+
+fn window_set_sticky_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    wid: u32,
+    sticky: bool,
+    sid: u64,
+) -> Result<(), String> {
+    sa.set_sticky(wid, sticky).map_err(|_| {
+        format!(
+            "could not change sticky of window with id '{wid}' due to an error with the scripting-addition.\n"
+        )
+    })?;
     runtime.state.set_window_sticky(wid, sticky, sid);
     runtime.state.flush_all_active_to(&mut runtime.sink);
-    Ok(None)
+    Ok(())
 }
 
 /// Toggle the acting window's shadow through the SA, mirroring the C
@@ -3136,20 +3200,27 @@ fn geometry_signal_frame_changed(signal: SignalEvent, expected: Area, actual: Ar
 }
 
 /// Apply matching window rules to a window. Currently enacts the `manage` effect
-/// (off -> float, on -> tile); other effects (sticky/opacity/layer/grid/
-/// display/space/fullscreen) are parsed and stored but their application is
-/// deferred. Role/subrole are unknown at the AX layer here, so rules filtering on
-/// them will not match yet.
+/// (off -> float, on -> tile), scratchpad assignment, and SA-backed sticky,
+/// sub-layer, and opacity effects. Other effects (grid/display/space/fullscreen)
+/// are parsed and stored but their application is deferred. Role/subrole are
+/// unknown at the AX layer here, so rules filtering on them will not match yet.
 fn apply_window_rules(
+    sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     window_id: u32,
     app: &str,
     title: &str,
     sid: u64,
 ) {
-    runtime
+    let effects = runtime
         .state
         .apply_new_window_rules(window_id, app, title, "", "", sid);
+    let application = AppliedRuleEffects {
+        window_id,
+        sid,
+        effects,
+    };
+    apply_rule_effects_via_sa(sa, runtime, &[application]);
 }
 
 fn sync_window_lifecycle_signals(
@@ -3210,6 +3281,7 @@ fn sync_window_lifecycle_signals(
 }
 
 fn reconcile_pid(
+    sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
     signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
@@ -3249,7 +3321,7 @@ fn reconcile_pid(
             .handle_event(StateEvent::WindowAssignedToSpace { window_id: id, sid });
         // Apply window rules once, when the window is first seen.
         if is_new {
-            apply_window_rules(runtime, id, &app, &title, sid);
+            apply_window_rules(sa, runtime, id, &app, &title, sid);
         }
         // Else it is already managed; the freshly discovered duplicate element
         // drops here, leaving the existing registration intact.
@@ -3473,9 +3545,30 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
     // is the Rust analogue of the C `WINDOW_WINDOWED` flag + `windowed_frame`.
     let mut windowed_frames: HashMap<u32, Area> = HashMap::new();
 
+    // Scripting-addition client for privileged ops the AX API cannot do (space
+    // create/destroy/move, rule opacity/layer/sticky effects, etc.). Built from
+    // the daemon's real login user, not the per-command USER override the IPC
+    // client uses. Calls fail gracefully when the SA payload is not loaded.
+    let scripting_addition =
+        ScriptingAddition::for_user(&std::env::var("USER").unwrap_or_default());
+    match scripting_addition.status() {
+        ScriptingAdditionStatus::Healthy { payload_version } => eprintln!(
+            "yabai-rust: scripting addition available (payload v{payload_version}) — space create/destroy enabled"
+        ),
+        other => eprintln!(
+            "yabai-rust: scripting addition not usable ({other:?}); space create/destroy will fail until it is loaded"
+        ),
+    }
+
     // Initial tile from the current world.
     for pid in &pids {
-        reconcile_pid(&mut runtime, &mut managed, &mut signaled, *pid);
+        reconcile_pid(
+            &scripting_addition,
+            &mut runtime,
+            &mut managed,
+            &mut signaled,
+            *pid,
+        );
     }
     let initial: usize = managed.values().map(HashSet::len).sum();
 
@@ -3488,21 +3581,6 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
     // Used as the `active` context for application_hidden/terminated signals and
     // as `YABAI_RECENT_PROCESS_ID` for application_front_switched.
     let mut front_pid: Option<i32> = None;
-
-    // Scripting-addition client for privileged ops the AX API cannot do (space
-    // create/destroy/move, etc.). Built from the daemon's real login user, not the
-    // per-command USER override the IPC client uses. Calls fail gracefully when the
-    // SA payload is not loaded.
-    let scripting_addition =
-        ScriptingAddition::for_user(&std::env::var("USER").unwrap_or_default());
-    match scripting_addition.status() {
-        ScriptingAdditionStatus::Healthy { payload_version } => eprintln!(
-            "yabai-rust: scripting addition available (payload v{payload_version}) — space create/destroy enabled"
-        ),
-        other => eprintln!(
-            "yabai-rust: scripting addition not usable ({other:?}); space create/destroy will fail until it is loaded"
-        ),
-    }
 
     // Unified event loop: observers, the periodic tick, and the socket all feed
     // one channel processed against the single `Runtime<AxSink>`.
@@ -3617,7 +3695,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             Some(active),
                         );
                     }
-                    reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                    reconcile_pid(
+                        &scripting_addition,
+                        &mut runtime,
+                        &mut managed,
+                        &mut signaled,
+                        pid,
+                    );
                     // Focus may have moved to a window on another display; point the
                     // command-active space at the focused window's space.
                     if let Some(window_id) = focused {
@@ -3651,7 +3735,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     WorkspaceEvent::ActiveSpaceChanged => {
                         refresh_live_display_state(&mut runtime, &mut display_frames);
                         for pid in observed.iter().copied().collect::<Vec<_>>() {
-                            reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                            reconcile_pid(
+                                &scripting_addition,
+                                &mut runtime,
+                                &mut managed,
+                                &mut signaled,
+                                pid,
+                            );
                         }
                         if let Some(sid) = runtime.state.active_space_id() {
                             fire_signals(
@@ -3678,7 +3768,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         if is_all && observed.insert(pid) {
                             spawn_observer(pid, &tx);
                             refresh_live_display_state(&mut runtime, &mut display_frames);
-                            reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                            reconcile_pid(
+                                &scripting_addition,
+                                &mut runtime,
+                                &mut managed,
+                                &mut signaled,
+                                pid,
+                            );
                         }
                     }
                     WorkspaceEvent::ApplicationActivated { pid, app } => {
@@ -3880,7 +3976,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // Self-heal: re-reconcile every known app, catching any window
                     // change an observer missed (e.g. the unreliable AX destroy).
                     for pid in observed.iter().copied().collect::<Vec<_>>() {
-                        reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                        reconcile_pid(
+                            &scripting_addition,
+                            &mut runtime,
+                            &mut managed,
+                            &mut signaled,
+                            pid,
+                        );
                     }
                 }
                 WmWork::Message { tokens, reply } => {
@@ -3893,6 +3995,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // Some commands need macOS-layer state/effects the pure core can't
                     // perform; handle those here, otherwise fall through.
                     let fullscreen_exit = try_window_native_fullscreen_exit(
+                        &scripting_addition,
                         &mut runtime,
                         &mut managed,
                         &mut signaled,
@@ -3903,6 +4006,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     let response = match fullscreen_exit {
                         Some(response) => response,
                         None => match try_window_deminimize(
+                            &scripting_addition,
                             &mut runtime,
                             &mut managed,
                             &mut signaled,
@@ -3992,7 +4096,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             if runtime.sink.set_minimized(window_id, true) {
                                 if let Some(pid) = pid {
                                     minimized_pids.insert(window_id, pid);
-                                    reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                                    reconcile_pid(
+                                        &scripting_addition,
+                                        &mut runtime,
+                                        &mut managed,
+                                        &mut signaled,
+                                        pid,
+                                    );
                                 }
                                 fire_signals(
                                     &runtime,
@@ -4013,7 +4123,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             let pid = runtime.state.window_pid(window_id);
                             if runtime.sink.close_window(window_id) {
                                 if let Some(pid) = pid {
-                                    reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                                    reconcile_pid(
+                                        &scripting_addition,
+                                        &mut runtime,
+                                        &mut managed,
+                                        &mut signaled,
+                                        pid,
+                                    );
                                 }
                             }
                         }
@@ -4033,7 +4149,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             if runtime.sink.enter_native_fullscreen(window_id) {
                                 if let Some(pid) = pid {
                                     fullscreen_pids.insert(window_id, pid);
-                                    reconcile_pid(&mut runtime, &mut managed, &mut signaled, pid);
+                                    reconcile_pid(
+                                        &scripting_addition,
+                                        &mut runtime,
+                                        &mut managed,
+                                        &mut signaled,
+                                        pid,
+                                    );
                                 }
                             }
                         }

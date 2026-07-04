@@ -43,17 +43,18 @@ reconstructing context.
   worker thread). `mouse_follows_focus` warps the cursor to the focused window on
   focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
-  one-shot removal, regex matching, and live pure effects for `manage`
+  one-shot removal, regex matching, live pure effects for `manage`
   (`manage=off` floats/untiles, `manage=on` retiles) and `scratchpad=`
-  (assigns/floats); other rule effects are parsed/stored but deferred. Per-space
+  (assigns/floats), plus best-effort SA-backed `sticky`, `sub-layer`, and
+  `opacity` effects for new windows and `rule --apply`; remaining rule effects
+  are parsed/stored but deferred. Per-space
   `space --gap`/`--padding` (abs/rel) are dispatched and
   survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
   `window --raise`/`--lower` reorder a window's z-stacking (above/below an optional
   reference window) through the SA `order_window` opcode. `window --scratchpad`
   assigns/removes/recovers scratchpads and `window --toggle <label>` hides/shows
-  them through the SA z-order opcodes. Rule `scratchpad=` effects are applied in
-  the pure runtime for known windows.
-  192 workspace tests pass. The shipped C `make` flow is unchanged.
+  them through the SA z-order opcodes.
+  193 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-04.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -64,6 +65,32 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 72) — SA-backed rule effects for sticky/layer/opacity
+
+- Added a pure `AppliedRuleEffects` report path in `AppState` so `rule --apply`
+  can keep regex matching and pure state changes in `yabai-runtime` while the
+  daemon applies macOS effects at the boundary. Existing pure `rule --apply`
+  behavior for `manage=` and `scratchpad=` remains unchanged.
+- The daemon now applies rule `sticky=`, `sub-layer=`, and `opacity=` effects for
+  both newly discovered windows and `rule --apply`. Rule SA effects are best-effort
+  per C behavior: a failed sticky/layer/opacity SA call does not abort later rule
+  effects or turn `rule --apply` into a command failure. Direct window commands
+  still report SA failures.
+- Added `rule_apply_collects_sa_backed_effects_for_daemon`, covering the effect
+  collection handed to the daemon (`sticky`, `opacity`, `sub-layer`) without
+  introducing macOS calls into `AppState` tests.
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with `com.test.yabai`, SA healthy. Isolated daemon on
+  `/tmp/yabai_rulefind.socket` applied `rule --apply op` with
+  `opacity=0.61 sub-layer=above` to Finder; `--experimental-window-alpha 1395`
+  reported `0.61`, then restore rule returned alpha to `1`. Isolated Calculator
+  daemon on `/tmp/yabai_rulecalc.socket` applied combined
+  `sticky=on opacity=0.61 sub-layer=above`; alpha read back `0.61`, daemon stayed
+  responsive, then `sticky=off opacity=1.0 sub-layer=normal` restored alpha to `1`.
+- Verification: `cargo fmt --all`; targeted runtime/daemon tests;
+  `cargo test --workspace` (193 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-04 (session 71) — typed `window --sub-layer` daemon helper cleanup
 

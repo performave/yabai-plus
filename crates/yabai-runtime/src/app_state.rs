@@ -28,6 +28,13 @@ use crate::config::Config;
 /// client (queries/gets), or an error message (the daemon's `daemon_fail`).
 pub type Response = Result<Option<String>, String>;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedRuleEffects {
+    pub window_id: u32,
+    pub sid: u64,
+    pub effects: RuleEffects,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropResult {
     /// The drop was invalid or ignored.
@@ -1557,19 +1564,23 @@ impl AppState {
     }
 
     fn apply_rule(&mut self, apply: RuleApply) -> Response {
+        self.apply_rule_and_collect_effects(apply)?;
+        Ok(None)
+    }
+
+    pub fn apply_rule_and_collect_effects(
+        &mut self,
+        apply: RuleApply,
+    ) -> Result<Vec<AppliedRuleEffects>, String> {
         match apply {
-            RuleApply::All => {
-                self.apply_all_non_one_shot_rules_to_known_windows();
-                Ok(None)
-            }
+            RuleApply::All => Ok(self.apply_all_non_one_shot_rules_to_known_windows()),
             RuleApply::AdHoc { label, pairs } => {
                 if let Some(index) = self.rule_index_by_label(&label) {
                     return self.apply_rule_index(index);
                 }
                 let rule = Rule::from_key_values(&pairs, false)?;
                 let compiled = compile_rule(rule)?;
-                self.apply_compiled_rule_to_known_windows(&compiled);
-                Ok(None)
+                Ok(self.apply_compiled_rule_to_known_windows(&compiled))
             }
             RuleApply::Selector(selector) => self.apply_rule_selector(&selector),
         }
@@ -1664,14 +1675,49 @@ impl AppState {
         result
     }
 
-    fn apply_all_non_one_shot_rules_to_known_windows(&mut self) {
-        for (window_id, app, title, sid) in self.windows_with_meta() {
-            let effects = self.combined_rule_effects_for_window(&app, &title, "", "", false);
-            self.apply_rule_effects_to_window(window_id, sid, &effects);
+    fn matched_rule_effects_for_window(
+        &self,
+        app: &str,
+        title: &str,
+        role: &str,
+        subrole: &str,
+        include_one_shot: bool,
+    ) -> Option<RuleEffects> {
+        let mut result = RuleEffects::default();
+        let mut matched = false;
+        for compiled in &self.rules {
+            if (include_one_shot || !compiled.rule.one_shot)
+                && compiled.matches(app, title, role, subrole)
+            {
+                matched = true;
+                combine_effects(&compiled.rule.effects, &mut result);
+            }
         }
+        matched.then_some(result)
     }
 
-    fn apply_compiled_rule_to_known_windows(&mut self, compiled: &CompiledRule) {
+    fn apply_all_non_one_shot_rules_to_known_windows(&mut self) -> Vec<AppliedRuleEffects> {
+        let mut applications = Vec::new();
+        for (window_id, app, title, sid) in self.windows_with_meta() {
+            let Some(effects) = self.matched_rule_effects_for_window(&app, &title, "", "", false)
+            else {
+                continue;
+            };
+            self.apply_rule_effects_to_window(window_id, sid, &effects);
+            applications.push(AppliedRuleEffects {
+                window_id,
+                sid,
+                effects,
+            });
+        }
+        applications
+    }
+
+    fn apply_compiled_rule_to_known_windows(
+        &mut self,
+        compiled: &CompiledRule,
+    ) -> Vec<AppliedRuleEffects> {
+        let effects = compiled.rule.effects.clone();
         let matches = self
             .windows_with_meta()
             .into_iter()
@@ -1681,23 +1727,33 @@ impl AppState {
                     .then_some((window_id, sid))
             })
             .collect::<Vec<_>>();
+        let mut applications = Vec::with_capacity(matches.len());
         for (window_id, sid) in matches {
-            self.apply_rule_effects_to_window(window_id, sid, &compiled.rule.effects);
+            self.apply_rule_effects_to_window(window_id, sid, &effects);
+            applications.push(AppliedRuleEffects {
+                window_id,
+                sid,
+                effects: effects.clone(),
+            });
         }
+        applications
     }
 
-    fn apply_rule_selector(&mut self, selector: &Selector) -> Response {
+    fn apply_rule_selector(
+        &mut self,
+        selector: &Selector,
+    ) -> Result<Vec<AppliedRuleEffects>, String> {
         let Some(index) = self.resolve_rule_selector(selector)? else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         self.apply_rule_index(index)
     }
 
-    fn apply_rule_index(&mut self, index: usize) -> Response {
+    fn apply_rule_index(&mut self, index: usize) -> Result<Vec<AppliedRuleEffects>, String> {
         let matches = {
             let compiled = &self.rules[index];
             if compiled.rule.one_shot {
-                return Ok(None);
+                return Ok(Vec::new());
             }
             self.windows_with_meta()
                 .into_iter()
@@ -1709,10 +1765,16 @@ impl AppState {
                 .collect::<Vec<_>>()
         };
         let effects = self.rules[index].rule.effects.clone();
+        let mut applications = Vec::with_capacity(matches.len());
         for (window_id, sid) in matches {
             self.apply_rule_effects_to_window(window_id, sid, &effects);
+            applications.push(AppliedRuleEffects {
+                window_id,
+                sid,
+                effects: effects.clone(),
+            });
         }
-        Ok(None)
+        Ok(applications)
     }
 
     fn resolve_rule_selector(&self, selector: &Selector) -> Result<Option<usize>, String> {
@@ -3954,6 +4016,50 @@ mod tests {
         assert!(state.is_floating(1));
         assert_eq!(state.space(1).unwrap().window_list(), vec![2]);
         assert_eq!(state.window_scratchpad(2), None);
+    }
+
+    #[test]
+    fn rule_apply_collects_sa_backed_effects_for_daemon() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_window_meta(
+            1,
+            WindowMeta {
+                app: "Finder".to_string(),
+                title: "One".to_string(),
+                pid: 10,
+            },
+        );
+        state.set_window_meta(
+            2,
+            WindowMeta {
+                app: "Safari".to_string(),
+                title: "Two".to_string(),
+                pid: 20,
+            },
+        );
+
+        state
+            .handle_tokens(&toks(&[
+                "rule",
+                "--add",
+                "app=^Finder$",
+                "sticky=on",
+                "opacity=0.5",
+                "sub-layer=above",
+            ]))
+            .unwrap();
+
+        let applications = state
+            .apply_rule_and_collect_effects(yabai_core::RuleApply::All)
+            .unwrap();
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].window_id, 1);
+        assert_eq!(applications[0].sid, 1);
+        assert_eq!(applications[0].effects.sticky, Some(true));
+        assert_eq!(applications[0].effects.opacity, Some(0.5));
+        assert_eq!(applications[0].effects.layer, Some(Layer::Above));
     }
 
     #[test]

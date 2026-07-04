@@ -58,6 +58,44 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 57) — `window --move abs|rel:dx:dy` (float/unmanaged) + verified live
+
+- Implemented `window --move`, previously an unhandled `WindowAction::Move` (fell to
+  the "window action not yet handled" arm). Mirrors C
+  `window_manager_move_window_relative`: move targets an **unmanaged**
+  (floating/untracked) window and repositions it, leaving its size unchanged; a
+  **managed** (tiled) window is rejected with `cannot move a managed window.`
+  (C `WINDOW_OP_ERROR_INVALID_SRC_VIEW`). `abs` sets the origin to `(dx, dy)`; `rel`
+  offsets the current origin by `(dx, dy)`.
+- **Daemon glue only** (no pure helper — the arithmetic is trivial abs/rel, exactly
+  as the C command has no pure computation): new `try_window_move` interceptor
+  (before the generic dispatch, right after `try_window_grid`) resolves the acting
+  window, rejects it if it's in a layout tree (`window_space_id(wid).is_some()`),
+  reads its live AX frame (`AxSink::window_frame`), computes the new origin, and
+  applies it via `AxSink::set_frame` keeping `w`/`h`. The parser has produced
+  `WindowAction::Move { kind, dx, dy }` since the Phase-2 grammar port, so no
+  grammar change was needed.
+- **Verified live on the remote (macOS 26.5.1):** daemon gap 10 / padding 10, a
+  Finder grid on space 1. Focus + float window 1183 (tiled at 65,500 692×446), then:
+  - `--move abs:200:150` → bounds **200 150 692 446** (`SLSGetWindowBounds` readback),
+    size unchanged.
+  - `--move rel:80:-40` → **280 110 692 446**.
+  - `--move rel:-30:60` → **250 170 692 446**.
+  - `window 1182 --move abs:0:0` on a still-**managed** window → exit 1,
+    `cannot move a managed window.`
+  - Verified `--toggle float` targeting: with focus on a *different* window (1182),
+    `window 1183 --toggle float` floats **1183** (the selected target), then
+    `--move` succeeds on it. This matches C: `dispatch_window` resolves a target
+    selector and makes it the focused window before running the actions
+    (`app_state.rs:1091`), so `window <sel> --toggle float` acts on `<sel>` — the
+    same as C's `acting_window` (C `message.c:2076-2084`, which starts at the
+    focused window and overrides with the parsed selector). Note `--toggle float`
+    is idempotent: run it once per window (toggling twice re-tiles it), which is the
+    only reason an earlier same-session double-toggle made `--move` transiently see
+    a "managed" window.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (184 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 56) — `window --grid r:c:x:y:w:h` (float/unmanaged) + verified live
 
 - Implemented `window --grid`, previously an unhandled `WindowAction::Grid` (fell to
@@ -984,9 +1022,11 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    (the C command is `--sub-layer`, not `--layer`). `window --grid r:c:x:y:w:h`
    places a floating/unmanaged window on a grid over its display's usable area
    (pure `grid_frame` + `try_window_grid` glue, session 56, verified live; a managed
-   window is rejected). Still to do:
-   remaining deminimize/native-fullscreen-exit selectors, `window --move` (floating
-   reposition), and scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag),
+   window is rejected). `window --move abs|rel:dx:dy` repositions a floating/unmanaged
+   window (leaving its size unchanged; managed windows rejected) via `try_window_move`
+   → `AxSink::set_frame` (session 57, verified live). Still to do:
+   remaining deminimize/native-fullscreen-exit selectors and scratchpad. Mouse
+   drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified
    live (sessions 41-43). Cross-space/cross-display drops are also done and verified

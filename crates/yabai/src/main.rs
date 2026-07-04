@@ -9,7 +9,7 @@ use std::time::Duration;
 use yabai_core::layout::{HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
     Area, FfmMode, Message, MouseAction, MouseModifier, Point, Selector, SignalEvent, SpaceAction,
-    WindowAction, grid_frame, parse_message, parse_selector,
+    ValueType, WindowAction, grid_frame, parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
@@ -1469,6 +1469,51 @@ fn try_window_grid(
         Some(Err(format!(
             "could not apply grid layout to window '{wid}'.\n"
         )))
+    }
+}
+
+/// Intercept `window [sel] --move abs|rel:dx:dy`, mirroring the C
+/// `window_manager_move_window_relative`. Move targets an **unmanaged**
+/// (floating/untracked) window: a managed (tiled) window is rejected. `abs` sets
+/// the window's origin to `(dx, dy)`; `rel` offsets the current origin by
+/// `(dx, dy)`. The size is left unchanged. Returns `None` for any other command
+/// so the normal dispatch chain handles it.
+fn try_window_move(runtime: &Runtime<AxSink>, tokens: &[String]) -> Option<Response> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Move { kind, dx, dy }] = cmd.actions.as_slice() else {
+        return None;
+    };
+    let (kind, dx, dy) = (*kind, *dx, *dy);
+    let wid = match runtime.state.resolve_window_selector(cmd.target.as_ref()) {
+        Ok(wid) => wid,
+        Err(error) => return Some(Err(error)),
+    };
+    // A managed (tiled) window lives in a layout tree; move only applies to
+    // unmanaged windows (C returns WINDOW_OP_ERROR_INVALID_SRC_VIEW).
+    if runtime.state.window_space_id(wid).is_some() {
+        return Some(Err("cannot move a managed window.\n".to_string()));
+    }
+    let Some(frame) = runtime.sink.window_frame(wid) else {
+        return Some(Err(format!(
+            "could not locate window with the given id '{wid}'.\n"
+        )));
+    };
+    let (x, y) = match kind {
+        ValueType::Abs => (dx, dy),
+        ValueType::Rel => (frame.x + dx, frame.y + dy),
+    };
+    let target = Area {
+        x,
+        y,
+        w: frame.w,
+        h: frame.h,
+    };
+    if runtime.sink.set_frame(wid, target) {
+        Some(Ok(None))
+    } else {
+        Some(Err(format!("could not move window '{wid}'.\n")))
     }
 }
 
@@ -3387,14 +3432,17 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                 Some(response) => response,
                                 None => match try_window_grid(&runtime, &display_frames, &tokens) {
                                     Some(response) => response,
-                                    None => match try_space_focus(
-                                        &scripting_addition,
-                                        &mut runtime,
-                                        &display_frames,
-                                        &tokens,
-                                    ) {
+                                    None => match try_window_move(&runtime, &tokens) {
                                         Some(response) => response,
-                                        None => runtime.message(&tokens),
+                                        None => match try_space_focus(
+                                            &scripting_addition,
+                                            &mut runtime,
+                                            &display_frames,
+                                            &tokens,
+                                        ) {
+                                            Some(response) => response,
+                                            None => runtime.message(&tokens),
+                                        },
                                     },
                                 },
                             },

@@ -184,6 +184,10 @@ pub struct AppState {
     /// have a shadow by default, so membership here means "shadow disabled"; this
     /// only tracks the toggle state (the visual change is applied via the SA).
     shadow_disabled: HashSet<u32>,
+    /// Scratchpad labels assigned to windows (`window --scratchpad <label>`).
+    /// Scratchpad windows are also floating, so reconcile keeps them out of the
+    /// BSP tree until the label is removed.
+    scratchpads: HashMap<u32, String>,
     /// Each display's currently visible space. Every display tiles its own
     /// current space simultaneously, so the daemon flushes all of these, while
     /// `active_space` (the focused display's space) drives command dispatch.
@@ -435,6 +439,13 @@ impl AppState {
 
     pub fn window_space_id(&self, window_id: u32) -> Option<u64> {
         self.window_space(window_id)
+    }
+
+    /// Last known space assignment for a window, including floating/sticky/
+    /// scratchpad windows that are intentionally absent from layout trees.
+    pub fn window_known_space_id(&self, window_id: u32) -> Option<u64> {
+        self.window_space(window_id)
+            .or_else(|| self.window_spaces.get(&window_id).copied())
     }
 
     pub fn set_active_space(&mut self, sid: u64) {
@@ -774,6 +785,7 @@ impl AppState {
     /// also clearing any floating mark.
     pub fn remove_window(&mut self, window_id: u32) -> Result<(), String> {
         self.floating.remove(&window_id);
+        self.scratchpads.remove(&window_id);
         self.window_spaces.remove(&window_id);
         for tree in self.spaces.values_mut() {
             tree.remove_window(window_id);
@@ -837,6 +849,51 @@ impl AppState {
         } else {
             self.shadow_disabled.insert(window_id);
         }
+    }
+
+    /// Assign `label` as the window's scratchpad, mirroring the C behavior:
+    /// labels are unique, re-labeling the same window replaces its old label, and
+    /// any scratchpad window is forced floating/untiled.
+    pub fn set_window_scratchpad(
+        &mut self,
+        window_id: u32,
+        label: String,
+        sid: u64,
+    ) -> Result<(), String> {
+        if self
+            .scratchpads
+            .iter()
+            .any(|(&wid, existing)| wid != window_id && existing == &label)
+        {
+            return Err(
+                "the given scratchpad is already assigned to a different window!\n".to_string(),
+            );
+        }
+        self.scratchpads.insert(window_id, label);
+        self.set_window_floating(window_id, true, sid);
+        Ok(())
+    }
+
+    /// Remove a scratchpad assignment. When `unfloat` is true, tile the window
+    /// back into `sid`, matching `window --scratchpad` with no label in C.
+    pub fn remove_window_scratchpad(&mut self, window_id: u32, unfloat: bool, sid: u64) -> bool {
+        if self.scratchpads.remove(&window_id).is_none() {
+            return false;
+        }
+        if unfloat {
+            self.set_window_floating(window_id, false, sid);
+        }
+        true
+    }
+
+    pub fn window_scratchpad(&self, window_id: u32) -> Option<&str> {
+        self.scratchpads.get(&window_id).map(String::as_str)
+    }
+
+    pub fn scratchpad_window(&self, label: &str) -> Option<u32> {
+        self.scratchpads
+            .iter()
+            .find_map(|(&wid, existing)| (existing == label).then_some(wid))
     }
 
     /// Set a space's usable frame from its full display frame, insetting by the
@@ -1851,6 +1908,7 @@ impl AppState {
                 "pid",
                 "app",
                 "title",
+                "scratchpad",
                 "frame",
                 "has-focus",
                 "space",
@@ -2019,6 +2077,10 @@ impl AppState {
                 "title" => fields.push(format!(
                     "\t\"title\":\"{}\"",
                     json_escape(meta.map(|m| m.title.as_str()).unwrap_or(""))
+                )),
+                "scratchpad" => fields.push(format!(
+                    "\t\"scratchpad\":\"{}\"",
+                    json_escape(self.window_scratchpad(frame.window_id).unwrap_or(""))
                 )),
                 "frame" => fields.push(format_area("frame", frame.area)),
                 "has-focus" => fields.push(format!(
@@ -2584,6 +2646,33 @@ mod tests {
             state.handle_tokens(&toks(&["window", "--toggle", "float"])),
             Ok(None)
         );
+        assert!(!state.is_floating(1));
+        let mut list = state.space(1).unwrap().window_list();
+        list.sort_unstable();
+        assert_eq!(list, vec![1, 2]);
+    }
+
+    #[test]
+    fn scratchpad_assignment_floats_and_removal_retiles() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+
+        state
+            .set_window_scratchpad(1, "notes".to_string(), 1)
+            .unwrap();
+        assert_eq!(state.window_scratchpad(1), Some("notes"));
+        assert_eq!(state.scratchpad_window("notes"), Some(1));
+        assert!(state.is_floating(1));
+        assert_eq!(state.space(1).unwrap().window_list(), vec![2]);
+
+        assert_eq!(
+            state.set_window_scratchpad(2, "notes".to_string(), 1),
+            Err("the given scratchpad is already assigned to a different window!\n".to_string())
+        );
+
+        assert!(state.remove_window_scratchpad(1, true, 1));
+        assert_eq!(state.window_scratchpad(1), None);
         assert!(!state.is_floating(1));
         let mut list = state.space(1).unwrap().window_list();
         list.sort_unstable();
@@ -3416,6 +3505,19 @@ mod tests {
             Ok(Some(
                 "[{\n\t\"id\":10,\n\t\"has-shadow\":true\n},{\n\t\"id\":20,\n\t\"has-shadow\":false\n}]\n"
                     .to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn query_windows_serializes_scratchpad_property() {
+        let mut state = state_with_space();
+        state.add_window(10).unwrap();
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["query", "--windows", "id,scratchpad"])),
+            Ok(Some(
+                "[{\n\t\"id\":10,\n\t\"scratchpad\":\"\"\n}]\n".to_string()
             ))
         );
     }

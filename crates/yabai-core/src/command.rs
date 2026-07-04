@@ -389,7 +389,14 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
             "--toggle" => {
                 WindowAction::Toggle(require(iter.next(), command, Domain::Window)?.clone())
             }
-            "--opacity" | "--sub-layer" | "--scratchpad" | "--insert" => WindowAction::Raw {
+            "--scratchpad" => WindowAction::Raw {
+                command: command.clone(),
+                arg: match iter.peek() {
+                    Some(tok) if !tok.starts_with("--") => iter.next().unwrap().clone(),
+                    _ => String::new(),
+                },
+            },
+            "--opacity" | "--sub-layer" | "--insert" => WindowAction::Raw {
                 command: command.clone(),
                 arg: require(iter.next(), command, Domain::Window)?.clone(),
             },
@@ -1304,6 +1311,27 @@ mod tests {
         assert_eq!(
             cmd.actions,
             vec![WindowAction::Lower(None), WindowAction::Focus(None)]
+        );
+    }
+
+    #[test]
+    fn window_scratchpad_allows_bare_remove() {
+        let cmd = parse_window(&toks(&["--scratchpad"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Raw {
+                command: "--scratchpad".to_string(),
+                arg: String::new(),
+            }]
+        );
+
+        let cmd = parse_window(&toks(&["--scratchpad", "notes"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Raw {
+                command: "--scratchpad".to_string(),
+                arg: "notes".to_string(),
+            }]
         );
     }
 

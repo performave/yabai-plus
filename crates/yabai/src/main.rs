@@ -25,7 +25,8 @@ use yabai_macos::{
     set_active_display, set_drag_modifier, spaces_for_display, spaces_for_window,
     switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
     warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_bounds,
-    window_transform, windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
+    window_is_ordered_in, window_transform, windows_for_pid, windows_for_pid_diagnostics,
+    windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, DropResult, LayoutSink, RecordingSink, Response, Runtime, StateEvent,
@@ -1851,6 +1852,16 @@ fn try_scripting_addition(
                             arg,
                         ));
                     }
+                    // `window --scratchpad [label|recover]` assigns/removes a
+                    // scratchpad label or orders hidden windows back in.
+                    WindowAction::Raw { command, arg } if command == "--scratchpad" => {
+                        let result =
+                            window_scratchpad_via_sa(sa, runtime, cmd.target.as_ref(), arg);
+                        if result.is_ok() {
+                            refresh_live_display_state(runtime, display_frames);
+                        }
+                        return Some(result);
+                    }
                     // `window --toggle sticky` / `--toggle shadow` need the SA and
                     // toggle-state tracking; other toggles fall through to the AX path.
                     WindowAction::Toggle(value) if value == "sticky" => {
@@ -1878,6 +1889,15 @@ fn try_scripting_addition(
                             display_frames,
                             cmd.target.as_ref(),
                         ));
+                    }
+                    WindowAction::Toggle(value)
+                        if runtime.state.scratchpad_window(value).is_some() =>
+                    {
+                        let result = window_toggle_scratchpad_via_sa(sa, runtime, value);
+                        if result.is_ok() {
+                            refresh_live_display_state(runtime, display_frames);
+                        }
+                        return Some(result);
                     }
                     // `window --raise [sel]` / `--lower [sel]` reorder the acting
                     // window above/below the (optional) reference window through
@@ -2012,6 +2032,150 @@ fn window_sub_layer_via_sa(
             "could not change sub-layer of window with id '{wid}' due to an error with the scripting-addition.\n"
         )
     })
+}
+
+const RESERVED_SCRATCHPAD_LABELS: &[&str] = &[
+    "float",
+    "sticky",
+    "shadow",
+    "split",
+    "zoom-parent",
+    "zoom-fullscreen",
+    "windowed-fullscreen",
+    "native-fullscreen",
+    "expose",
+    "pip",
+    "recover",
+];
+
+fn validate_scratchpad_label(label: &str) -> Result<(), String> {
+    if label.parse::<u64>().is_ok() {
+        return Err(format!("'{label}' cannot be used as a label.\n"));
+    }
+    if RESERVED_SCRATCHPAD_LABELS.contains(&label) {
+        return Err(format!(
+            "'{label}' is a reserved keyword and cannot be used as a scratchpad.\n"
+        ));
+    }
+    Ok(())
+}
+
+/// Handle `window --scratchpad [label|recover]`. Assigning a label records it in
+/// the runtime and floats the window; a bare command removes the assignment and
+/// tiles the window back on the active space. `recover` orders all registered
+/// windows back in, mirroring the C recovery path over the daemon's known window
+/// set.
+fn window_scratchpad_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    target: Option<&Selector>,
+    arg: &str,
+) -> Response {
+    if arg == "recover" {
+        return sa
+            .order_window_in(&runtime.sink.active_window_ids())
+            .map(|()| None)
+            .map_err(|_| {
+                "could not recover scratchpad windows due to an error with the scripting-addition.\n"
+                    .to_string()
+            });
+    }
+
+    let wid = runtime.state.resolve_window_selector(target)?;
+    let active_sid = runtime
+        .state
+        .active_space_id()
+        .ok_or_else(|| "no active space".to_string())?;
+
+    if arg.is_empty() {
+        if runtime.state.window_scratchpad(wid).is_none() {
+            return Err("the selected window was not assigned to a scratchpad!\n".to_string());
+        }
+        sa.move_window_to_space(active_sid, wid).map_err(|_| {
+            format!(
+                "could not move scratchpad window with id '{wid}' due to an error with the scripting-addition.\n"
+            )
+        })?;
+        sa.order_window(wid, 1, 0).map_err(|_| {
+            format!(
+                "could not order scratchpad window with id '{wid}' due to an error with the scripting-addition.\n"
+            )
+        })?;
+        runtime.sink.focus_window(wid);
+        runtime
+            .state
+            .remove_window_scratchpad(wid, true, active_sid);
+        runtime.state.flush_all_active_to(&mut runtime.sink);
+        return Ok(None);
+    }
+
+    validate_scratchpad_label(arg)?;
+    let sid = runtime
+        .state
+        .window_known_space_id(wid)
+        .or_else(|| runtime.state.active_space_id())
+        .ok_or_else(|| "no active space".to_string())?;
+    runtime
+        .state
+        .set_window_scratchpad(wid, arg.to_string(), sid)?;
+    runtime.state.flush_all_active_to(&mut runtime.sink);
+    Ok(None)
+}
+
+/// Toggle a scratchpad by label, mirroring C `window --toggle <label>`: hide an
+/// ordered-in scratchpad on the visible space, order it back in if hidden, or move
+/// it to the active space and show it when it lives elsewhere.
+fn window_toggle_scratchpad_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    label: &str,
+) -> Response {
+    let wid = runtime
+        .state
+        .scratchpad_window(label)
+        .ok_or_else(|| format!("unknown scratchpad '{label}'.\n"))?;
+    let active_sid = runtime
+        .state
+        .active_space_id()
+        .ok_or_else(|| "no active space".to_string())?;
+    let visible_space = runtime.state.is_sticky(wid)
+        || runtime.state.window_known_space_id(wid) == Some(active_sid);
+    let ordered_in = window_is_ordered_in(wid).unwrap_or(false);
+
+    if visible_space && ordered_in {
+        if runtime.state.focused_window_id() == Some(wid) {
+            if let Some(next) = runtime
+                .state
+                .flush(active_sid)
+                .and_then(|frames| frames.into_iter().find(|frame| frame.window_id != wid))
+            {
+                runtime.sink.focus_window(next.window_id);
+                runtime.state.set_focused_window(Some(next.window_id));
+            }
+        }
+        sa.order_window(wid, 0, 0).map(|()| None).map_err(|_| {
+            format!(
+                "could not hide scratchpad window with id '{wid}' due to an error with the scripting-addition.\n"
+            )
+        })
+    } else {
+        if !visible_space {
+            sa.move_window_to_space(active_sid, wid).map_err(|_| {
+                format!(
+                    "could not move scratchpad window with id '{wid}' due to an error with the scripting-addition.\n"
+                )
+            })?;
+            let _ = runtime.state.assign_window_to_space(wid, active_sid);
+        }
+        sa.order_window(wid, 1, 0).map_err(|_| {
+            format!(
+                "could not show scratchpad window with id '{wid}' due to an error with the scripting-addition.\n"
+            )
+        })?;
+        runtime.sink.focus_window(wid);
+        runtime.state.set_focused_window(Some(wid));
+        Ok(None)
+    }
 }
 
 /// Toggle the acting window's sticky flag through the SA, mirroring the C

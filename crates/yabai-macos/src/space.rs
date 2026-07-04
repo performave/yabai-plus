@@ -130,6 +130,7 @@ unsafe extern "C" {
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
     fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
     fn SLSGetWindowTransform(cid: i32, wid: u32, transform: *mut CGAffineTransform) -> i32;
+    fn SLSWindowIsOrderedIn(cid: i32, wid: u32, ordered_in: *mut u8) -> i32;
 }
 
 /// A 2x3 affine transform (`CGAffineTransform`): `[a, b, c, d, tx, ty]`.
@@ -650,6 +651,20 @@ pub fn window_bounds(window_id: u32) -> io::Result<(f32, f32, f32, f32)> {
             frame.size.height as f32,
         ))
     }
+}
+
+/// Return whether SkyLight considers the window ordered in (visible in z-order).
+/// This mirrors the C scratchpad toggle's `SLSWindowIsOrderedIn` check.
+pub fn window_is_ordered_in(window_id: u32) -> io::Result<bool> {
+    let mut ordered_in = 0u8;
+    // SAFETY: `ordered_in` is a valid out pointer for SkyLight to fill.
+    let err = unsafe { SLSWindowIsOrderedIn(SLSMainConnectionID(), window_id, &mut ordered_in) };
+    if err != 0 {
+        return Err(io::Error::other(format!(
+            "SLSWindowIsOrderedIn failed with {err}"
+        )));
+    }
+    Ok(ordered_in != 0)
 }
 
 #[cfg(test)]

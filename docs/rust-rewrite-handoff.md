@@ -47,8 +47,10 @@ reconstructing context.
   deferred. Per-space `space --gap`/`--padding` (abs/rel) are dispatched and
   survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
   `window --raise`/`--lower` reorder a window's z-stacking (above/below an optional
-  reference window) through the SA `order_window` opcode.
-  188 workspace tests pass. The shipped C `make` flow is unchanged.
+  reference window) through the SA `order_window` opcode. `window --scratchpad`
+  assigns/removes/recovers scratchpads and `window --toggle <label>` hides/shows
+  them through the SA z-order opcodes.
+  191 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-04.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -59,6 +61,38 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 62) — `window --scratchpad` + `--toggle <label>` + verified live
+
+- Implemented scratchpads, previously only parsed as a raw `WindowAction` and
+  unhandled. The runtime now tracks unique `window_id -> scratchpad label` state,
+  exposes `query --windows scratchpad`, and treats scratchpad windows as floating so
+  reconcile keeps them out of BSP trees until the label is removed. A bare
+  `window --scratchpad` is now parsed as removal (empty raw arg), matching C.
+- **`window --scratchpad <label>`** validates C's reserved labels (`float`, `sticky`,
+  `shadow`, `split`, `zoom-parent`, `zoom-fullscreen`, `windowed-fullscreen`,
+  `native-fullscreen`, `expose`, `pip`, `recover`), rejects numeric labels, rejects
+  duplicate labels with the C string, records the label, and floats/untiles the
+  window. **Bare `window --scratchpad`** moves the window to the active space,
+  orders it in, focuses it, clears the label, and retiles it. **`recover`** orders
+  all active AX-registered windows in via the SA `order_window_in` opcode.
+- **`window --toggle <label>`** now checks scratchpad labels before falling through to
+  normal toggles: if the scratchpad is on the visible space and ordered in, it is
+  hidden with SA `order_window(wid, 0, 0)`; if hidden, it is ordered back in and
+  focused; if on another space, it is moved to the active space via
+  `move_window_to_space`, ordered in, and focused. Added the `SLSWindowIsOrderedIn`
+  read-only wrapper (`yabai_macos::space::window_is_ordered_in`) for the hide/show
+  decision.
+- **Verified live on the remote (macOS 26):** WM daemon on `/tmp/yabai_scratch.socket`,
+  SA healthy. Assigned Finder window `1270` to scratchpad label `scratch`; it left
+  the tiled query. `window --toggle scratch` hid it: `--experimental-windows-on-space
+  1` changed from containing `1270` to omitting it. A second toggle restored `1270`
+  to the space list. Bare `window 1270 --scratchpad` returned it to the tiled query
+  with empty `scratchpad` and frame `65 500 692 446`. Duplicate assignment
+  (`window 1225 --scratchpad scratch`) failed with
+  `the given scratchpad is already assigned to a different window!` and exit 1.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (191 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-04 (session 61) — `window --toggle expose` (CoreDock) + `--toggle pip` (SA scale) + verified live
 
@@ -1191,8 +1225,9 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    readback). `window --toggle expose` focuses the window with a raise then fires the
    CoreDock `com.apple.expose.front.awake` App-Exposé notification
    (`yabai_macos::coredock` + `try_window_expose`, session 61 — dispatches cleanly but
-   the transient Mission Control animation isn't SSH-verifiable). Still to do:
-   remaining deminimize/native-fullscreen-exit selectors, and scratchpad. Mouse
+   the transient Mission Control animation isn't SSH-verifiable). `window --scratchpad`
+   assign/remove/recover and `window --toggle <label>` hide/show are done and verified
+   live (session 62). Still to do: remaining deminimize/native-fullscreen-exit selectors. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified

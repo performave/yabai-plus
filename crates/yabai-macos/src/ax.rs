@@ -1147,6 +1147,12 @@ impl AxSink {
         self.windows.contains_key(&window_id)
     }
 
+    pub fn active_window_ids(&self) -> Vec<u32> {
+        let mut ids = self.windows.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
     pub fn is_minimized_registered(&self, window_id: u32) -> bool {
         self.minimized.contains_key(&window_id)
     }

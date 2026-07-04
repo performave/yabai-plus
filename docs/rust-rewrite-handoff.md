@@ -44,7 +44,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 173 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 174 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -55,6 +55,25 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 53) — `window --swap`/`--warp`/`--stack` own-space fix + verified live
+
+- Fixed the latent active-vs-own-space bug (flagged in session 52) in
+  `window --swap`, `--warp`, and `--stack`: all three used `active_tree_mut()`, so a
+  focused window on a **non-active** display was operated on in the wrong (active)
+  space's tree — a silent no-op. Added `AppState::window_tree_mut(window_id)`, which
+  returns the tree of the space that actually contains the window (falling back to
+  the active tree only when the window is untiled), mirroring the C
+  `window_manager_find_managed_window`, and pointed the three ops at it. Matches the
+  session-52 `--ratio` fix and the existing `resize_tiled_window` precedent.
+- Added `window_swap_uses_focused_windows_own_space` (two windows on space 2 while
+  space 1 is active; the swap must land on space 2).
+- **Verified live on the remote (macOS 26.5.1):** with the active space on display 2
+  (sid 92), `window --focus 901; window --swap 902` — both on display 1's non-active
+  space — swapped their frames ((67,45)↔(769,45)). Before the fix this was a no-op
+  (the swap hit the empty active space).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (174 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 52) — pure `window --ratio` (abs/rel) + own-space fix + verified live
 
@@ -72,8 +91,8 @@ reconstructing context.
   `cannot adjust ratio of a non-managed window.` (exit 1). Fixed to resolve the
   focused window's own space via `window_space` before adjusting; added
   `window_ratio_uses_focused_windows_own_space` (window on a non-active space) to
-  lock it in. (The same latent active-vs-own-space issue exists in Swap/Warp/Stack;
-  left as-is — out of scope, and normally the focused window is on the active space.)
+  lock it in. (The same latent active-vs-own-space issue in Swap/Warp/Stack was
+  fixed in session 53 via the shared `window_tree_mut` helper.)
 - Added `adjust_window_ratio_abs_and_rel` and `adjust_window_ratio_root_or_unknown_window_fails`
   (layout) plus `window_ratio_dispatches_and_errors_on_root` (runtime).
 - **Verified live on the remote (macOS 26.5.1):** window 901 (top of a horizontal

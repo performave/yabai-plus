@@ -569,6 +569,19 @@ impl AppState {
             .ok_or_else(|| "active space has no layout".to_string())
     }
 
+    /// The mutable tree of the space that contains `window_id`, falling back to the
+    /// active space's tree when the window isn't tiled anywhere. Same-space window
+    /// ops (swap/warp/stack) must anchor to the *focused window's own* space — the C
+    /// `window_manager_find_managed_window` — not the globally active space, which
+    /// can differ when the focused window is on another display.
+    fn window_tree_mut(&mut self, window_id: u32) -> Result<&mut Tree, String> {
+        match self.window_space(window_id) {
+            // `window_space` only returns sids present in `spaces`.
+            Some(sid) => Ok(self.spaces.get_mut(&sid).unwrap()),
+            None => self.active_tree_mut(),
+        }
+    }
+
     /// Resize the BSP tree containing `window_id`, if the window is currently
     /// tiled. Public for daemon-side mouse-drag resize, which can target a visible
     /// space on any display rather than only the globally active space.
@@ -1001,17 +1014,18 @@ impl AppState {
                 WindowAction::Swap(sel) => {
                     let other = self.resolve_window(sel)?;
                     let focused = self.require_focused()?;
-                    self.active_tree_mut()?.swap_windows(focused, other);
+                    self.window_tree_mut(focused)?.swap_windows(focused, other);
                 }
                 WindowAction::Warp(sel) => {
                     let target = self.resolve_window(sel)?;
                     let focused = self.require_focused()?;
-                    self.active_tree_mut()?.warp_window(focused, target);
+                    self.window_tree_mut(focused)?.warp_window(focused, target);
                 }
                 WindowAction::Stack(sel) => {
                     let target = self.resolve_window(sel)?;
                     let focused = self.require_focused()?;
-                    self.active_tree_mut()?.stack_window_onto(focused, target);
+                    self.window_tree_mut(focused)?
+                        .stack_window_onto(focused, target);
                 }
                 WindowAction::Minimize => {
                     // Validate a window is focused; the macOS layer (daemon) sets
@@ -2592,6 +2606,25 @@ mod tests {
         );
         let tree = state.space(1).unwrap();
         assert_eq!(tree.window_list(), vec![2, 1]);
+    }
+
+    #[test]
+    fn window_swap_uses_focused_windows_own_space() {
+        // Windows live on space 2 while space 1 is active. Before the own-space fix,
+        // --swap acted on the (empty) active space 1 and silently did nothing.
+        let mut state = state_with_space();
+        state.add_space(2, Area::new(0.0, 0.0, 1000.0, 1000.0));
+        state.set_active_space(2);
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(2));
+        state.set_active_space(1);
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--swap", "1"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(2).unwrap().window_list(), vec![2, 1]);
     }
 
     #[test]

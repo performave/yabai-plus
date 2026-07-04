@@ -721,6 +721,37 @@ impl Tree {
         }
     }
 
+    /// `space_manager_toggle_window_split`: flip the split axis of a window's
+    /// parent node (`SPLIT_Y` <-> `SPLIT_X`) in a BSP view, then re-tile —
+    /// balancing the whole tree when auto-balance is on, else just recomputing the
+    /// parent subtree. Returns `true` when a split was toggled (BSP layout and the
+    /// window's node has a parent); a no-op returning `false` otherwise, matching
+    /// the C guard `view->layout == VIEW_BSP && window_node_is_intermediate(node)`.
+    pub fn toggle_window_split(&mut self, window_id: u32) -> bool {
+        if self.layout != ViewType::Bsp {
+            return false;
+        }
+        let Some(node_id) = self.find_window_node(window_id) else {
+            return false;
+        };
+        let Some(parent_id) = self.nodes[node_id].parent else {
+            return false;
+        };
+        let parent = &mut self.nodes[parent_id];
+        parent.split = if parent.split == NodeSplit::Vertical {
+            NodeSplit::Horizontal
+        } else {
+            NodeSplit::Vertical
+        };
+        if self.config.auto_balance != NodeSplit::None {
+            self.balance(self.config.auto_balance);
+            self.update(self.root);
+        } else {
+            self.update(parent_id);
+        }
+        true
+    }
+
     /// `window_node_equalize`: reset matching splits to the default ratio.
     pub fn equalize(&mut self, id: NodeId, axis_flag: NodeSplit) {
         if let Some(l) = self.nodes[id].left {

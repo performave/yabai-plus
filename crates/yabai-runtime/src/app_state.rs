@@ -1058,8 +1058,14 @@ impl AppState {
                         // toggled back off). Mirrors how minimize is handled.
                         self.require_focused()?;
                     }
-                    // Other toggles (sticky/split/shadow) need state the pure /
-                    // macOS layers don't model yet.
+                    "split" => {
+                        // Pure BSP tree op: flip the window's parent split axis.
+                        // A no-op on a lone/root window or a non-BSP space, like C.
+                        let focused = self.require_focused()?;
+                        self.active_tree_mut()?.toggle_window_split(focused);
+                    }
+                    // Other toggles (sticky/shadow) are intercepted for the SA in
+                    // the daemon before dispatch; anything else is unmodeled.
                     _ => return Err(format!("window toggle '{name}' not yet handled")),
                 },
                 WindowAction::Resize { handle, dw, dh } => {
@@ -2599,6 +2605,45 @@ mod tests {
         let target = tree.find_window_node(3).unwrap();
         assert_eq!(tree.node(target).window_list, vec![3, 1]);
         assert_eq!(tree.node(target).window_order[0], 1);
+    }
+
+    #[test]
+    fn window_toggle_split_flips_parent_axis() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(2));
+
+        // The two windows share a parent split node; `--toggle split` flips its
+        // axis, and a second toggle restores it.
+        let before = state.window_split_info(2).0;
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--toggle", "split"])),
+            Ok(None)
+        );
+        let after = state.window_split_info(2).0;
+        assert_ne!(before, after);
+        assert!(matches!(after, "vertical" | "horizontal"));
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--toggle", "split"])),
+            Ok(None)
+        );
+        assert_eq!(state.window_split_info(2).0, before);
+    }
+
+    #[test]
+    fn window_toggle_split_is_noop_on_root_window() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.set_focused_window(Some(1));
+
+        // A lone (root) window has no parent split; the toggle is a silent no-op.
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--toggle", "split"])),
+            Ok(None)
+        );
+        assert_eq!(state.window_split_info(1).0, "none");
     }
 
     #[test]

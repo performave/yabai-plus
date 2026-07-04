@@ -44,7 +44,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 167 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 169 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -55,6 +55,27 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 51) — pure `window --toggle split` + verified live
+
+- Implemented `window --toggle split`, previously an unhandled toggle
+  (`window toggle 'split' not yet handled`). It's a pure BSP tree op, so it lives
+  in `yabai-core`: `Tree::toggle_window_split(window_id)` mirrors the C
+  `space_manager_toggle_window_split` — BSP-only, flips the window's **parent**
+  node split axis (`SPLIT_Y`↔`SPLIT_X`), then re-tiles (balances the whole tree
+  when auto-balance is on, else recomputes the parent subtree). `dispatch_window`'s
+  `Toggle("split")` arm calls it on the focused window; a lone/root window or a
+  non-BSP space is a silent no-op, matching C's
+  `window_node_is_intermediate` guard.
+- Added `window_toggle_split_flips_parent_axis` (flip + restore round-trip) and
+  `window_toggle_split_is_noop_on_root_window`.
+- **Verified live on the remote (macOS 26.5.1):** a side-by-side tiled pair (903 at
+  x769, 902 at x1120, both `split vertical`) → `window --toggle split` re-tiled them
+  stacked (903 top y501 h215, 902 bottom y729 h215, both `split horizontal`); a
+  second toggle restored `vertical`. The daemon flushed the new frames to screen
+  (query frames changed), confirming the pure op rides the existing re-tile path.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (169 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 50) — document + de-risk display reconfiguration signals; clippy-clean
 

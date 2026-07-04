@@ -14,8 +14,8 @@ pub use command::{
 };
 pub use geometry::{Area, Direction, Point, Split};
 pub use layout::{
-    Child, InsertionPolicy, LayoutConfig, Node, NodeId, NodeSplit, Tree, ViewType, WindowFrame,
-    ZoomKind,
+    Child, InsertDirection, InsertionPolicy, LayoutConfig, Node, NodeId, NodeSplit, Tree, ViewType,
+    WindowFrame, ZoomKind,
 };
 pub use parser::{
     KeyValue, Selector, ValueType, parse_auto_balance, parse_direction, parse_insertion_policy,

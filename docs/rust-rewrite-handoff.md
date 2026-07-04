@@ -44,7 +44,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 174 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 178 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -55,6 +55,36 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 54) — pure `window --insert` (north/east/south/west/stack) + verified live
+
+- Implemented `window --insert <dir>`, previously an unhandled `Raw` action. Pure
+  BSP op mirroring the C `window_manager_set_window_insertion`: marks the focused
+  window's node as the pending insertion point so the *next* added window splits in
+  the chosen direction (or stacks). New `yabai-core` `InsertDirection`
+  (north/east/south/west/stack) + `Tree::set_window_insertion`, which sets the node's
+  `split`/`child`/`insert_dir` and the view `insertion_point`, clears any prior
+  marker on a different window, and toggles off when the same direction is
+  re-selected. Direction→(split,child): N=(horizontal,first), E=(vertical,second),
+  S=(horizontal,second), W=(vertical,first); stack marks `insert_dir=STACK`.
+- The consumption side was already present (`pick_insertion_leaf` honors
+  `insertion_point`, `resolve_split`/`split_node` honor the node's `split`/`child`);
+  added the one missing piece — `add_window` now stacks onto the target leaf when its
+  `insert_dir == STACK` instead of splitting (C `view_add_window_node` `do_stack`).
+- `dispatch_window` handles `Raw { command: "--insert", arg }` on the focused
+  window's own space, with the C error strings: `the acting window is not within a
+  bsp space.` (non-BSP), `the acting window is not managed.` (untiled), and
+  `value '<x>' is not a valid option for DIR_SEL` (bad direction).
+- Added layout tests (directional placement E/W/N, stack join, toggle-off/unknown)
+  and a runtime test (dispatch + east placement + bad-arg error).
+- **Verified live on the remote (macOS 26.5.1):** focused window 902 (x769, full
+  689-wide right column), `window --insert east`, then opened a new Finder window —
+  it landed **east**: 902 shrank to x769 w338 and the new window took x1120 w338 (the
+  east half), the rest of the layout untouched. Confirms the marker is set and
+  honored by the daemon's new-window reconcile path (`assign_window_to_space` →
+  `add_window`).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (178 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 53) — `window --swap`/`--warp`/`--stack` own-space fix + verified live
 

@@ -66,6 +66,36 @@ pub enum Child {
     First,
 }
 
+/// The `window --insert <dir>` selector: where the next inserted window lands
+/// relative to the target, or `Stack` to stack onto it. Mirrors the C
+/// north/east/south/west/stack insert selectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertDirection {
+    North,
+    East,
+    South,
+    West,
+    Stack,
+}
+
+/// `insert_dir` sentinel for a pending stack insert (the directional values
+/// `1..=4` are internal to [`InsertDirection::code`]).
+const INSERT_DIR_STACK: i32 = 5;
+
+impl InsertDirection {
+    /// The `insert_dir` marker value stored on a node, matching the C's per-node
+    /// direction tag so re-selecting the same direction toggles it off.
+    fn code(self) -> i32 {
+        match self {
+            InsertDirection::North => 1,
+            InsertDirection::East => 2,
+            InsertDirection::South => 3,
+            InsertDirection::West => 4,
+            InsertDirection::Stack => INSERT_DIR_STACK,
+        }
+    }
+}
+
 /// Where a new window is inserted when no explicit insertion point is set.
 /// Mirrors `enum window_insertion_point`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,6 +601,17 @@ impl Tree {
 
         match self.layout {
             ViewType::Bsp => {
+                // A `--insert stack` marker stacks the new window onto the target
+                // leaf instead of splitting it (C `view_add_window_node` do_stack).
+                if let Some(point) = self.insertion_point {
+                    if let Some(leaf) = self.find_window_node(point) {
+                        if self.nodes[leaf].insert_dir == INSERT_DIR_STACK {
+                            self.nodes[leaf].insert_dir = 0;
+                            self.stack_window(leaf, window_id);
+                            return Some(leaf);
+                        }
+                    }
+                }
                 let leaf = self.pick_insertion_leaf(focused);
                 self.split_node(leaf, window_id);
                 if self.config.auto_balance != NodeSplit::None {
@@ -771,6 +812,56 @@ impl Tree {
         };
         self.nodes[parent_id].ratio = new_ratio.clamp(0.1, 0.9);
         self.update(parent_id);
+        true
+    }
+
+    /// `window_manager_set_window_insertion`: mark `window_id`'s node as the
+    /// pending insertion point so the next added window splits in `insert`'s
+    /// direction (or stacks onto it). Re-selecting the current direction toggles
+    /// the marker off, and any prior insertion point on a different window is
+    /// cleared first, mirroring the C. Returns `false` if the window isn't in this
+    /// tree (the caller maps that to the "not managed" error); the non-BSP guard is
+    /// the caller's, matching the C's two distinct error strings.
+    pub fn set_window_insertion(&mut self, window_id: u32, insert: InsertDirection) -> bool {
+        let Some(node_id) = self.find_window_node(window_id) else {
+            return false;
+        };
+        let code = insert.code();
+
+        // Clear a stale insertion marker left on a different window's node.
+        if let Some(point) = self.insertion_point {
+            if point != window_id {
+                if let Some(prev) = self.find_window_node(point) {
+                    let prev_node = &mut self.nodes[prev];
+                    prev_node.split = NodeSplit::None;
+                    prev_node.child = Child::None;
+                    prev_node.insert_dir = 0;
+                }
+            }
+        }
+
+        // Re-selecting the current direction clears the marker (toggle off).
+        if code == self.nodes[node_id].insert_dir {
+            let node = &mut self.nodes[node_id];
+            node.split = NodeSplit::None;
+            node.child = Child::None;
+            node.insert_dir = 0;
+            self.insertion_point = None;
+            return true;
+        }
+
+        let (split, child) = match insert {
+            InsertDirection::North => (NodeSplit::Horizontal, Child::First),
+            InsertDirection::East => (NodeSplit::Vertical, Child::Second),
+            InsertDirection::South => (NodeSplit::Horizontal, Child::Second),
+            InsertDirection::West => (NodeSplit::Vertical, Child::First),
+            InsertDirection::Stack => (NodeSplit::None, Child::None),
+        };
+        let node = &mut self.nodes[node_id];
+        node.split = split;
+        node.child = child;
+        node.insert_dir = code;
+        self.insertion_point = node.window_order.first().copied();
         true
     }
 
@@ -1387,6 +1478,62 @@ mod tests {
         // A lone root window has no parent, and an unknown window isn't in the tree.
         assert!(!tree.adjust_window_ratio(1, false, 0.7));
         assert!(!tree.adjust_window_ratio(99, false, 0.7));
+    }
+
+    #[test]
+    fn set_window_insertion_places_next_window_directionally() {
+        for (dir, east_ish) in [
+            (InsertDirection::East, true),
+            (InsertDirection::West, false),
+        ] {
+            let mut tree = bsp();
+            tree.add_window(1, None);
+            assert!(tree.set_window_insertion(1, dir));
+            tree.add_window(2, None);
+            let cap = tree.capture();
+            let f1 = cap.iter().find(|f| f.window_id == 1).unwrap();
+            let f2 = cap.iter().find(|f| f.window_id == 2).unwrap();
+            // A vertical split keeps both at the same y; the new window sits on the
+            // requested side.
+            assert!((f1.area.y - f2.area.y).abs() < 1e-3);
+            assert_eq!(f2.area.x > f1.area.x, east_ish, "dir {dir:?}");
+        }
+
+        // North puts the new window above (smaller y) in a horizontal split.
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        assert!(tree.set_window_insertion(1, InsertDirection::North));
+        tree.add_window(2, None);
+        let cap = tree.capture();
+        let f1 = cap.iter().find(|f| f.window_id == 1).unwrap();
+        let f2 = cap.iter().find(|f| f.window_id == 2).unwrap();
+        assert!((f1.area.x - f2.area.x).abs() < 1e-3);
+        assert!(f2.area.y < f1.area.y);
+    }
+
+    #[test]
+    fn set_window_insertion_stack_joins_target_leaf() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        assert!(tree.set_window_insertion(1, InsertDirection::Stack));
+        tree.add_window(2, None);
+        // The new window stacks into window 1's leaf instead of splitting.
+        let node = tree.find_window_node(1).unwrap();
+        assert_eq!(tree.find_window_node(2), Some(node));
+        assert_eq!(tree.node(node).window_list.len(), 2);
+    }
+
+    #[test]
+    fn set_window_insertion_toggles_off_and_rejects_unknown() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        assert!(tree.set_window_insertion(1, InsertDirection::East));
+        assert_eq!(tree.insertion_point, Some(1));
+        // Re-selecting the same direction clears the marker.
+        assert!(tree.set_window_insertion(1, InsertDirection::East));
+        assert_eq!(tree.insertion_point, None);
+        // An unknown window can't be marked.
+        assert!(!tree.set_window_insertion(99, InsertDirection::East));
     }
 
     #[test]

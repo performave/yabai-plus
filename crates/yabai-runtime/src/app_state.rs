@@ -4049,6 +4049,8 @@ mod tests {
                 "opacity=0.5",
                 "sub-layer=above",
                 "grid=2:2:0:1:1:1",
+                "display=2",
+                "space=2",
             ]))
             .unwrap();
 
@@ -4062,6 +4064,8 @@ mod tests {
         assert_eq!(applications[0].effects.opacity, Some(0.5));
         assert_eq!(applications[0].effects.layer, Some(Layer::Above));
         assert_eq!(applications[0].effects.grid, Some([2, 2, 0, 1, 1, 1]));
+        assert_eq!(applications[0].effects.display.as_deref(), Some("2"));
+        assert_eq!(applications[0].effects.space.as_deref(), Some("2"));
     }
 
     #[test]

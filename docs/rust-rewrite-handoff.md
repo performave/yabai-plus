@@ -46,8 +46,9 @@ reconstructing context.
   one-shot removal, regex matching, live pure effects for `manage`
   (`manage=off` floats/untiles, `manage=on` retiles) and `scratchpad=`
   (assigns/floats), plus best-effort SA-backed `sticky`, `sub-layer`, and
-  `opacity` effects and AX-backed `grid=` placement for new windows and
-  `rule --apply`; remaining rule effects are parsed/stored but deferred. Per-space
+  `opacity` effects, AX-backed `grid=` placement, and SA-backed `display=`/`space=`
+  moves for new windows and `rule --apply`; remaining rule effects are parsed/stored
+  but deferred. Per-space
   `space --gap`/`--padding` (abs/rel) are dispatched and
   survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
   `window --raise`/`--lower` reorder a window's z-stacking (above/below an optional
@@ -65,6 +66,32 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 74) — rule `display=` / `space=` effects via SA
+
+- Extended daemon-boundary rule effects to `space=<sel>` and `display=<sel>`.
+  Stored raw selectors are parsed at the live daemon boundary, `space` wins over
+  `display` like C, and the existing SA `move_window_to_space` opcode performs
+  the physical move. The pure model is reassigned immediately so subsequent query
+  and flush state matches the move.
+- Honored the rule `^` follow-space flag (and the C fullscreen-follow condition
+  when present) as a best-effort destination focus via SA `focus_space` plus the
+  existing cross-display activation helper.
+- Kept failures best-effort, consistent with the existing sticky/layer/opacity/grid
+  rule boundary: `rule --apply` continues applying later effects instead of turning
+  an individual macOS boundary failure into a command failure.
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with `com.test.yabai`, woke the display with `caffeinate`, and confirmed
+  SA healthy. Isolated Calculator daemon on `/tmp/yabai_rulespace.socket` applied
+  `rule --apply app=^Calculator$ space=61`; daemon query reported Calculator window
+  `1516` on `space=61 display=1`, and `--experimental-windows-on-space 61` contained
+  `1516`. Then applied `rule --apply app=^Calculator$ display=2`; daemon query
+  reported `space=117 display=2`, and SkyLight readback for space `117` contained
+  `1516`. Restored with `space=1`, confirmed `space=1 display=1`, stopped the
+  isolated daemon, and quit Calculator.
+- Verification: `cargo fmt --all`; targeted runtime test; `cargo test -p yabai`;
+  `cargo test --workspace` (193 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-04 (session 73) — rule `grid=` effect via daemon boundary
 
@@ -1359,8 +1386,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
     active/normal opacity on focus change; mouse drag-to-move/resize/drop
     (`mouse_modifier` + left/right drag, `mouse_action1`/`mouse_action2`,
     `mouse_drop_action`) via an active `CGEventTap`; `rule` effects for
-    `manage=`, `scratchpad=`, `sticky=`, `sub-layer=`, `opacity=`, and `grid=`
-    on new windows and `rule --apply`.
+    `manage=`, `scratchpad=`, `sticky=`, `sub-layer=`, `opacity=`, `grid=`,
+    `display=`, and `space=` on new windows and `rule --apply`.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 

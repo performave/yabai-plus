@@ -1973,6 +1973,7 @@ fn apply_rule_effects_at_boundary(
     for application in applications {
         let wid = application.window_id;
         let effects = &application.effects;
+        let _ = move_window_for_rule_effect(sa, runtime, wid, effects);
         if let Some(sticky) = effects.sticky {
             let _ = window_set_sticky_via_sa(sa, runtime, wid, sticky, application.sid);
         }
@@ -1987,6 +1988,37 @@ fn apply_rule_effects_at_boundary(
             let _ = window_grid_for_id(runtime, display_frames, wid, spec);
         }
     }
+}
+
+fn move_window_for_rule_effect(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    wid: u32,
+    effects: &yabai_core::RuleEffects,
+) -> Result<(), String> {
+    let sid = if let Some(space) = &effects.space {
+        let selector = parse_selector(space);
+        runtime.state.resolve_space(Some(&selector))?
+    } else if let Some(display) = &effects.display {
+        let selector = parse_selector(display);
+        let did = runtime.state.resolve_display(Some(&selector))?;
+        runtime
+            .state
+            .display_active_space_id(did)
+            .ok_or_else(|| format!("could not locate the active space of display '{did}'.\n"))?
+    } else {
+        return Ok(());
+    };
+
+    sa.move_window_to_space(sid, wid)
+        .map_err(|error| format!("could not move window to space: {error}\n"))?;
+    let _ = runtime.state.assign_window_to_space(wid, sid);
+    if effects.follow_space || effects.fullscreen == Some(true) {
+        let _ = sa.focus_space(sid);
+        let _ = activate_space_display_if_cross(sid);
+        runtime.state.set_active_space(sid);
+    }
+    Ok(())
 }
 
 /// Set the acting window's opacity through the scripting addition, mirroring the
@@ -3211,8 +3243,8 @@ fn geometry_signal_frame_changed(signal: SignalEvent, expected: Area, actual: Ar
 
 /// Apply matching window rules to a window. Currently enacts the `manage` effect
 /// (off -> float, on -> tile), scratchpad assignment, and SA-backed sticky,
-/// sub-layer, opacity, plus AX-backed grid placement. Other effects
-/// (display/space/fullscreen) are parsed and stored but their application is
+/// sub-layer, opacity, display/space movement, plus AX-backed grid placement.
+/// Other effects (fullscreen) are parsed and stored but their application is
 /// deferred. Role/subrole are unknown at the AX layer here, so rules filtering on
 /// them will not match yet.
 fn apply_window_rules(

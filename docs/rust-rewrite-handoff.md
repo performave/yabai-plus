@@ -63,6 +63,25 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 67) — typed `window --sub-layer` command model
+
+- Promoted `window --sub-layer below|normal|above|auto` from a raw string action
+  into the typed Rust command model (`WindowAction::SubLayer(Layer)`), reusing the
+  existing `Layer` enum from rule effects. The parser now validates the closed
+  value set up front and reports the standard unknown-value parse error for bad
+  values.
+- Simplified the daemon SA interceptor to consume the typed layer value via
+  `Layer::as_str()`; valid live behavior is unchanged (`set_layer`, no reflow).
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with the stable test identifier, SA healthy. Rust WM daemon on
+  `/tmp/yabai_layer.socket`; focused Finder window `1404`, ran
+  `window --sub-layer below` and `window --sub-layer normal`, then confirmed the
+  daemon remained responsive with `query --windows` (`17` windows). Isolated daemon
+  was stopped afterward.
+- Verification: `cargo fmt --all`; targeted parser/daemon tests;
+  `cargo test --workspace` (191 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-04 (session 66) — typed `window --opacity <float>` command model
 
 - Promoted `window --opacity <float>` from a raw string action into the typed Rust
@@ -1285,11 +1304,11 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    through the SA (`set_opacity` + `config.window_opacity_duration`), verified live
    via the `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback.
    `window --display`
-   (session 30), `--sub-layer below|normal|above|auto` (SA `set_layer`), `--toggle
+   (session 30), `--sub-layer below|normal|above|auto` (typed parser action + SA
+   `set_layer`), `--toggle
    sticky` (SA `set_sticky` + untile/re-tile) and `--toggle shadow` (SA `set_shadow`)
-   are all wired through the SA and verified live (session 37); the parser already
-   produces `--sub-layer` as `WindowAction::Raw`, so no grammar change was needed
-   (the C command is `--sub-layer`, not `--layer`). `window --grid r:c:x:y:w:h`
+   are all wired through the SA and verified live (sessions 37/67; the C command
+   is `--sub-layer`, not `--layer`). `window --grid r:c:x:y:w:h`
    places a floating/unmanaged window on a grid over its display's usable area
    (pure `grid_frame` + `try_window_grid` glue, session 56, verified live; a managed
    window is rejected). `window --move abs|rel:dx:dy` repositions a floating/unmanaged

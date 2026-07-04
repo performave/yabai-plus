@@ -1854,14 +1854,15 @@ fn try_scripting_addition(
                             *opacity,
                         ));
                     }
-                    // `window --sub-layer below|normal|above|auto` sets the window's
-                    // SkyLight sub-level through the SA (purely visual, no re-tile).
-                    WindowAction::Raw { command, arg } if command == "--sub-layer" => {
+                    // `window --sub-layer below|normal|above|auto` sets the
+                    // window's SkyLight sub-level through the SA (purely visual,
+                    // no re-tile).
+                    WindowAction::SubLayer(layer) => {
                         return Some(window_sub_layer_via_sa(
                             sa,
                             runtime,
                             cmd.target.as_ref(),
-                            arg,
+                            layer.as_str(),
                         ));
                     }
                     // `window --scratchpad [label|recover]` assigns/removes a

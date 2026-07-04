@@ -16,6 +16,7 @@ use crate::parser::{
     parse_layout, parse_resize_handle, parse_selector, parse_split_type, parse_value_type,
     parse_window_placement,
 };
+use crate::rule::Layer;
 use std::fmt;
 
 /// A top-level message domain. Mirrors the `DOMAIN_*` dispatch in
@@ -278,8 +279,8 @@ pub struct WindowCommand {
 }
 
 /// A `window` domain action. Covers the structurally-clean subset; richer
-/// actions (`--sub-layer`, `--scratchpad`, `--insert`) are carried as raw
-/// argument strings until their effects live in `yabai-core`.
+/// actions (`--scratchpad`, `--insert`) are carried as raw argument strings until
+/// their effects live in `yabai-core`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowAction {
     Focus(Option<Selector>),
@@ -298,6 +299,7 @@ pub enum WindowAction {
     Ratio { kind: ValueType, ratio: f32 },
     Grid([i32; 6]),
     Opacity(f32),
+    SubLayer(Layer),
     Toggle(String),
     Raw { command: String, arg: String },
 }
@@ -406,6 +408,10 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
                 require(iter.next(), command, Domain::Window)?,
                 command,
             )?),
+            "--sub-layer" => WindowAction::SubLayer(parse_sub_layer_arg(
+                require(iter.next(), command, Domain::Window)?,
+                command,
+            )?),
             "--toggle" => {
                 WindowAction::Toggle(require(iter.next(), command, Domain::Window)?.clone())
             }
@@ -416,7 +422,7 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
                     _ => String::new(),
                 },
             },
-            "--sub-layer" | "--insert" => WindowAction::Raw {
+            "--insert" => WindowAction::Raw {
                 command: command.clone(),
                 arg: require(iter.next(), command, Domain::Window)?.clone(),
             },
@@ -512,6 +518,16 @@ fn parse_opacity_arg(arg: &str, command: &str) -> Result<f32, ParseError> {
         Ok(opacity)
     } else {
         Err(invalid(arg, command, Domain::Window))
+    }
+}
+
+fn parse_sub_layer_arg(arg: &str, command: &str) -> Result<Layer, ParseError> {
+    match arg {
+        "below" => Ok(Layer::Below),
+        "normal" => Ok(Layer::Normal),
+        "above" => Ok(Layer::Above),
+        "auto" => Ok(Layer::Auto),
+        _ => Err(invalid(arg, command, Domain::Window)),
     }
 }
 
@@ -1321,6 +1337,9 @@ mod tests {
 
         let cmd = parse_window(&toks(&["--opacity", "0.75"])).unwrap();
         assert_eq!(cmd.actions, vec![WindowAction::Opacity(0.75)]);
+
+        let cmd = parse_window(&toks(&["--sub-layer", "above"])).unwrap();
+        assert_eq!(cmd.actions, vec![WindowAction::SubLayer(Layer::Above)]);
     }
 
     #[test]
@@ -1335,6 +1354,12 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unknown value '1.5' given to command '--opacity' for domain 'window'"
+        );
+
+        let err = parse_window(&toks(&["--sub-layer", "front"])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unknown value 'front' given to command '--sub-layer' for domain 'window'"
         );
     }
 

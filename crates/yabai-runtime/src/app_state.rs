@@ -1641,7 +1641,7 @@ impl AppState {
         for index in remove.into_iter().rev() {
             self.rules.remove(index);
         }
-        self.apply_manage_effects_to_window(window_id, sid, &result);
+        self.apply_rule_effects_to_window(window_id, sid, &result);
         result
     }
 
@@ -1667,7 +1667,7 @@ impl AppState {
     fn apply_all_non_one_shot_rules_to_known_windows(&mut self) {
         for (window_id, app, title, sid) in self.windows_with_meta() {
             let effects = self.combined_rule_effects_for_window(&app, &title, "", "", false);
-            self.apply_manage_effects_to_window(window_id, sid, &effects);
+            self.apply_rule_effects_to_window(window_id, sid, &effects);
         }
     }
 
@@ -1682,7 +1682,7 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         for (window_id, sid) in matches {
-            self.apply_manage_effects_to_window(window_id, sid, &compiled.rule.effects);
+            self.apply_rule_effects_to_window(window_id, sid, &compiled.rule.effects);
         }
     }
 
@@ -1710,7 +1710,7 @@ impl AppState {
         };
         let effects = self.rules[index].rule.effects.clone();
         for (window_id, sid) in matches {
-            self.apply_manage_effects_to_window(window_id, sid, &effects);
+            self.apply_rule_effects_to_window(window_id, sid, &effects);
         }
         Ok(None)
     }
@@ -1738,10 +1738,13 @@ impl AppState {
             .position(|r| r.rule.label.as_deref() == Some(label))
     }
 
-    fn apply_manage_effects_to_window(&mut self, window_id: u32, sid: u64, effects: &RuleEffects) {
+    fn apply_rule_effects_to_window(&mut self, window_id: u32, sid: u64, effects: &RuleEffects) {
         if let Some(manage) = effects.manage {
             // manage=off -> floating (untiled); manage=on -> tiled.
             self.set_window_floating(window_id, !manage, sid);
+        }
+        if let Some(label) = &effects.scratchpad {
+            let _ = self.set_window_scratchpad(window_id, label.clone(), sid);
         }
     }
 
@@ -3912,6 +3915,45 @@ mod tests {
         let mut list = state.space(1).unwrap().window_list();
         list.sort_unstable();
         assert_eq!(list, vec![1, 2]);
+    }
+
+    #[test]
+    fn rule_apply_enacts_scratchpad_for_known_windows() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_window_meta(
+            1,
+            WindowMeta {
+                app: "Finder".to_string(),
+                title: "One".to_string(),
+                pid: 10,
+            },
+        );
+        state.set_window_meta(
+            2,
+            WindowMeta {
+                app: "Safari".to_string(),
+                title: "Two".to_string(),
+                pid: 20,
+            },
+        );
+
+        state
+            .handle_tokens(&toks(&[
+                "rule",
+                "--add",
+                "app=^Finder$",
+                "scratchpad=notes",
+            ]))
+            .unwrap();
+        state.handle_tokens(&toks(&["rule", "--apply"])).unwrap();
+
+        assert_eq!(state.window_scratchpad(1), Some("notes"));
+        assert_eq!(state.scratchpad_window("notes"), Some(1));
+        assert!(state.is_floating(1));
+        assert_eq!(state.space(1).unwrap().window_list(), vec![2]);
+        assert_eq!(state.window_scratchpad(2), None);
     }
 
     #[test]

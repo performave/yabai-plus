@@ -43,15 +43,17 @@ reconstructing context.
   worker thread). `mouse_follows_focus` warps the cursor to the focused window on
   focus.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
-  one-shot removal, regex matching, and the live `manage` effect (`manage=off`
-  floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. Per-space `space --gap`/`--padding` (abs/rel) are dispatched and
+  one-shot removal, regex matching, and live pure effects for `manage`
+  (`manage=off` floats/untiles, `manage=on` retiles) and `scratchpad=`
+  (assigns/floats); other rule effects are parsed/stored but deferred. Per-space
+  `space --gap`/`--padding` (abs/rel) are dispatched and
   survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
   `window --raise`/`--lower` reorder a window's z-stacking (above/below an optional
   reference window) through the SA `order_window` opcode. `window --scratchpad`
   assigns/removes/recovers scratchpads and `window --toggle <label>` hides/shows
-  them through the SA z-order opcodes.
-  191 workspace tests pass. The shipped C `make` flow is unchanged.
+  them through the SA z-order opcodes. Rule `scratchpad=` effects are applied in
+  the pure runtime for known windows.
+  192 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-04.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -62,6 +64,24 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 70) — pure rule `scratchpad=` effect application
+
+- Extended rule application beyond `manage=` for one pure runtime-owned effect:
+  `scratchpad=<label>`. Matching known windows are now assigned the scratchpad
+  label through `AppState::set_window_scratchpad`, which also floats/untile them,
+  matching the pure state side of C `window_manager_apply_rule_effects`.
+- Renamed the internal rule-effect applicator from `apply_manage_effects_to_window`
+  to `apply_rule_effects_to_window` and routed new-window rules, `rule --apply`,
+  label-based applies, and ad-hoc applies through it. Duplicate scratchpad labels
+  remain non-fatal, matching C's ignore-on-failure behavior.
+- Added `rule_apply_enacts_scratchpad_for_known_windows` covering a matching Finder
+  window becoming scratchpad/floating and leaving the tiled tree while a non-match
+  remains tiled.
+- Verification: `cargo fmt --all`; targeted rule tests; `cargo test --workspace`
+  (192 tests); `cargo clippy --workspace --all-targets` (clean);
+  `cargo build --release -p yabai`. No remote run: this is pure runtime state; the
+  SA show/hide/move behavior for scratchpads was already verified in session 62.
 
 ### 2026-07-04 (session 69) — typed `window --scratchpad` command model
 

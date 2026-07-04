@@ -10,7 +10,7 @@
 //! `&[String]` instead of replicating `get_token`'s NUL-delimited walk over a
 //! single buffer.
 
-use crate::layout::{Child, InsertionPolicy, NodeSplit, ViewType};
+use crate::layout::{Child, InsertDirection, InsertionPolicy, NodeSplit, ViewType};
 use crate::parser::{
     KeyValue, Selector, ValueType, parse_auto_balance, parse_insertion_policy, parse_key_value,
     parse_layout, parse_resize_handle, parse_selector, parse_split_type, parse_value_type,
@@ -279,8 +279,8 @@ pub struct WindowCommand {
 }
 
 /// A `window` domain action. Covers the structurally-clean subset; richer
-/// actions (`--scratchpad`, `--insert`) are carried as raw argument strings until
-/// their effects live in `yabai-core`.
+/// `--scratchpad` is carried as a raw argument string until its effects live in
+/// `yabai-core`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowAction {
     Focus(Option<Selector>),
@@ -300,6 +300,7 @@ pub enum WindowAction {
     Grid([i32; 6]),
     Opacity(f32),
     SubLayer(Layer),
+    Insert(InsertDirection),
     Toggle(String),
     Raw { command: String, arg: String },
 }
@@ -412,6 +413,10 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
                 require(iter.next(), command, Domain::Window)?,
                 command,
             )?),
+            "--insert" => WindowAction::Insert(parse_insert_arg(
+                require(iter.next(), command, Domain::Window)?,
+                command,
+            )?),
             "--toggle" => {
                 WindowAction::Toggle(require(iter.next(), command, Domain::Window)?.clone())
             }
@@ -421,10 +426,6 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
                     Some(tok) if !tok.starts_with("--") => iter.next().unwrap().clone(),
                     _ => String::new(),
                 },
-            },
-            "--insert" => WindowAction::Raw {
-                command: command.clone(),
-                arg: require(iter.next(), command, Domain::Window)?.clone(),
             },
             _ => {
                 return Err(ParseError::UnknownCommand {
@@ -527,6 +528,17 @@ fn parse_sub_layer_arg(arg: &str, command: &str) -> Result<Layer, ParseError> {
         "normal" => Ok(Layer::Normal),
         "above" => Ok(Layer::Above),
         "auto" => Ok(Layer::Auto),
+        _ => Err(invalid(arg, command, Domain::Window)),
+    }
+}
+
+fn parse_insert_arg(arg: &str, command: &str) -> Result<InsertDirection, ParseError> {
+    match arg {
+        "north" => Ok(InsertDirection::North),
+        "east" => Ok(InsertDirection::East),
+        "south" => Ok(InsertDirection::South),
+        "west" => Ok(InsertDirection::West),
+        "stack" => Ok(InsertDirection::Stack),
         _ => Err(invalid(arg, command, Domain::Window)),
     }
 }
@@ -1340,6 +1352,12 @@ mod tests {
 
         let cmd = parse_window(&toks(&["--sub-layer", "above"])).unwrap();
         assert_eq!(cmd.actions, vec![WindowAction::SubLayer(Layer::Above)]);
+
+        let cmd = parse_window(&toks(&["--insert", "stack"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Insert(InsertDirection::Stack)]
+        );
     }
 
     #[test]
@@ -1360,6 +1378,12 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unknown value 'front' given to command '--sub-layer' for domain 'window'"
+        );
+
+        let err = parse_window(&toks(&["--insert", "sideways"])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unknown value 'sideways' given to command '--insert' for domain 'window'"
         );
     }
 

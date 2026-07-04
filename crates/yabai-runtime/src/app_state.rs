@@ -16,10 +16,10 @@ use std::collections::{HashMap, HashSet};
 use regex_lite::Regex;
 use yabai_core::layout::HANDLE_ABS;
 use yabai_core::{
-    Area, Child, ConfigOp, Direction, DisplayAction, InsertDirection, Layer, Message,
-    MouseDropAction, NodeSplit, Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply,
-    RuleCommand, RuleEffects, Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree,
-    ValueType, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
+    Area, Child, ConfigOp, Direction, DisplayAction, Layer, Message, MouseDropAction, NodeSplit,
+    Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects,
+    Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree, ValueType, ViewType,
+    WindowAction, WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -1273,21 +1273,9 @@ impl AppState {
                         return Err("cannot adjust ratio of a root node.".to_string());
                     }
                 }
-                WindowAction::Raw { command, arg } if command == "--insert" => {
+                WindowAction::Insert(insert) => {
                     // Pure BSP op: mark the focused window's node as the pending
                     // insertion point. Acts on the window's own space.
-                    let insert = match arg.as_str() {
-                        "north" => InsertDirection::North,
-                        "east" => InsertDirection::East,
-                        "south" => InsertDirection::South,
-                        "west" => InsertDirection::West,
-                        "stack" => InsertDirection::Stack,
-                        other => {
-                            return Err(format!(
-                                "value '{other}' is not a valid option for DIR_SEL"
-                            ));
-                        }
-                    };
                     let focused = self.require_focused()?;
                     let Some(sid) = self.window_space(focused) else {
                         return Err("the acting window is not managed.".to_string());
@@ -1296,7 +1284,7 @@ impl AppState {
                     if tree.layout != ViewType::Bsp {
                         return Err("the acting window is not within a bsp space.".to_string());
                     }
-                    tree.set_window_insertion(focused, insert);
+                    tree.set_window_insertion(focused, *insert);
                 }
                 // Remaining window actions require the macOS layers.
                 _ => return Err("window action not yet handled by AppState".to_string()),
@@ -3146,10 +3134,13 @@ mod tests {
         let x2 = cap.iter().find(|f| f.window_id == 2).unwrap().area.x;
         assert!(x2 > x1, "new window should be east of the target");
 
-        // An invalid direction reports the C `DIR_SEL` error.
+        // Invalid directions now fail during typed command parsing.
         assert_eq!(
             state.handle_tokens(&toks(&["window", "--insert", "sideways"])),
-            Err("value 'sideways' is not a valid option for DIR_SEL".to_string())
+            Err(
+                "unknown value 'sideways' given to command '--insert' for domain 'window'"
+                    .to_string()
+            )
         );
     }
 

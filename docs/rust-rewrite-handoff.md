@@ -63,6 +63,22 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 68) — typed `window --insert <dir>` command model
+
+- Promoted `window --insert north|east|south|west|stack` from a raw string action
+  into the typed Rust command model (`WindowAction::Insert(InsertDirection)`),
+  reusing the existing layout enum. The parser now validates the closed direction
+  set up front and reports the standard unknown-value parse error for bad values.
+- Simplified `AppState` dispatch to consume the typed insert direction directly;
+  valid behavior is unchanged (pure BSP insertion marker on the focused window's
+  own space). Invalid-direction errors now fail at parse time instead of inside
+  the runtime action arm.
+- Verification: `cargo fmt --all`; targeted parser/runtime tests;
+  `cargo test --workspace` (191 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`. No new remote run: this is a pure
+  parser/runtime refactor of the already live-verified insert behavior from
+  session 54.
+
 ### 2026-07-04 (session 67) — typed `window --sub-layer` command model
 
 - Promoted `window --sub-layer below|normal|above|auto` from a raw string action
@@ -1308,7 +1324,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `set_layer`), `--toggle
    sticky` (SA `set_sticky` + untile/re-tile) and `--toggle shadow` (SA `set_shadow`)
    are all wired through the SA and verified live (sessions 37/67; the C command
-   is `--sub-layer`, not `--layer`). `window --grid r:c:x:y:w:h`
+   is `--sub-layer`, not `--layer`). `window --insert <dir>` is now a typed
+   parser action feeding the pure BSP insertion marker. `window --grid r:c:x:y:w:h`
    places a floating/unmanaged window on a grid over its display's usable area
    (pure `grid_frame` + `try_window_grid` glue, session 56, verified live; a managed
    window is rejected). `window --move abs|rel:dx:dy` repositions a floating/unmanaged

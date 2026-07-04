@@ -46,8 +46,10 @@ reconstructing context.
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
   deferred. Per-space `space --gap`/`--padding` (abs/rel) are dispatched and
   survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
-  184 workspace tests pass. The shipped C `make` flow is unchanged.
-- Last updated: 2026-07-03.
+  `window --raise`/`--lower` reorder a window's z-stacking (above/below an optional
+  reference window) through the SA `order_window` opcode.
+  188 workspace tests pass. The shipped C `make` flow is unchanged.
+- Last updated: 2026-07-04.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
     longer a primary constraint for this track.
@@ -57,6 +59,41 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 59) — `window --raise [sel]` / `--lower [sel]` via SA `order_window` + verified live
+
+- Implemented `window --raise`/`--lower`, previously parsed but unhandled (they fell
+  to the daemon's `_ => continue` and then `AppState`'s "not yet handled" arm). Faithful
+  to C `window --raise`/`--lower` (`message.c`), which take an **optional** window
+  selector and call `scripting_addition_order_window(acting_wid, ±1, reference_wid)` —
+  a bare command orders the acting window above/below **everything** (reference id 0),
+  a given selector orders it above/below that specific window.
+- **Parser:** `WindowAction::Raise`/`Lower` now carry `Option<Selector>` (was a bare
+  unit variant). The `--raise`/`--lower` arms peek for a trailing non-`--` token as the
+  optional reference selector, exactly like `--focus` (a following `--command` is not
+  consumed). New `window_raise_lower_optional_selector` parser test.
+- **Daemon glue:** the SA client already exposed `order_window(a, order, b)`
+  (`SA_OPCODE_WINDOW_ORDER = 0x10`), so the work was wiring — two new arms in
+  `try_scripting_addition` route `Raise(sel)`/`Lower(sel)` to a new `window_order_via_sa`
+  helper (`order` +1/-1), resolving the acting window and the optional reference (id 0
+  when bare), with the C `daemon_fail` strings ("could not raise/lower window with id
+  '…' due to an error with the scripting-addition."). Purely a z-order change, so no
+  re-tile. Since the interceptor runs unconditionally, a missing SA surfaces as the same
+  faithful error (the client fails to connect).
+- **Note:** a numeric window selector passes through unvalidated (`resolve_window`
+  `Selector::Index` returns the id as-is), so `--raise 999999` is a silent SA no-op —
+  consistent with the rest of the port's explicit-id handling, close to C's
+  `parse_window_selector` returning silently on an unfound window.
+- **Verified live on the remote (macOS 26):** WM daemon (`all`, gap/padding 10), two
+  floated overlapping Finder windows (1224/1225), z-order read via
+  `--experimental-windows-on-space 1` (`SLSCopyWindowsWithOptionsAndTags`, front→back).
+  - `window 1225 --lower 1224` → order `…1224, 1225…` (1225 sank behind 1224), exit 0;
+    `window 1225 --raise 1224` → order `…1225, 1224…` (1225 rose above 1224), exit 0.
+  - Bare `window 1224 --raise` moved 1224 to the front of the normal window level
+    (higher-level system windows correctly stayed ahead); bare `--lower` sank it to the
+    back — both exit 0.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (188 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-04 (session 58) — `window --resize handle:dw:dh` (managed fence + unmanaged AX) + verified live
 
@@ -1070,7 +1107,10 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    handle nudges its own-space fence(s) in the pure core (abs rejected); an
    **unmanaged** window is AX-resized by `try_window_resize` (`abs` sets the size
    origin-fixed, a directional handle grows/shrinks from the dragged edge per C
-   `window_manager_resize_window_relative_internal`). Still to do:
+   `window_manager_resize_window_relative_internal`). `window --raise [sel]`/`--lower
+   [sel]` reorder a window's z-stacking above/below an optional reference window (bare =
+   above/below everything) via the SA `order_window` opcode (session 59, verified live).
+   Still to do:
    remaining deminimize/native-fullscreen-exit selectors and scratchpad. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop

@@ -286,8 +286,8 @@ pub enum WindowAction {
     Close,
     Minimize,
     Deminimize,
-    Raise,
-    Lower,
+    Raise(Option<Selector>),
+    Lower(Option<Selector>),
     Swap(Selector),
     Warp(Selector),
     Stack(Selector),
@@ -318,8 +318,21 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
             "--close" => WindowAction::Close,
             "--minimize" => WindowAction::Minimize,
             "--deminimize" => WindowAction::Deminimize,
-            "--raise" => WindowAction::Raise,
-            "--lower" => WindowAction::Lower,
+            // `--raise`/`--lower` take an optional window selector: the acting
+            // window is ordered above/below it (bare = above/below everything).
+            // Mirrors the C `parse_window_selector(..., optional=true)`.
+            "--raise" => match iter.peek() {
+                Some(tok) if !tok.starts_with("--") => {
+                    WindowAction::Raise(Some(parse_selector(iter.next().unwrap())))
+                }
+                _ => WindowAction::Raise(None),
+            },
+            "--lower" => match iter.peek() {
+                Some(tok) if !tok.starts_with("--") => {
+                    WindowAction::Lower(Some(parse_selector(iter.next().unwrap())))
+                }
+                _ => WindowAction::Lower(None),
+            },
             "--focus" => {
                 // Optional selector argument.
                 match iter.peek() {
@@ -1268,6 +1281,29 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unknown command '--teleport' for domain 'window'"
+        );
+    }
+
+    #[test]
+    fn window_raise_lower_optional_selector() {
+        // Bare `--raise`/`--lower` carry no reference selector.
+        let cmd = parse_window(&toks(&["--raise"])).unwrap();
+        assert_eq!(cmd.actions, vec![WindowAction::Raise(None)]);
+        let cmd = parse_window(&toks(&["--lower"])).unwrap();
+        assert_eq!(cmd.actions, vec![WindowAction::Lower(None)]);
+
+        // A trailing non-`--` token is the reference window selector.
+        let cmd = parse_window(&toks(&["--raise", "42"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Raise(Some(Selector::Index(42)))]
+        );
+
+        // A following `--command` is not consumed as the selector.
+        let cmd = parse_window(&toks(&["--lower", "--focus"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Lower(None), WindowAction::Focus(None)]
         );
     }
 

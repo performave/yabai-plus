@@ -1749,6 +1749,27 @@ fn try_scripting_addition(
                             cmd.target.as_ref(),
                         ));
                     }
+                    // `window --raise [sel]` / `--lower [sel]` reorder the acting
+                    // window above/below the (optional) reference window through
+                    // the SA `order_window` opcode. Purely a z-order change.
+                    WindowAction::Raise(selector) => {
+                        return Some(window_order_via_sa(
+                            sa,
+                            runtime,
+                            cmd.target.as_ref(),
+                            selector.as_ref(),
+                            1,
+                        ));
+                    }
+                    WindowAction::Lower(selector) => {
+                        return Some(window_order_via_sa(
+                            sa,
+                            runtime,
+                            cmd.target.as_ref(),
+                            selector.as_ref(),
+                            -1,
+                        ));
+                    }
                     _ => continue,
                 }
             }
@@ -1785,6 +1806,35 @@ fn window_opacity_via_sa(
         .map_err(|_| {
             format!(
                 "could not change opacity of window with id '{wid}' due to an error with the scripting-addition.\n"
+            )
+        })
+}
+
+/// Reorder the acting window relative to an optional reference window through the
+/// scripting addition, mirroring the C `window --raise`/`--lower`
+/// (`scripting_addition_order_window(acting, ±1, reference)`). `order` is `+1`
+/// (raise/above) or `-1` (lower/below); a reference window id of `0` orders the
+/// acting window above/below everything. Faithful to the C `daemon_fail` strings.
+fn window_order_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    target: Option<&Selector>,
+    reference: Option<&Selector>,
+    order: i32,
+) -> Response {
+    let wid = runtime.state.resolve_window_selector(target)?;
+    // A bare command orders relative to all windows (reference id 0); a given
+    // selector orders relative to that specific window.
+    let reference_wid = match reference {
+        Some(selector) => runtime.state.resolve_window_selector(Some(selector))?,
+        None => 0,
+    };
+    let verb = if order >= 0 { "raise" } else { "lower" };
+    sa.order_window(wid, order, reference_wid)
+        .map(|()| None)
+        .map_err(|_| {
+            format!(
+                "could not {verb} window with id '{wid}' due to an error with the scripting-addition.\n"
             )
         })
 }

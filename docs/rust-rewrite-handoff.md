@@ -63,6 +63,27 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 64) — typed parser support for `window --deminimize <sel>`
+
+- Promoted the C-style trailing `window --deminimize <WINDOW_SEL>` shape into the
+  typed Rust command model. `WindowAction::Deminimize` now carries an optional
+  selector, and the parser accepts bare, leading-target (`window <sel>
+  --deminimize`), and trailing-target (`window --deminimize <sel>`) forms. This
+  closes the gap where the live daemon interceptor accepted the syntax, but the
+  pure parser/golden layer still treated the trailing selector as an unknown
+  command.
+- Simplified the daemon restore interceptor to consume the typed `Message::Window`
+  output: a command-specific trailing selector wins over the leading acting-window
+  target, mirroring C's per-command selector override model.
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with the stable test identifier, SA healthy. Rust WM daemon on
+  `/tmp/yabai_parser.socket`; minimized Finder window `1377`, confirmed it left
+  `query --windows`, then `window --deminimize first` restored it to the query.
+  Isolated remote daemon was stopped afterward.
+- Verification: `cargo fmt --all`; targeted parser/daemon tests;
+  `cargo test --workspace` (191 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-04 (session 63) — C-style trailing selectors for deminimize + native-fullscreen exit
 
 - Fixed a selector-grammar compatibility gap in the Rust WM daemon interceptors.
@@ -1251,8 +1272,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    the transient Mission Control animation isn't SSH-verifiable). `window --scratchpad`
    assign/remove/recover and `window --toggle <label>` hide/show are done and verified
    live (session 62). Deminimize/native-fullscreen exit support numeric/`first`/`last`
-   in both leading-target and C-style trailing-selector forms (session 63); broader
-   selector breadth is still deferred. Mouse
+   in both leading-target and C-style trailing-selector forms (sessions 63-64;
+   deminimize is parser-backed); broader selector breadth is still deferred. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified

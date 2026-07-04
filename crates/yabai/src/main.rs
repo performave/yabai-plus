@@ -1264,23 +1264,6 @@ fn is_window_close(tokens: &[String]) -> bool {
     )
 }
 
-/// Extract the target selector from a standalone `window` command that accepts
-/// either a leading target (`window <sel> --cmd`) or the C-style trailing target
-/// (`window --cmd <sel>`). The trailing form matters for commands such as
-/// `--deminimize`, where the target window is absent from the layout tree.
-fn standalone_window_selector(tokens: &[String], command: &str) -> Option<Option<Selector>> {
-    match tokens {
-        [domain, cmd] if domain == "window" && cmd == command => Some(None),
-        [domain, sel, cmd] if domain == "window" && cmd == command => {
-            Some(Some(parse_selector(sel)))
-        }
-        [domain, cmd, sel] if domain == "window" && cmd == command => {
-            Some(Some(parse_selector(sel)))
-        }
-        _ => None,
-    }
-}
-
 /// Extract the target from a standalone `window [sel] --deminimize` or
 /// `window --deminimize <sel>`. Minimized windows are no longer in the layout
 /// tree, so only numeric ids and registry order selectors are resolved here.
@@ -1288,8 +1271,14 @@ fn window_deminimize_target(
     tokens: &[String],
     minimized_ids: &[u32],
 ) -> Option<Result<u32, String>> {
-    let target = standalone_window_selector(tokens, "--deminimize")?;
-    Some(resolve_deminimize_target(target.as_ref(), minimized_ids))
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Deminimize(selector)] = cmd.actions.as_slice() else {
+        return None;
+    };
+    let target = selector.as_ref().or(cmd.target.as_ref());
+    Some(resolve_deminimize_target(target, minimized_ids))
 }
 
 fn resolve_deminimize_target(

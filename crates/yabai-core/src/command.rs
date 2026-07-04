@@ -285,7 +285,7 @@ pub enum WindowAction {
     Focus(Option<Selector>),
     Close,
     Minimize,
-    Deminimize,
+    Deminimize(Option<Selector>),
     Raise(Option<Selector>),
     Lower(Option<Selector>),
     Swap(Selector),
@@ -317,7 +317,12 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
         let action = match command.as_str() {
             "--close" => WindowAction::Close,
             "--minimize" => WindowAction::Minimize,
-            "--deminimize" => WindowAction::Deminimize,
+            "--deminimize" => match iter.peek() {
+                Some(tok) if !tok.starts_with("--") => {
+                    WindowAction::Deminimize(Some(parse_selector(iter.next().unwrap())))
+                }
+                _ => WindowAction::Deminimize(None),
+            },
             // `--raise`/`--lower` take an optional window selector: the acting
             // window is ordered above/below it (bare = above/below everything).
             // Mirrors the C `parse_window_selector(..., optional=true)`.
@@ -1200,6 +1205,19 @@ mod tests {
         let cmd = parse_window(&toks(&["5", "--minimize"])).unwrap();
         assert_eq!(cmd.target, Some(Selector::Index(5)));
         assert_eq!(cmd.actions, vec![WindowAction::Minimize]);
+
+        let cmd = parse_window(&toks(&["--deminimize"])).unwrap();
+        assert_eq!(cmd.actions, vec![WindowAction::Deminimize(None)]);
+
+        let cmd = parse_window(&toks(&["9", "--deminimize"])).unwrap();
+        assert_eq!(cmd.target, Some(Selector::Index(9)));
+        assert_eq!(cmd.actions, vec![WindowAction::Deminimize(None)]);
+
+        let cmd = parse_window(&toks(&["--deminimize", "first"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Deminimize(Some(Selector::First))]
+        );
     }
 
     #[test]

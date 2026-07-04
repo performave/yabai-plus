@@ -270,10 +270,6 @@ unsafe extern "C" {
         callback: CGDisplayReconfigurationCallBack,
         user_info: *mut c_void,
     ) -> i32;
-    fn CGDisplayRemoveReconfigurationCallback(
-        callback: CGDisplayReconfigurationCallBack,
-        user_info: *mut c_void,
-    ) -> i32;
 }
 
 extern "C" fn display_reconfiguration_callback(display: u32, flags: u32, _user_info: *mut c_void) {

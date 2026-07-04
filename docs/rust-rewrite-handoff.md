@@ -56,6 +56,36 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-03 (session 50) — document + de-risk display reconfiguration signals; clippy-clean
+
+- Retroactively documented commit `0036397` ("display reconfiguration signals"),
+  which had landed with no handoff entry: it wires
+  `CGDisplayRegisterReconfigurationCallback` (`yabai_macos::display`) into a callback
+  that fires `display_added` / `display_removed` / `display_moved` / `display_resized`
+  (mapped from `kCGDisplay{Add,Remove,Moved,DesktopShapeChanged}Flag`), each with
+  `YABAI_DISPLAY_ID` and a `refresh_live_display_state`, mirroring the C
+  `display_handler`. The commit also swapped the workspace observer's terminal
+  `CFRunLoopRun` for `[NSApp run]` so the WindowServer routes the CG reconfiguration
+  callback (the callback is registered on the main thread right before the run loop).
+- **De-risked the `CFRunLoopRun` → `[NSApp run]` swap** (the same main-thread run loop
+  session 17 fixed for NSWorkspace delivery): cleaned the two dead-code warnings it
+  left (the now-orphaned `CFRunLoopRun` extern in `workspace.rs` and the unused
+  `CGDisplayRemoveReconfigurationCallback` extern in `display.rs`) and fixed three
+  stale `CFRunLoopRun` doc comments. `cargo clippy --workspace --all-targets` is now
+  **fully clean (0 warnings)** — previously two dead-code warnings on every build.
+- **Verified live on the remote (macOS 26.5.1):** the WM daemon starts with the new
+  binary, `observe_display_reconfiguration().unwrap()` does **not** panic (so
+  `CGDisplayRegisterReconfigurationCallback` succeeds on macOS 26), and the daemon
+  runs stably under `[NSApp run]` while its worker-thread event loop keeps serving
+  socket commands (`query --displays` → 2 displays). That proves the regression-risk
+  part (callback registration + the run-loop swap). **Not verified:** the actual
+  `display_moved`/`display_resized` firing on a real reconfiguration — no
+  `displayplacer` on the remote and no safe way to force a resolution/arrangement
+  change over SSH without risking the display's state; the CG/NSWorkspace callbacks
+  also historically need a GUI session. Left for a physical two-display session.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (167 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 49) — cross-space / cross-display mouse drops + cleanup + verified live
 
 - Finished and cleaned up the **cross-space / cross-display tiled drag-drop** started
@@ -802,11 +832,14 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `application_front_switched` (with `YABAI_*` env vars, incl.
    `YABAI_RECENT_PROCESS_ID`), plus the context-free `space_changed`,
    `display_changed`, `system_woke`, `menu_bar_hidden_changed`, and
-   `dock_did_change_pref`, and `display_added`/`display_removed` (from the display
-   poll diff, not yet hot-plug-verified). `dock_did_restart` is wired but
-   unverified (likely needs `[NSApp run]`; see session 20). Still to do:
-   `display_moved`/`display_resized` (need a CGDisplayReconfiguration callback),
-   and `mission_control_enter`/`exit` (need SLS/private notifications).
+   `dock_did_change_pref`, and `display_added`/`display_removed`/`display_moved`/
+   `display_resized` — the latter four now via a `CGDisplayRegisterReconfiguration`
+   callback (commit `0036397`, documented in session 50); the callback registration
+   and the `CFRunLoopRun`→`[NSApp run]` swap are verified live on macOS 26, but the
+   actual moved/resized firing on a real reconfiguration is not yet verified (needs a
+   physical two-display resolution/arrangement change). `dock_did_restart` is wired
+   but unverified (needs `[NSApp run]`; see session 20). Still to do:
+   `mission_control_enter`/`exit` (need SLS/private notifications).
    The NSWorkspace-driven application signals (launch/terminate/activate/
    deactivate/hide/visible) and app filters are now verified live from a
    `gui/501` LaunchAgent daemon — see session 17, which also fixed the long-

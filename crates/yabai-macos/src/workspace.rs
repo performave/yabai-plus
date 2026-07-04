@@ -27,7 +27,6 @@ static WORKSPACE_EVENT_SENDERS: OnceLock<Mutex<Vec<Sender<WorkspaceEvent>>>> = O
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFRunLoopRun();
     fn CFRelease(cf: CFTypeRef);
     fn CFStringCreateWithCString(
         alloc: CFAllocatorRef,
@@ -367,7 +366,7 @@ pub fn observe_workspace(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
 
     // SAFETY: all Objective-C messages use documented selectors with matching
     // ABIs. The observer and notification name are intentionally kept alive for
-    // the run loop duration; `CFRunLoopRun` blocks until the thread is stopped.
+    // the run loop duration; `[NSApp run]` blocks until the thread is stopped.
     unsafe {
         let observer_alloc: Id = msg0(observer_class, sel(c"alloc"));
         let observer: Id = msg0(observer_alloc, sel(c"init"));

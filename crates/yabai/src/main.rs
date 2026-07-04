@@ -609,10 +609,10 @@ fn spawn_observer(pid: i32, tx: &Sender<WmWork>) {
 
 /// Bridge NSWorkspace events into the daemon channel. Returns the sender to hand
 /// to `observe_workspace`, which must run on the **main thread**: it blocks in
-/// `CFRunLoopRun`, and that main-thread run loop (set up by `NSApplicationLoad`)
-/// is the only one that services NSWorkspace notifications — mirroring the C
-/// daemon's `[NSApp run]` on its main thread while the event loop runs on a
-/// worker pthread.
+/// `[NSApp run]`, and that main-thread run loop (set up by `NSApplicationLoad`)
+/// is the only one that services NSWorkspace notifications and the
+/// CGDisplayReconfiguration callback — mirroring the C daemon's `[NSApp run]` on
+/// its main thread while the event loop runs on a worker pthread.
 fn start_workspace_bridge(tx: &Sender<WmWork>) -> Sender<WorkspaceEvent> {
     let (otx, orx) = channel::<WorkspaceEvent>();
     let tx = tx.clone();
@@ -3432,12 +3432,15 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
         }
     });
 
-    // Run the NSWorkspace observer on the main thread. It blocks in CFRunLoopRun,
+    // Run the NSWorkspace observer on the main thread. It blocks in `[NSApp run]`,
     // the only run loop that services NSWorkspace notifications (application
-    // launch/terminate/activate/deactivate/hide/unhide and active-space changes).
-    // This mirrors `[NSApp run]` on the C daemon's main thread while its event
-    // loop runs on a worker pthread.
+    // launch/terminate/activate/deactivate/hide/unhide and active-space changes)
+    // and the CGDisplayReconfiguration callback registered just below. This mirrors
+    // `[NSApp run]` on the C daemon's main thread while its event loop runs on a
+    // worker pthread.
     ns_application_load();
+    // Register the display add/remove/move/resize callback before entering the run
+    // loop that delivers it.
     observe_display_reconfiguration().unwrap();
     let _ = observe_workspace(workspace_tx);
     let _ = worker.join();

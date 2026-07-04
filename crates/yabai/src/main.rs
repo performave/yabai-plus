@@ -1844,10 +1844,15 @@ fn try_scripting_addition(
                         }
                         return Some(result);
                     }
-                    // `window --opacity <float>` sets the window alpha through the SA;
-                    // it is purely visual, so no tree re-flow is needed.
-                    WindowAction::Raw { command, arg } if command == "--opacity" => {
-                        return Some(window_opacity_via_sa(sa, runtime, cmd.target.as_ref(), arg));
+                    // `window --opacity <float>` sets the window alpha through the
+                    // SA; it is purely visual, so no tree re-flow is needed.
+                    WindowAction::Opacity(opacity) => {
+                        return Some(window_opacity_via_sa(
+                            sa,
+                            runtime,
+                            cmd.target.as_ref(),
+                            *opacity,
+                        ));
                     }
                     // `window --sub-layer below|normal|above|auto` sets the window's
                     // SkyLight sub-level through the SA (purely visual, no re-tile).
@@ -1938,24 +1943,14 @@ fn try_scripting_addition(
 
 /// Set the acting window's opacity through the scripting addition, mirroring the
 /// C `window --opacity` (`scripting_addition_set_opacity` with the configured
-/// `window_opacity_duration`). Faithful to the C value validation and the two
-/// `daemon_fail` strings.
+/// `window_opacity_duration`). The parser has already validated the opacity
+/// range, so this only resolves the acting window and performs the SA call.
 fn window_opacity_via_sa(
     sa: &ScriptingAddition,
     runtime: &Runtime<AxSink>,
     target: Option<&Selector>,
-    arg: &str,
+    opacity: f32,
 ) -> Response {
-    // The C parser requires a float in `[0.0, 1.0]`; anything else (including a
-    // non-float token) is rejected with the standard "unknown value" message.
-    let opacity = match arg.parse::<f32>() {
-        Ok(value) if (0.0..=1.0).contains(&value) => value,
-        _ => {
-            return Err(format!(
-                "unknown value '{arg}' given to command '--opacity' for domain 'window'\n"
-            ));
-        }
-    };
     let wid = runtime.state.resolve_window_selector(target)?;
     let duration = runtime.state.config.window_opacity_duration;
     sa.set_opacity(wid, opacity, duration)

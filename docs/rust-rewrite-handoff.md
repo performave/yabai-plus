@@ -63,6 +63,25 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 66) — typed `window --opacity <float>` command model
+
+- Promoted `window --opacity <float>` from a raw string action into the typed Rust
+  command model (`WindowAction::Opacity(f32)`). The parser now validates the C
+  range (`0.0..=1.0`) up front and reports the standard unknown-value parse error
+  for malformed or out-of-range opacity values.
+- Simplified the daemon SA interceptor to consume the typed opacity value directly;
+  the live behavior is unchanged for valid commands (`set_opacity` with
+  `config.window_opacity_duration`, no reflow).
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with the stable test identifier, SA healthy. Rust WM daemon on
+  `/tmp/yabai_opacity.socket`; Finder window `1395` ran `window --opacity 0.62`,
+  and `--experimental-window-alpha 1395` reported `0.62`. Restored with
+  `window --opacity 1.0` and read back alpha `1`. Isolated daemon was stopped
+  afterward.
+- Verification: `cargo fmt --all`; targeted parser/daemon tests;
+  `cargo test --workspace` (191 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-04 (session 65) — trailing selectors for `window --close` / `--minimize`
 
 - Added command-specific trailing selector support for `window --close <sel>` and
@@ -1262,9 +1281,10 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    focused window; exit via id/`first`/`last`/single-window bare toggle),
    `--minimize` (including trailing selector parsing), `--deminimize` for numeric
    ids and `first`/`last`; `--swap`
-   already worked. `window --opacity <float>` is now wired through the SA
-   (`set_opacity` + `config.window_opacity_duration`), verified live via the
-   `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback. `window --display`
+   already worked. `window --opacity <float>` is now a typed parser action wired
+   through the SA (`set_opacity` + `config.window_opacity_duration`), verified live
+   via the `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback.
+   `window --display`
    (session 30), `--sub-layer below|normal|above|auto` (SA `set_layer`), `--toggle
    sticky` (SA `set_sticky` + untile/re-tile) and `--toggle shadow` (SA `set_shadow`)
    are all wired through the SA and verified live (session 37); the parser already

@@ -278,8 +278,8 @@ pub struct WindowCommand {
 }
 
 /// A `window` domain action. Covers the structurally-clean subset; richer
-/// actions (`--opacity`, `--sub-layer`, `--scratchpad`, `--insert`) are carried
-/// as raw argument strings until their effects live in `yabai-core`.
+/// actions (`--sub-layer`, `--scratchpad`, `--insert`) are carried as raw
+/// argument strings until their effects live in `yabai-core`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowAction {
     Focus(Option<Selector>),
@@ -297,6 +297,7 @@ pub enum WindowAction {
     Resize { handle: u8, dw: f32, dh: f32 },
     Ratio { kind: ValueType, ratio: f32 },
     Grid([i32; 6]),
+    Opacity(f32),
     Toggle(String),
     Raw { command: String, arg: String },
 }
@@ -401,6 +402,10 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
                 require(iter.next(), command, Domain::Window)?,
                 command,
             )?),
+            "--opacity" => WindowAction::Opacity(parse_opacity_arg(
+                require(iter.next(), command, Domain::Window)?,
+                command,
+            )?),
             "--toggle" => {
                 WindowAction::Toggle(require(iter.next(), command, Domain::Window)?.clone())
             }
@@ -411,7 +416,7 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
                     _ => String::new(),
                 },
             },
-            "--opacity" | "--sub-layer" | "--insert" => WindowAction::Raw {
+            "--sub-layer" | "--insert" => WindowAction::Raw {
                 command: command.clone(),
                 arg: require(iter.next(), command, Domain::Window)?.clone(),
             },
@@ -497,6 +502,17 @@ fn parse_grid_arg(arg: &str, command: &str) -> Result<[i32; 6], ParseError> {
         *slot = part.parse::<i32>().map_err(|_| bad())?;
     }
     Ok(out)
+}
+
+fn parse_opacity_arg(arg: &str, command: &str) -> Result<f32, ParseError> {
+    let opacity = arg
+        .parse::<f32>()
+        .map_err(|_| invalid(arg, command, Domain::Window))?;
+    if (0.0..=1.0).contains(&opacity) {
+        Ok(opacity)
+    } else {
+        Err(invalid(arg, command, Domain::Window))
+    }
 }
 
 /// A parsed `space` message: an optional leading target selector followed by
@@ -1302,6 +1318,9 @@ mod tests {
 
         let cmd = parse_window(&toks(&["--grid", "2:2:0:0:1:1"])).unwrap();
         assert_eq!(cmd.actions, vec![WindowAction::Grid([2, 2, 0, 0, 1, 1])]);
+
+        let cmd = parse_window(&toks(&["--opacity", "0.75"])).unwrap();
+        assert_eq!(cmd.actions, vec![WindowAction::Opacity(0.75)]);
     }
 
     #[test]
@@ -1310,6 +1329,12 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unknown value 'middle:1:1' given to command '--resize' for domain 'window'"
+        );
+
+        let err = parse_window(&toks(&["--opacity", "1.5"])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unknown value '1.5' given to command '--opacity' for domain 'window'"
         );
     }
 

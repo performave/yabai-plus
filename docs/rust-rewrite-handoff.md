@@ -44,7 +44,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 169 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 173 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -55,6 +55,34 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 52) — pure `window --ratio` (abs/rel) + own-space fix + verified live
+
+- Implemented `window --ratio abs|rel:<f>`, previously an unhandled window action.
+  Pure BSP op in `yabai-core`: `Tree::adjust_window_ratio(window_id, relative, ratio)`
+  mirrors the C `window_manager_adjust_window_ratio` — sets the window's **parent**
+  node ratio (`rel` adds, `abs` replaces), clamped to `[0.1, 0.9]`, then recomputes
+  the parent subtree. `dispatch_window`'s `Ratio` arm maps `ValueType::Rel`→relative
+  and reports the faithful errors `cannot adjust ratio of a non-managed window.`
+  (window not in any tree) and `cannot adjust ratio of a root node.` (no parent).
+- **Bug found + fixed during live testing:** the first cut used `active_tree_mut()`,
+  but the C acts on the window's **own** view (`window_manager_find_managed_window`).
+  On the remote the focused window was on display 1 while the active space was on
+  display 2, so the active tree lacked the window and `--ratio` wrongly returned
+  `cannot adjust ratio of a non-managed window.` (exit 1). Fixed to resolve the
+  focused window's own space via `window_space` before adjusting; added
+  `window_ratio_uses_focused_windows_own_space` (window on a non-active space) to
+  lock it in. (The same latent active-vs-own-space issue exists in Swap/Warp/Stack;
+  left as-is — out of scope, and normally the focused window is on the active space.)
+- Added `adjust_window_ratio_abs_and_rel` and `adjust_window_ratio_root_or_unknown_window_fails`
+  (layout) plus `window_ratio_dispatches_and_errors_on_root` (runtime).
+- **Verified live on the remote (macOS 26.5.1):** window 901 (top of a horizontal
+  split with 1016) — `window --ratio abs:0.7` grew 901's height 266→620 (~0.7 of the
+  ~886 shared height) and pushed 1016 down to 266; `abs:0.3` restored 266. The daemon
+  re-tiled to screen, and the command applied even though 901's space was **not** the
+  active space (display 2 was active) — proving the own-space fix.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (173 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 51) — pure `window --toggle split` + verified live
 

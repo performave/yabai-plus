@@ -17,8 +17,8 @@ use regex_lite::Regex;
 use yabai_core::{
     Area, Child, ConfigOp, Direction, DisplayAction, Layer, Message, MouseDropAction, NodeSplit,
     Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects,
-    Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree, ViewType, WindowAction,
-    WindowFrame, ZoomKind, parse_message,
+    Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree, ValueType, ViewType,
+    WindowAction, WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -1072,6 +1072,22 @@ impl AppState {
                     let focused = self.require_focused()?;
                     self.active_tree_mut()?
                         .resize_window(focused, *handle, *dw, *dh);
+                }
+                WindowAction::Ratio { kind, ratio } => {
+                    // Acts on the window's *own* view (like the C
+                    // `window_manager_find_managed_window`), which may not be the
+                    // active space when the focused window is on another display.
+                    let focused = self.require_focused()?;
+                    let relative = *kind == ValueType::Rel;
+                    let Some(sid) = self.window_space(focused) else {
+                        return Err("cannot adjust ratio of a non-managed window.".to_string());
+                    };
+                    let tree = self.spaces.get_mut(&sid).ok_or_else(|| {
+                        "cannot adjust ratio of a non-managed window.".to_string()
+                    })?;
+                    if !tree.adjust_window_ratio(focused, relative, *ratio) {
+                        return Err("cannot adjust ratio of a root node.".to_string());
+                    }
                 }
                 // Remaining window actions require the macOS layers.
                 _ => return Err("window action not yet handled by AppState".to_string()),
@@ -2644,6 +2660,45 @@ mod tests {
             Ok(None)
         );
         assert_eq!(state.window_split_info(1).0, "none");
+    }
+
+    #[test]
+    fn window_ratio_dispatches_and_errors_on_root() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(1));
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--ratio", "abs:0.7"])),
+            Ok(None)
+        );
+
+        // A lone window is a root node with no parent ratio to adjust.
+        let mut single = state_with_space();
+        single.add_window(1).unwrap();
+        single.set_focused_window(Some(1));
+        assert_eq!(
+            single.handle_tokens(&toks(&["window", "--ratio", "rel:0.1"])),
+            Err("cannot adjust ratio of a root node.".to_string())
+        );
+    }
+
+    #[test]
+    fn window_ratio_uses_focused_windows_own_space() {
+        // Two windows live on space 2 while space 1 is active — `--ratio` must act on
+        // the focused window's own view, not the active space (which lacks it).
+        let mut state = state_with_space();
+        state.add_space(2, Area::new(0.0, 0.0, 1000.0, 1000.0));
+        state.set_active_space(2);
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(1));
+        state.set_active_space(1);
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--ratio", "abs:0.7"])),
+            Ok(None)
+        );
     }
 
     #[test]

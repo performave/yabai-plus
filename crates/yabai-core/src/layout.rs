@@ -752,6 +752,28 @@ impl Tree {
         true
     }
 
+    /// `window_manager_adjust_window_ratio`: set the split ratio of a window's
+    /// **parent** node, clamped to `[0.1, 0.9]`, then recompute the parent subtree.
+    /// `relative` adds `ratio` to the current value; otherwise `ratio` replaces it.
+    /// Returns `false` when the window isn't in this tree or is the root (no parent)
+    /// — the C `INVALID_SRC_NODE` case.
+    pub fn adjust_window_ratio(&mut self, window_id: u32, relative: bool, ratio: f32) -> bool {
+        let Some(node_id) = self.find_window_node(window_id) else {
+            return false;
+        };
+        let Some(parent_id) = self.nodes[node_id].parent else {
+            return false;
+        };
+        let new_ratio = if relative {
+            self.nodes[parent_id].ratio + ratio
+        } else {
+            ratio
+        };
+        self.nodes[parent_id].ratio = new_ratio.clamp(0.1, 0.9);
+        self.update(parent_id);
+        true
+    }
+
     /// `window_node_equalize`: reset matching splits to the default ratio.
     pub fn equalize(&mut self, id: NodeId, axis_flag: NodeSplit) {
         if let Some(l) = self.nodes[id].left {
@@ -1336,6 +1358,35 @@ mod tests {
         // A huge drag is clamped to the 0.9 maximum.
         assert!(tree.resize_window(1, HANDLE_RIGHT, 100_000.0, 0.0));
         assert!((tree.node(root).ratio - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adjust_window_ratio_abs_and_rel() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        tree.add_window(2, Some(1));
+        let root = tree.root();
+
+        // `abs` replaces the parent ratio; `rel` adds to it.
+        assert!(tree.adjust_window_ratio(1, false, 0.7));
+        assert!((tree.node(root).ratio - 0.7).abs() < 1e-6);
+        assert!(tree.adjust_window_ratio(1, true, -0.2));
+        assert!((tree.node(root).ratio - 0.5).abs() < 1e-6);
+
+        // Both directions clamp to [0.1, 0.9].
+        assert!(tree.adjust_window_ratio(1, true, 100.0));
+        assert!((tree.node(root).ratio - 0.9).abs() < 1e-6);
+        assert!(tree.adjust_window_ratio(1, false, -5.0));
+        assert!((tree.node(root).ratio - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn adjust_window_ratio_root_or_unknown_window_fails() {
+        let mut tree = bsp();
+        tree.add_window(1, None);
+        // A lone root window has no parent, and an unknown window isn't in the tree.
+        assert!(!tree.adjust_window_ratio(1, false, 0.7));
+        assert!(!tree.adjust_window_ratio(99, false, 0.7));
     }
 
     #[test]

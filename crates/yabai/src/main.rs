@@ -25,7 +25,7 @@ use yabai_macos::{
     set_active_display, set_drag_modifier, spaces_for_display, spaces_for_window,
     switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
     warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_bounds,
-    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
+    window_transform, windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, DropResult, LayoutSink, RecordingSink, Response, Runtime, StateEvent,
@@ -80,6 +80,7 @@ fn main() -> ExitCode {
         Some("--experimental-post-mouse-drag") => run_post_mouse_drag(&args[1..]),
         Some("--experimental-post-right-mouse-drag") => run_post_right_mouse_drag(&args[1..]),
         Some("--experimental-window-bounds") => run_window_bounds(&args[1..]),
+        Some("--experimental-window-transform") => run_window_transform(&args[1..]),
         _ => {
             eprintln!("yabai-rust: daemon skeleton is not implemented yet");
             ExitCode::from(64)
@@ -1057,6 +1058,31 @@ fn run_window_bounds(args: &[String]) -> ExitCode {
     }
 }
 
+/// Read-only probe of a window's live affine transform via SkyLight
+/// (`SLSGetWindowTransform`). Used to verify the scripting-addition `scale_window`
+/// (pip) opcode, since a scale transform is invisible to the AX/CG frame. An
+/// untouched window reads a pure translation (a=d=1, b=c=0); pip sets a=d<1.
+/// Usage: `--experimental-window-transform <window_id>`.
+fn run_window_transform(args: &[String]) -> ExitCode {
+    let Some(wid) = args.first().and_then(|a| a.parse::<u32>().ok()) else {
+        eprintln!("usage: --experimental-window-transform <window_id>");
+        return ExitCode::from(64);
+    };
+    match window_transform(wid) {
+        Ok(t) => {
+            println!(
+                "window {wid} transform a {} b {} c {} d {} tx {} ty {}",
+                t.a, t.b, t.c, t.d, t.tx, t.ty
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("yabai-rust: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn run_post_mouse_drag(args: &[String]) -> ExitCode {
     let coords: Vec<f32> = args
         .iter()
@@ -1669,6 +1695,32 @@ fn try_window_windowed_fullscreen(
     }
 }
 
+/// Intercept `window [sel] --toggle expose`, mirroring
+/// `window_manager_toggle_window_expose`: focus the acting window with a raise,
+/// then trigger App Exposé for its application via the CoreDock
+/// `com.apple.expose.front.awake` notification. Returns `None` for any other
+/// command so the normal dispatch chain handles it.
+fn try_window_expose(runtime: &Runtime<AxSink>, tokens: &[String]) -> Option<Response> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Toggle(name)] = cmd.actions.as_slice() else {
+        return None;
+    };
+    if name != "expose" {
+        return None;
+    }
+    let wid = match runtime.state.resolve_window_selector(cmd.target.as_ref()) {
+        Ok(wid) => wid,
+        Err(error) => return Some(Err(error)),
+    };
+    // C focuses with a raise before notifying the Dock; a focus failure is not
+    // fatal there, so we mirror that and still fire the notification.
+    runtime.sink.focus_window(wid);
+    yabai_macos::coredock::toggle_expose();
+    Some(Ok(None))
+}
+
 /// Intercept a standalone `space --focus <selector>` and enact the active-space
 /// switch through the macOS layer, returning `Some(response)`. Any other message
 /// (including a `--focus` mixed with other actions) returns `None` so the caller
@@ -1812,6 +1864,18 @@ fn try_scripting_addition(
                         return Some(window_toggle_shadow_via_sa(
                             sa,
                             runtime,
+                            cmd.target.as_ref(),
+                        ));
+                    }
+                    // `window --toggle pip` scales the acting window into a
+                    // picture-in-picture miniature (and back) through the SA
+                    // `scale_window` opcode, which self-toggles between the scaled
+                    // and identity transforms — so no daemon-side state is kept.
+                    WindowAction::Toggle(value) if value == "pip" => {
+                        return Some(window_toggle_pip_via_sa(
+                            sa,
+                            runtime,
+                            display_frames,
                             cmd.target.as_ref(),
                         ));
                     }
@@ -1992,6 +2056,58 @@ fn window_toggle_shadow_via_sa(
         )
     })?;
     runtime.state.set_window_shadow(wid, has_shadow);
+    Ok(None)
+}
+
+/// `window --toggle pip`, mirroring `window_manager_toggle_window_pip`: scale the
+/// acting window into (or out of) a picture-in-picture miniature via the SA
+/// `scale_window` opcode, targeting the usable bounds of the window's display
+/// inset by that display's active-space padding (as the C view does). The SA
+/// opcode itself flips between the scaled and identity transforms, so this is
+/// stateless on the daemon side. Applies to any window, managed or not, like C.
+fn window_toggle_pip_via_sa(
+    sa: &ScriptingAddition,
+    runtime: &Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    target: Option<&Selector>,
+) -> Response {
+    let wid = runtime.state.resolve_window_selector(target)?;
+    let Some(frame) = runtime.sink.window_frame(wid) else {
+        return Err(format!(
+            "could not locate window with the given id '{wid}'.\n"
+        ));
+    };
+    let center = Point {
+        x: frame.x + frame.w / 2.0,
+        y: frame.y + frame.h / 2.0,
+    };
+    let Some(&(did, bounds)) = display_frames
+        .iter()
+        .find(|(_, area)| area.contains_point(center))
+    else {
+        return Err(format!("could not locate the display of window '{wid}'.\n"));
+    };
+    // Inset the display's usable bounds by its active-space padding, matching the
+    // C `if (view_check_flag(dview, VIEW_ENABLE_PADDING))` branch. `[top, bottom,
+    // left, right]`.
+    let bounds = match runtime.state.display_active_space_id(did) {
+        Some(sid) => {
+            let ([top, bottom, left, right], _gap) = runtime.state.grid_insets(sid);
+            Area {
+                x: bounds.x + left as f32,
+                y: bounds.y + top as f32,
+                w: bounds.w - (left + right) as f32,
+                h: bounds.h - (top + bottom) as f32,
+            }
+        }
+        None => bounds,
+    };
+    sa.scale_window(wid, bounds.x, bounds.y, bounds.w, bounds.h)
+        .map_err(|_| {
+        format!(
+            "could not scale window with id '{wid}' due to an error with the scripting-addition.\n"
+        )
+    })?;
     Ok(None)
 }
 
@@ -3649,15 +3765,20 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                                 &tokens,
                                             ) {
                                                 Some(response) => response,
-                                                None => match try_space_focus(
-                                                    &scripting_addition,
-                                                    &mut runtime,
-                                                    &display_frames,
-                                                    &tokens,
-                                                ) {
-                                                    Some(response) => response,
-                                                    None => runtime.message(&tokens),
-                                                },
+                                                None => {
+                                                    match try_window_expose(&runtime, &tokens) {
+                                                        Some(response) => response,
+                                                        None => match try_space_focus(
+                                                            &scripting_addition,
+                                                            &mut runtime,
+                                                            &display_frames,
+                                                            &tokens,
+                                                        ) {
+                                                            Some(response) => response,
+                                                            None => runtime.message(&tokens),
+                                                        },
+                                                    }
+                                                }
                                             },
                                         },
                                     },

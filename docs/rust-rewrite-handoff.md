@@ -60,6 +60,45 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 61) — `window --toggle expose` (CoreDock) + `--toggle pip` (SA scale) + verified live
+
+- Implemented the last two window `--toggle` variants, both previously parsed as
+  `WindowAction::Toggle("expose"|"pip")` but unhandled (fell to `AppState`'s
+  "window toggle '…' not yet handled" arm).
+- **`--toggle pip`** — faithful to C `window_manager_toggle_window_pip`: scale the
+  acting window into (or out of) a picture-in-picture miniature via the SA
+  `scale_window` opcode (`SA_OPCODE_WINDOW_SCALE`, already in the client),
+  targeting the usable bounds of the window's display inset by that display's
+  active-space padding (the C `view_check_flag(dview, VIEW_ENABLE_PADDING)`
+  branch, reusing `AppState::grid_insets`). The SA opcode itself self-toggles
+  between the scaled and identity transforms, so **no daemon-side state is
+  kept** — each call just sends `scale_window`. New `window_toggle_pip_via_sa`
+  helper, dispatched as a `WindowAction::Toggle("pip")` arm inside
+  `try_scripting_addition` next to sticky/shadow. Applies to any window, managed
+  or not, like C.
+- **`--toggle expose`** — faithful to C `window_manager_toggle_window_expose`:
+  focus the acting window with a raise (`AxSink::focus_window`), then trigger App
+  Exposé for its app via `CoreDockSendNotification(CFSTR("com.apple.expose.front.awake"), 0)`.
+  New `yabai_macos::coredock` module (`CoreDockSendNotification` FFI from the
+  already-linked `ApplicationServices`, plus a local CFString helper) and a
+  standalone `try_window_expose` daemon interceptor slotted after
+  `try_window_windowed_fullscreen`.
+- New read-only probe `--experimental-window-transform <wid>`
+  (`SLSGetWindowTransform`, `yabai_macos::space::window_transform`) — pip sets a
+  scale transform invisible to the AX/CG frame, so bounds/alpha probes can't see
+  it; this dumps `a b c d tx ty` to verify the opcode took effect.
+- No parser/`AppState` change (the toggle argument is already a free string).
+- Verified live on the remote (macOS 26): a tiled Finder window 1270 at
+  `67 45 690 899`. `--toggle pip` moved its transform from the identity
+  translation (`a=1 d=1 tx=-67 ty=-45`) to a scaled PIP (`a≈1.988 d≈1.989
+  tx=-2209 ty=-89`, matching C's `do_window_scale` bottom-right ¼-size formula);
+  a second toggle restored the identity transform exactly. `SLSGetWindowBounds`
+  stayed `67 45 690 899` throughout (pure transform, invisible to AX). `--toggle
+  expose` dispatched cleanly (rc=0, daemon stayed alive) through the known-good
+  `focus_window` primitive + the CoreDock notification; its transient Mission
+  Control animation isn't verifiable over SSH (no Screen Recording / GUI session).
+  188 tests, clippy clean.
+
 ### 2026-07-04 (session 60) — `window --toggle windowed-fullscreen` (save/fill/restore via AX) + verified live
 
 - Implemented `window --toggle windowed-fullscreen`, previously parsed as
@@ -1040,6 +1079,8 @@ windows-for-pid,pid-debug,move-focused,move-pid,tile-pid,observe-pid}`,
 `--experimental-cursor-location` (prints the live cursor point),
 `--experimental-window-alpha <wid>` (read-only `SLSGetWindowAlpha` opacity
 readback — verifies the SA opacity opcode),
+`--experimental-window-transform <wid>` (read-only `SLSGetWindowTransform` dump —
+verifies the SA `scale_window`/pip opcode, invisible to the AX/CG frame),
 `--experimental-windows-on-space <sid>` (read-only `SLSCopyWindowsWithOptionsAndTags`
 dump — verifies the macOS-26 window→space resolver), `--experimental-sa-{status,opacity,
 create-space,destroy-space,window-to-space,focus-space}` (direct SA opcode
@@ -1142,9 +1183,16 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `window --toggle windowed-fullscreen` saves the window's frame and fills its display's
    usable bounds (no yabai padding), restoring the saved frame on toggle-off — a
    daemon-side `try_window_windowed_fullscreen` + `windowed_frames` map, applied to any
-   window like C (session 60, verified live). Still to do:
-   `window --toggle expose`/`pip`, remaining deminimize/native-fullscreen-exit
-   selectors, and scratchpad. Mouse
+   window like C (session 60, verified live). `window --toggle pip` scales the window
+   into/out of a picture-in-picture miniature via the SA `scale_window` opcode
+   (stateless — the opcode self-toggles the transform), targeting the window's display
+   usable bounds inset by the active-space padding (`window_toggle_pip_via_sa`, session
+   61, verified live via the new `--experimental-window-transform` `SLSGetWindowTransform`
+   readback). `window --toggle expose` focuses the window with a raise then fires the
+   CoreDock `com.apple.expose.front.awake` App-Exposé notification
+   (`yabai_macos::coredock` + `try_window_expose`, session 61 — dispatches cleanly but
+   the transient Mission Control animation isn't SSH-verifiable). Still to do:
+   remaining deminimize/native-fullscreen-exit selectors, and scratchpad. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified

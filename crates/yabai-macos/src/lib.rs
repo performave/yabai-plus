@@ -5,6 +5,8 @@ pub mod ax;
 #[cfg(target_os = "macos")]
 pub mod cgwindow;
 #[cfg(target_os = "macos")]
+pub mod coredock;
+#[cfg(target_os = "macos")]
 pub mod display;
 #[cfg(target_os = "macos")]
 pub mod mouse;
@@ -47,7 +49,8 @@ pub use screen::{main_visible_frame, visible_frame_for_display};
 #[cfg(target_os = "macos")]
 pub use space::{
     current_space_for_display, display_for_space, mission_control_spaces, spaces_for_display,
-    spaces_for_window, switch_space_by_gesture, window_alpha, window_bounds, windows_on_space,
+    spaces_for_window, switch_space_by_gesture, window_alpha, window_bounds, window_transform,
+    windows_on_space,
 };
 #[cfg(target_os = "macos")]
 pub use workspace::{

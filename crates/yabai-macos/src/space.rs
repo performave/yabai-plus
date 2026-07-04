@@ -129,6 +129,19 @@ unsafe extern "C" {
     ) -> CFArrayRef;
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
     fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
+    fn SLSGetWindowTransform(cid: i32, wid: u32, transform: *mut CGAffineTransform) -> i32;
+}
+
+/// A 2x3 affine transform (`CGAffineTransform`): `[a, b, c, d, tx, ty]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CGAffineTransform {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub tx: f64,
+    pub ty: f64,
 }
 
 fn owned_cfstring(literal: &[u8]) -> io::Result<OwnedCf> {
@@ -592,6 +605,23 @@ pub fn window_alpha(window_id: u32) -> io::Result<f32> {
         )))
     } else {
         Ok(alpha)
+    }
+}
+
+/// Read a window's live affine transform via SkyLight (`SLSGetWindowTransform`).
+/// Used to verify the scripting-addition `scale_window` (pip) opcode, which sets
+/// a scale/translation transform the AX frame does not reflect. The identity-ish
+/// transform of an untouched window is a pure translation by `-origin`.
+pub fn window_transform(window_id: u32) -> io::Result<CGAffineTransform> {
+    let mut transform = CGAffineTransform::default();
+    // SAFETY: `transform` is a valid out pointer SkyLight fills on success.
+    let err = unsafe { SLSGetWindowTransform(SLSMainConnectionID(), window_id, &mut transform) };
+    if err != 0 {
+        Err(io::Error::other(format!(
+            "failed to read transform for window {window_id} (SkyLight error {err})"
+        )))
+    } else {
+        Ok(transform)
     }
 }
 

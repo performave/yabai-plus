@@ -1603,6 +1603,72 @@ fn try_window_resize(runtime: &Runtime<AxSink>, tokens: &[String]) -> Option<Res
     }
 }
 
+/// Intercept `window [sel] --toggle windowed-fullscreen`, mirroring
+/// `window_manager_toggle_window_windowed_fullscreen`. Entering saves the
+/// window's current frame and resizes it to fill its display's usable bounds
+/// (menu bar / dock excluded, no yabai padding — the C `display_bounds_constrained`
+/// with `ignore_external_bar`); exiting restores the saved frame. State lives in
+/// `windowed_frames` (presence = the C `WINDOW_WINDOWED` flag). Applied to any
+/// window, managed or not, exactly as C does. Returns `None` for any other
+/// command so the normal dispatch chain handles it.
+fn try_window_windowed_fullscreen(
+    runtime: &Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    windowed_frames: &mut HashMap<u32, Area>,
+    tokens: &[String],
+) -> Option<Response> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Toggle(name)] = cmd.actions.as_slice() else {
+        return None;
+    };
+    if name != "windowed-fullscreen" {
+        return None;
+    }
+    let wid = match runtime.state.resolve_window_selector(cmd.target.as_ref()) {
+        Ok(wid) => wid,
+        Err(error) => return Some(Err(error)),
+    };
+    // Toggle off: restore the frame saved on entry.
+    if let Some(saved) = windowed_frames.remove(&wid) {
+        if runtime.sink.set_frame(wid, saved) {
+            return Some(Ok(None));
+        }
+        // Restore failed — keep the flag so a retry can try again.
+        windowed_frames.insert(wid, saved);
+        return Some(Err(format!(
+            "could not restore window '{wid}' from windowed-fullscreen.\n"
+        )));
+    }
+    // Toggle on: locate the window's display, save its frame, fill the display.
+    let Some(frame) = runtime.sink.window_frame(wid) else {
+        return Some(Err(format!(
+            "could not locate window with the given id '{wid}'.\n"
+        )));
+    };
+    let center = Point {
+        x: frame.x + frame.w / 2.0,
+        y: frame.y + frame.h / 2.0,
+    };
+    let Some(&(_, bounds)) = display_frames
+        .iter()
+        .find(|(_, area)| area.contains_point(center))
+    else {
+        return Some(Err(format!(
+            "could not locate the display of window '{wid}'.\n"
+        )));
+    };
+    if runtime.sink.set_frame(wid, bounds) {
+        windowed_frames.insert(wid, frame);
+        Some(Ok(None))
+    } else {
+        Some(Err(format!(
+            "could not make window '{wid}' windowed-fullscreen.\n"
+        )))
+    }
+}
+
 /// Intercept a standalone `space --focus <selector>` and enact the active-space
 /// switch through the macOS layer, returning `Some(response)`. Any other message
 /// (including a `--focus` mixed with other actions) returns `None` so the caller
@@ -3121,6 +3187,10 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
     let mut signaled: HashMap<i32, HashMap<u32, WindowMeta>> = HashMap::new();
     let mut minimized_pids: HashMap<u32, i32> = HashMap::new();
     let mut fullscreen_pids: HashMap<u32, i32> = HashMap::new();
+    // Windows currently in `--toggle windowed-fullscreen`, mapped to the frame
+    // saved when they entered it (restored on toggle-off). Presence in this map
+    // is the Rust analogue of the C `WINDOW_WINDOWED` flag + `windowed_frame`.
+    let mut windowed_frames: HashMap<u32, Area> = HashMap::new();
 
     // Initial tile from the current world.
     for pid in &pids {
@@ -3572,14 +3642,22 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                         Some(response) => response,
                                         None => match try_window_resize(&runtime, &tokens) {
                                             Some(response) => response,
-                                            None => match try_space_focus(
-                                                &scripting_addition,
-                                                &mut runtime,
+                                            None => match try_window_windowed_fullscreen(
+                                                &runtime,
                                                 &display_frames,
+                                                &mut windowed_frames,
                                                 &tokens,
                                             ) {
                                                 Some(response) => response,
-                                                None => runtime.message(&tokens),
+                                                None => match try_space_focus(
+                                                    &scripting_addition,
+                                                    &mut runtime,
+                                                    &display_frames,
+                                                    &tokens,
+                                                ) {
+                                                    Some(response) => response,
+                                                    None => runtime.message(&tokens),
+                                                },
                                             },
                                         },
                                     },

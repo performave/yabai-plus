@@ -60,6 +60,35 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 60) — `window --toggle windowed-fullscreen` (save/fill/restore via AX) + verified live
+
+- Implemented `window --toggle windowed-fullscreen`, previously parsed as
+  `WindowAction::Toggle("windowed-fullscreen")` but unhandled (it fell to `AppState`'s
+  "window toggle '…' not yet handled" arm). Faithful to C
+  `window_manager_toggle_window_windowed_fullscreen` (`window_manager.c`): entering
+  saves the window's current frame and resizes it to fill the display's usable bounds
+  (`display_bounds_constrained(did, true)` — menu bar / dock excluded, **no** yabai
+  padding/gap); exiting restores the saved frame. Applied to **any** window, managed or
+  not, exactly as C does (no managed rejection, unlike `--grid`/`--move`).
+- **Daemon glue only** (no parser or `AppState` change): a new
+  `try_window_windowed_fullscreen` interceptor in `crates/yabai/src/main.rs` sits in the
+  window dispatch chain after `try_window_resize`. State is a new
+  `windowed_frames: HashMap<u32, Area>` in the daemon loop — presence = the C
+  `WINDOW_WINDOWED` flag, value = the saved `windowed_frame`. Toggle-on locates the
+  window's display from its live frame center (same lookup as `try_window_grid`, but
+  filling the raw visible bounds with no padding inset) and `AxSink::set_frame`s it,
+  saving the prior frame; toggle-off `set_frame`s the saved frame and drops the entry
+  (a failed restore keeps the entry so a retry can re-attempt).
+- **Verified live on the remote (macOS 26):** WM daemon (gap/padding 10, 2 displays).
+  Floated Finder window `1225` at `65 43 692 903` (display 1, visible frame `55 33
+  1415 923`). `window 1225 --toggle windowed-fullscreen` → live bounds (read via
+  `--experimental-window-bounds`, SLS) became `55 33 1415 923` (full display fill, no
+  padding); a second toggle restored `65 43 692 903` exactly. Both exit 0.
+- Remaining window `--toggle` gaps: `expose` (fires `com.apple.expose.front.awake` via
+  CoreDock — low verifiability) and `pip` (SA `scale_window`); plus `--scratchpad`.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (188 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-04 (session 59) — `window --raise [sel]` / `--lower [sel]` via SA `order_window` + verified live
 
 - Implemented `window --raise`/`--lower`, previously parsed but unhandled (they fell
@@ -1110,8 +1139,12 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    `window_manager_resize_window_relative_internal`). `window --raise [sel]`/`--lower
    [sel]` reorder a window's z-stacking above/below an optional reference window (bare =
    above/below everything) via the SA `order_window` opcode (session 59, verified live).
-   Still to do:
-   remaining deminimize/native-fullscreen-exit selectors and scratchpad. Mouse
+   `window --toggle windowed-fullscreen` saves the window's frame and fills its display's
+   usable bounds (no yabai padding), restoring the saved frame on toggle-off — a
+   daemon-side `try_window_windowed_fullscreen` + `windowed_frames` map, applied to any
+   window like C (session 60, verified live). Still to do:
+   `window --toggle expose`/`pip`, remaining deminimize/native-fullscreen-exit
+   selectors, and scratchpad. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified

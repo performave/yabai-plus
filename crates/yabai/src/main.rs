@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use yabai_core::layout::{HANDLE_ABS, HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
-    Area, FfmMode, Message, MouseAction, MouseModifier, Point, ScratchpadAction, Selector,
+    Area, FfmMode, Layer, Message, MouseAction, MouseModifier, Point, ScratchpadAction, Selector,
     SignalEvent, SpaceAction, ValueType, WindowAction, grid_frame, parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
@@ -1862,7 +1862,7 @@ fn try_scripting_addition(
                             sa,
                             runtime,
                             cmd.target.as_ref(),
-                            layer.as_str(),
+                            *layer,
                         ));
                     }
                     // `window --scratchpad [label|recover]` assigns/removes a
@@ -2009,25 +2009,20 @@ fn window_sub_layer_via_sa(
     sa: &ScriptingAddition,
     runtime: &Runtime<AxSink>,
     target: Option<&Selector>,
-    arg: &str,
+    layer: Layer,
 ) -> Response {
     let wid = runtime.state.resolve_window_selector(target)?;
-    let layer = match arg {
-        "below" => CG_WINDOW_LEVEL_KEY_BACKSTOP,
-        "normal" => CG_WINDOW_LEVEL_KEY_NORMAL,
-        "above" => CG_WINDOW_LEVEL_KEY_FLOATING,
-        "auto" => {
+    let layer = match layer {
+        Layer::Below => CG_WINDOW_LEVEL_KEY_BACKSTOP,
+        Layer::Normal => CG_WINDOW_LEVEL_KEY_NORMAL,
+        Layer::Above => CG_WINDOW_LEVEL_KEY_FLOATING,
+        Layer::Auto => {
             // LAYER_AUTO: a managed (tiled) window sinks below floats; otherwise normal.
             if runtime.state.window_space_id(wid).is_some() && !runtime.state.is_floating(wid) {
                 CG_WINDOW_LEVEL_KEY_BACKSTOP
             } else {
                 CG_WINDOW_LEVEL_KEY_NORMAL
             }
-        }
-        _ => {
-            return Err(format!(
-                "unknown value '{arg}' given to command '--sub-layer' for domain 'window'\n"
-            ));
         }
     };
     sa.set_layer(wid, layer).map(|()| None).map_err(|_| {

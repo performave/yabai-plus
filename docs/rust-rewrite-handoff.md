@@ -65,6 +65,18 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 71) — typed `window --sub-layer` daemon helper cleanup
+
+- Finished the follow-up from session 67: the daemon SA helper for
+  `window --sub-layer` now accepts the typed `Layer` enum directly instead of a
+  string plus a second validation match. This keeps invalid values confined to the
+  parser and leaves the macOS boundary consuming typed command data.
+- Verification: `cargo fmt --all`; `cargo test -p yabai`; `cargo test --workspace`
+  (192 tests); `cargo clippy --workspace --all-targets` (clean);
+  `cargo build --release -p yabai`. No remote run: valid live sub-layer behavior
+  was already verified in session 67, and this only removes redundant daemon-side
+  string validation.
+
 ### 2026-07-04 (session 70) — pure rule `scratchpad=` effect application
 
 - Extended rule application beyond `manage=` for one pure runtime-owned effect:

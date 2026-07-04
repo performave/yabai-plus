@@ -278,9 +278,8 @@ pub struct WindowCommand {
     pub actions: Vec<WindowAction>,
 }
 
-/// A `window` domain action. Covers the structurally-clean subset; richer
-/// `--scratchpad` is carried as a raw argument string until its effects live in
-/// `yabai-core`.
+/// A `window` domain action. Selector resolution and macOS effects still live in
+/// the runtime/daemon layers, but the command grammar is typed here.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowAction {
     Focus(Option<Selector>),
@@ -302,7 +301,14 @@ pub enum WindowAction {
     SubLayer(Layer),
     Insert(InsertDirection),
     Toggle(String),
-    Raw { command: String, arg: String },
+    Scratchpad(ScratchpadAction),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScratchpadAction {
+    Remove,
+    Recover,
+    Label(String),
 }
 
 /// Parse the tokens following the `window` domain (excluding the `window`
@@ -420,13 +426,17 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
             "--toggle" => {
                 WindowAction::Toggle(require(iter.next(), command, Domain::Window)?.clone())
             }
-            "--scratchpad" => WindowAction::Raw {
-                command: command.clone(),
-                arg: match iter.peek() {
-                    Some(tok) if !tok.starts_with("--") => iter.next().unwrap().clone(),
-                    _ => String::new(),
-                },
-            },
+            "--scratchpad" => WindowAction::Scratchpad(match iter.peek() {
+                Some(tok) if !tok.starts_with("--") => {
+                    let arg = iter.next().unwrap();
+                    if arg == "recover" {
+                        ScratchpadAction::Recover
+                    } else {
+                        ScratchpadAction::Label(arg.clone())
+                    }
+                }
+                _ => ScratchpadAction::Remove,
+            }),
             _ => {
                 return Err(ParseError::UnknownCommand {
                     command: command.clone(),
@@ -1433,19 +1443,21 @@ mod tests {
         let cmd = parse_window(&toks(&["--scratchpad"])).unwrap();
         assert_eq!(
             cmd.actions,
-            vec![WindowAction::Raw {
-                command: "--scratchpad".to_string(),
-                arg: String::new(),
-            }]
+            vec![WindowAction::Scratchpad(ScratchpadAction::Remove)]
         );
 
         let cmd = parse_window(&toks(&["--scratchpad", "notes"])).unwrap();
         assert_eq!(
             cmd.actions,
-            vec![WindowAction::Raw {
-                command: "--scratchpad".to_string(),
-                arg: "notes".to_string(),
-            }]
+            vec![WindowAction::Scratchpad(ScratchpadAction::Label(
+                "notes".to_string()
+            ))]
+        );
+
+        let cmd = parse_window(&toks(&["--scratchpad", "recover"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Scratchpad(ScratchpadAction::Recover)]
         );
     }
 

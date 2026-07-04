@@ -63,6 +63,22 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 69) — typed `window --scratchpad` command model
+
+- Promoted `window --scratchpad [label|recover]` from the last raw window action
+  into the typed Rust command model (`WindowAction::Scratchpad(ScratchpadAction)`).
+  The parser now distinguishes bare removal, `recover`, and label assignment while
+  leaving C-faithful label validation (reserved keywords, numeric labels, duplicate
+  labels) in the daemon/runtime path where scratchpad state is available.
+- Updated the daemon SA interceptor to consume the typed scratchpad action directly.
+  Valid behavior is unchanged: assign floats/untiles, bare remove moves/orders/focuses
+  and retiles, and `recover` orders all active AX-registered windows back in.
+- Removed the last `WindowAction::Raw` variant from the window command model.
+- Verification: `cargo fmt --all`; targeted scratchpad parser/runtime/daemon tests;
+  `cargo test --workspace` (191 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`. No new remote run: this is a typed
+  parser/interceptor refactor of the scratchpad behavior verified live in session 62.
+
 ### 2026-07-04 (session 68) — typed `window --insert <dir>` command model
 
 - Promoted `window --insert north|east|south|west|stack` from a raw string action
@@ -1350,8 +1366,8 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    CoreDock `com.apple.expose.front.awake` App-Exposé notification
    (`yabai_macos::coredock` + `try_window_expose`, session 61 — dispatches cleanly but
    the transient Mission Control animation isn't SSH-verifiable). `window --scratchpad`
-   assign/remove/recover and `window --toggle <label>` hide/show are done and verified
-   live (session 62). Deminimize/native-fullscreen exit support numeric/`first`/`last`
+   assign/remove/recover is typed and `window --toggle <label>` hide/show is done and
+   verified live (sessions 62/69). Deminimize/native-fullscreen exit support numeric/`first`/`last`
    in both leading-target and C-style trailing-selector forms (sessions 63-64;
    deminimize is parser-backed); broader selector breadth is still deferred. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),

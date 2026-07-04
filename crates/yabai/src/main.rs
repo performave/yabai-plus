@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use yabai_core::layout::{HANDLE_ABS, HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
-    Area, FfmMode, Message, MouseAction, MouseModifier, Point, Selector, SignalEvent, SpaceAction,
-    ValueType, WindowAction, grid_frame, parse_message, parse_selector,
+    Area, FfmMode, Message, MouseAction, MouseModifier, Point, ScratchpadAction, Selector,
+    SignalEvent, SpaceAction, ValueType, WindowAction, grid_frame, parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
@@ -1867,9 +1867,9 @@ fn try_scripting_addition(
                     }
                     // `window --scratchpad [label|recover]` assigns/removes a
                     // scratchpad label or orders hidden windows back in.
-                    WindowAction::Raw { command, arg } if command == "--scratchpad" => {
+                    WindowAction::Scratchpad(action) => {
                         let result =
-                            window_scratchpad_via_sa(sa, runtime, cmd.target.as_ref(), arg);
+                            window_scratchpad_via_sa(sa, runtime, cmd.target.as_ref(), action);
                         if result.is_ok() {
                             refresh_live_display_state(runtime, display_frames);
                         }
@@ -2072,9 +2072,9 @@ fn window_scratchpad_via_sa(
     sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
     target: Option<&Selector>,
-    arg: &str,
+    action: &ScratchpadAction,
 ) -> Response {
-    if arg == "recover" {
+    if matches!(action, ScratchpadAction::Recover) {
         return sa
             .order_window_in(&runtime.sink.active_window_ids())
             .map(|()| None)
@@ -2090,7 +2090,7 @@ fn window_scratchpad_via_sa(
         .active_space_id()
         .ok_or_else(|| "no active space".to_string())?;
 
-    if arg.is_empty() {
+    if matches!(action, ScratchpadAction::Remove) {
         if runtime.state.window_scratchpad(wid).is_none() {
             return Err("the selected window was not assigned to a scratchpad!\n".to_string());
         }
@@ -2112,7 +2112,10 @@ fn window_scratchpad_via_sa(
         return Ok(None);
     }
 
-    validate_scratchpad_label(arg)?;
+    let ScratchpadAction::Label(label) = action else {
+        unreachable!();
+    };
+    validate_scratchpad_label(label)?;
     let sid = runtime
         .state
         .window_known_space_id(wid)
@@ -2120,7 +2123,7 @@ fn window_scratchpad_via_sa(
         .ok_or_else(|| "no active space".to_string())?;
     runtime
         .state
-        .set_window_scratchpad(wid, arg.to_string(), sid)?;
+        .set_window_scratchpad(wid, label.clone(), sid)?;
     runtime.state.flush_all_active_to(&mut runtime.sink);
     Ok(None)
 }

@@ -2364,7 +2364,12 @@ fn drag_window_at_point(runtime: &Runtime<AxSink>, point: Point) -> Option<(u32,
 /// move/resize changes; tiled moves attempt a drop action on release (or snap back
 /// when there is no target), while tiled resizes update the BSP tree and flush
 /// immediately.
-fn handle_drag(runtime: &mut Runtime<AxSink>, drag: &mut Option<DragState>, event: MouseDragEvent) {
+fn handle_drag(
+    runtime: &mut Runtime<AxSink>,
+    drag: &mut Option<DragState>,
+    event: MouseDragEvent,
+    sa: &ScriptingAddition,
+) {
     match event {
         MouseDragEvent::Down(point, button) => {
             let action = match button {
@@ -2431,31 +2436,28 @@ fn handle_drag(runtime: &mut Runtime<AxSink>, drag: &mut Option<DragState>, even
                         point,
                         runtime.state.config.mouse_drop_action,
                     );
-                    
-                    match result {
-                        DropResult::CrossSpace { dragged_id, dragged_new_sid, swapped_id, swapped_new_sid } => {
-                            let sa = yabai_sa::ScriptingAddition::for_user(
-                                &std::env::var("USER").unwrap_or_else(|_| "eric".to_string()),
-                            );
-                            
-                            // Move the dragged window
-                            let _ = sa.move_window_to_space(dragged_new_sid, dragged_id);
-                            
-                            // Move the swapped window (if any)
-                            if let (Some(swapped_id), Some(swapped_new_sid)) = (swapped_id, swapped_new_sid) {
-                                let _ = sa.move_window_to_space(swapped_new_sid, swapped_id);
-                            }
-                            
-                            runtime.state.flush_all_active_to(&mut runtime.sink);
-                            runtime.state.set_focused_window(Some(state.window_id));
+
+                    // Cross-space drops need the scripting addition to actually
+                    // relocate the window(s) to the destination space; same-space
+                    // drops are enacted by the re-tile below.
+                    if let DropResult::CrossSpace {
+                        dragged_id,
+                        dragged_new_sid,
+                        swapped_id,
+                        swapped_new_sid,
+                    } = result
+                    {
+                        let _ = sa.move_window_to_space(dragged_new_sid, dragged_id);
+                        if let (Some(swapped_id), Some(swapped_new_sid)) =
+                            (swapped_id, swapped_new_sid)
+                        {
+                            let _ = sa.move_window_to_space(swapped_new_sid, swapped_id);
                         }
-                        DropResult::SameSpace => {
-                            runtime.state.flush_all_active_to(&mut runtime.sink);
-                            runtime.state.set_focused_window(Some(state.window_id));
-                        }
-                        DropResult::Ignored => {
-                            runtime.state.flush_all_active_to(&mut runtime.sink);
-                        }
+                    }
+
+                    runtime.state.flush_all_active_to(&mut runtime.sink);
+                    if result != DropResult::Ignored {
+                        runtime.state.set_focused_window(Some(state.window_id));
                     }
                 }
             }
@@ -3260,7 +3262,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     );
                 }
                 WmWork::Drag(event) => {
-                    handle_drag(&mut runtime, &mut drag_state, event);
+                    handle_drag(&mut runtime, &mut drag_state, event, &scripting_addition);
                 }
                 WmWork::Tick => {
                     refresh_live_display_state(&mut runtime, &mut display_frames);

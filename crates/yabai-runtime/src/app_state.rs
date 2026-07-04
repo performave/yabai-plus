@@ -455,15 +455,16 @@ impl AppState {
             .find_map(|(&did, info)| info.frame.contains_point(point).then_some(did))
     }
 
-    /// The managed window whose tiled frame contains `point`, resolving the
-    /// currently-visible space of each display first so overlapping non-visible
-    /// spaces don't shadow it. Public for `focus_follows_mouse`.
-    /// The space ID on the display under `point`.
+    /// The active-space id on the display under `point`, or `None` if the point
+    /// is off every known display.
     pub fn managed_space_at_point(&self, point: Point) -> Option<u64> {
         self.display_at_point(point)
             .and_then(|did| self.display_active_space_id(did))
     }
 
+    /// The managed window whose tiled frame contains `point`, resolving the
+    /// currently-visible space of each display first so overlapping non-visible
+    /// spaces don't shadow it. Public for `focus_follows_mouse`.
     pub fn managed_window_at_point(&self, point: Point) -> Option<u32> {
         // Prefer the visible space on the display under the point, so a window on a
         // hidden space at the same coordinates is never chosen.
@@ -581,6 +582,19 @@ impl AppState {
         tree.resize_window(window_id, handle, dx, dy)
     }
 
+    /// Move `window_id` from `from_sid`'s tree to `to_sid`'s tree in the model,
+    /// updating the window→space map. Appended to the destination; the destination
+    /// space's next re-tile lays it out. A no-op if a tree is missing.
+    fn reassign_window_to_space(&mut self, window_id: u32, from_sid: u64, to_sid: u64) {
+        if let Some(from_tree) = self.spaces.get_mut(&from_sid) {
+            from_tree.remove_window(window_id);
+        }
+        self.window_spaces.insert(window_id, to_sid);
+        if let Some(to_tree) = self.spaces.get_mut(&to_sid) {
+            to_tree.add_window(window_id, None);
+        }
+    }
+
     /// Apply a tiled mouse-drag drop at `point`. Center drops perform the
     /// configured swap/stack action; edge drops warp the source next to the target
     /// using the C daemon's four triangular drop zones. Supports cross-space drops
@@ -609,65 +623,28 @@ impl AppState {
             }
         };
 
+        // Cross-space / cross-display drop: the release point lands on a display
+        // whose active space differs from the dragged window's space. The pure
+        // tree can only reassign membership (the target leaf's exact insertion
+        // slot is refined by the subsequent re-tile); the daemon then issues the
+        // scripting-addition `move_window_to_space` opcodes for the real move.
         if target_sid != src_sid {
-            if let Some(target) = target {
-                // Remove from source tree
-                if let Some(src_tree) = self.spaces.get_mut(&src_sid) {
-                    src_tree.remove_window(window_id);
-                }
-                self.window_spaces.insert(window_id, target_sid);
+            self.reassign_window_to_space(window_id, src_sid, target_sid);
 
-                // For a cross-space swap, we must also move the target window to the source tree.
-                if action == MouseDropAction::Swap {
-                    if let Some(target_tree) = self.spaces.get_mut(&target_sid) {
-                        target_tree.remove_window(target.window_id);
-                    }
-                    self.window_spaces.insert(target.window_id, src_sid);
-                    
-                    // The simplest way to swap is to just add them to the respective spaces (tiled)
-                    // Wait, we should insert them where they belong. The C behavior for swap is complex.
-                    // For now, tile them in their new spaces.
-                    if let Some(src_tree) = self.spaces.get_mut(&src_sid) {
-                        src_tree.add_window(target.window_id, None);
-                    }
-                    if let Some(target_tree) = self.spaces.get_mut(&target_sid) {
-                        target_tree.add_window(window_id, None);
-                    }
+            // A center swap onto a target window also sends that window back to the
+            // dragged window's old space; every other drop just relocates the
+            // dragged window.
+            let swapped = target.filter(|_| action == MouseDropAction::Swap).map(|t| {
+                self.reassign_window_to_space(t.window_id, target_sid, src_sid);
+                t.window_id
+            });
 
-                    return DropResult::CrossSpace {
-                        dragged_id: window_id,
-                        dragged_new_sid: target_sid,
-                        swapped_id: Some(target.window_id),
-                        swapped_new_sid: Some(src_sid),
-                    };
-                } else {
-                    // For stack/warp, just tile it in the target tree
-                    if let Some(target_tree) = self.spaces.get_mut(&target_sid) {
-                        target_tree.add_window(window_id, None); // we'll just append for now, can refine later
-                    }
-                    return DropResult::CrossSpace {
-                        dragged_id: window_id,
-                        dragged_new_sid: target_sid,
-                        swapped_id: None,
-                        swapped_new_sid: None,
-                    };
-                }
-            } else {
-                // No target, just move the window to the new space
-                if let Some(src_tree) = self.spaces.get_mut(&src_sid) {
-                    src_tree.remove_window(window_id);
-                }
-                self.window_spaces.insert(window_id, target_sid);
-                if let Some(target_tree) = self.spaces.get_mut(&target_sid) {
-                    target_tree.add_window(window_id, None);
-                }
-                return DropResult::CrossSpace {
-                    dragged_id: window_id,
-                    dragged_new_sid: target_sid,
-                    swapped_id: None,
-                    swapped_new_sid: None,
-                };
-            }
+            return DropResult::CrossSpace {
+                dragged_id: window_id,
+                dragged_new_sid: target_sid,
+                swapped_id: swapped,
+                swapped_new_sid: swapped.map(|_| src_sid),
+            };
         }
 
         // Same-space drop
@@ -688,7 +665,11 @@ impl AppState {
                 MouseDropAction::Swap => tree.swap_windows(window_id, target.window_id),
                 MouseDropAction::Stack => tree.stack_window_onto(window_id, target.window_id),
             };
-            return if success { DropResult::SameSpace } else { DropResult::Ignored };
+            return if success {
+                DropResult::SameSpace
+            } else {
+                DropResult::Ignored
+            };
         }
 
         let success = match edge_drop_direction(target.area, point) {
@@ -718,7 +699,11 @@ impl AppState {
             ),
             None => false,
         };
-        if success { DropResult::SameSpace } else { DropResult::Ignored }
+        if success {
+            DropResult::SameSpace
+        } else {
+            DropResult::Ignored
+        }
     }
 
     /// Add a window to the active space (respecting the current focus).
@@ -3689,56 +3674,127 @@ mod tests {
     fn cross_space_mouse_drop() {
         let mut state = AppState::new();
         // Set up two spaces on two displays
-        state.displays.insert(1, DisplayInfo { frame: Area::new(0.0, 0.0, 1000.0, 1000.0) });
-        state.displays.insert(2, DisplayInfo { frame: Area::new(1000.0, 0.0, 1000.0, 1000.0) });
+        state.displays.insert(
+            1,
+            DisplayInfo {
+                frame: Area::new(0.0, 0.0, 1000.0, 1000.0),
+            },
+        );
+        state.displays.insert(
+            2,
+            DisplayInfo {
+                frame: Area::new(1000.0, 0.0, 1000.0, 1000.0),
+            },
+        );
         state.space_displays.insert(101, 1);
         state.space_displays.insert(102, 2);
-        
+
         state.display_active_space.insert(1, 101);
         state.display_active_space.insert(2, 102);
-        
-        state.spaces.insert(101, yabai_core::Tree::new(
-            yabai_core::ViewType::Bsp,
-            state.config.layout_config(),
-            Area::new(0.0, 0.0, 1000.0, 1000.0)
-        ));
-        state.spaces.insert(102, yabai_core::Tree::new(
-            yabai_core::ViewType::Bsp,
-            state.config.layout_config(),
-            Area::new(1000.0, 0.0, 1000.0, 1000.0)
-        ));
-        
+
+        state.spaces.insert(
+            101,
+            yabai_core::Tree::new(
+                yabai_core::ViewType::Bsp,
+                state.config.layout_config(),
+                Area::new(0.0, 0.0, 1000.0, 1000.0),
+            ),
+        );
+        state.spaces.insert(
+            102,
+            yabai_core::Tree::new(
+                yabai_core::ViewType::Bsp,
+                state.config.layout_config(),
+                Area::new(1000.0, 0.0, 1000.0, 1000.0),
+            ),
+        );
+
         state.active_space = Some(101);
-        
+
         // Window on space 101
         state.window_spaces.insert(10, 101);
         state.spaces.get_mut(&101).unwrap().add_window(10, None);
         state.set_focused_window(Some(10));
-        
+
         // Window on space 102
         state.window_spaces.insert(20, 102);
         state.spaces.get_mut(&102).unwrap().add_window(20, None);
-        
-        // Now test cross-space stack from 101 to 102
-        // Drop window 10 at point (1500.0, 500.0) which is in display 2 (space 102), over window 20
-        // Wait, for tree.capture() to have valid areas, we need to layout the tree first.
-        // We can just mock the capture by directly layout-ing, but actually the tree returns capture frames
-        // with their relative coordinates if layout is not run. But we need to use a point in the target display.
-        // Actually, let's just use cross-space with no target (the point matches the space, but no window intersection).
-        let result = state.drop_tiled_window_at_point(
-            10,
-            Point { x: 1500.0, y: 500.0 }, // Inside display 2
-            MouseDropAction::Stack
+
+        // Stack-drop window 10 onto display 2 (space 102), over window 20. A
+        // non-swap drop only relocates the dragged window; window 20 stays put.
+        let point = Point {
+            x: 1500.0,
+            y: 500.0,
+        };
+        let result = state.drop_tiled_window_at_point(10, point, MouseDropAction::Stack);
+
+        assert_eq!(
+            result,
+            DropResult::CrossSpace {
+                dragged_id: 10,
+                dragged_new_sid: 102,
+                swapped_id: None,
+                swapped_new_sid: None,
+            }
         );
-        
-        assert_eq!(result, DropResult::CrossSpace {
-            dragged_id: 10,
-            dragged_new_sid: 102,
-            swapped_id: None,
-            swapped_new_sid: None,
-        });
         assert_eq!(state.window_space(10), Some(102));
+        assert_eq!(state.window_space(20), Some(102));
         assert!(state.spaces.get(&101).unwrap().capture().is_empty());
         assert_eq!(state.spaces.get(&102).unwrap().capture().len(), 2);
+    }
+
+    #[test]
+    fn cross_space_mouse_drop_swap_returns_target() {
+        let mut state = AppState::new();
+        for (did, x) in [(1u32, 0.0), (2u32, 1000.0)] {
+            state.displays.insert(
+                did,
+                DisplayInfo {
+                    frame: Area::new(x, 0.0, 1000.0, 1000.0),
+                },
+            );
+        }
+        state.space_displays.insert(101, 1);
+        state.space_displays.insert(102, 2);
+        state.display_active_space.insert(1, 101);
+        state.display_active_space.insert(2, 102);
+        for (sid, x) in [(101u64, 0.0), (102u64, 1000.0)] {
+            state.spaces.insert(
+                sid,
+                yabai_core::Tree::new(
+                    yabai_core::ViewType::Bsp,
+                    state.config.layout_config(),
+                    Area::new(x, 0.0, 1000.0, 1000.0),
+                ),
+            );
+        }
+        state.active_space = Some(101);
+        state.window_spaces.insert(10, 101);
+        state.spaces.get_mut(&101).unwrap().add_window(10, None);
+        state.set_focused_window(Some(10));
+        state.window_spaces.insert(20, 102);
+        state.spaces.get_mut(&102).unwrap().add_window(20, None);
+
+        // A cross-space swap onto window 20 sends 20 back to the dragged window's
+        // old space (101) while 10 lands on 102.
+        let point = Point {
+            x: 1500.0,
+            y: 500.0,
+        };
+        let result = state.drop_tiled_window_at_point(10, point, MouseDropAction::Swap);
+
+        assert_eq!(
+            result,
+            DropResult::CrossSpace {
+                dragged_id: 10,
+                dragged_new_sid: 102,
+                swapped_id: Some(20),
+                swapped_new_sid: Some(101),
+            }
+        );
+        assert_eq!(state.window_space(10), Some(102));
+        assert_eq!(state.window_space(20), Some(101));
+        assert_eq!(state.spaces.get(&101).unwrap().capture().len(), 1);
+        assert_eq!(state.spaces.get(&102).unwrap().capture().len(), 1);
     }
 }

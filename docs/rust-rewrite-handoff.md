@@ -24,7 +24,10 @@ reconstructing context.
   `mouse_action2` drags now move or resize windows via an active mouse event tap
   (left/right button respectively), including persistent BSP-grid resize for tiled
   windows and direct AX resize for floating windows. Tiled drag-to-move drops now
-  perform same-space swap/stack center drops and edge-zone warps. The `signal` domain
+  perform same-space swap/stack center drops and edge-zone warps, plus
+  cross-space/cross-display drops (the dragged window — and, for a swap, the target
+  window — are reassigned in the model and relocated via the SA
+  `move_window_to_space` opcode). The `signal` domain
   is modeled and executed: `signal --add/--list/--remove` plus live firing of
   `window_created`, `window_destroyed`, `window_focused`, `window_moved`,
   `window_resized`, `window_minimized`, `window_deminimized`,
@@ -41,7 +44,7 @@ reconstructing context.
   The `rule` domain is modeled and executed for stored rules, list/remove/apply,
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
-  deferred. 164 workspace tests pass. The shipped C `make` flow is unchanged.
+  deferred. 167 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -52,6 +55,61 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 49) — cross-space / cross-display mouse drops + cleanup + verified live
+
+- Finished and cleaned up the **cross-space / cross-display tiled drag-drop** started
+  in the previous commit (`7958ade`). `drop_tiled_window_at_point` now returns a
+  `DropResult` (`Ignored` / `SameSpace` / `CrossSpace { dragged, dragged_new_sid,
+  swapped, swapped_new_sid }`); when the release point lands on a display whose
+  active space differs from the dragged window's, the pure layer reassigns tree
+  membership (a swap onto a target window also sends that window back to the source
+  space) and the daemon issues the SA `move_window_to_space` opcode(s) to perform the
+  real move, then re-tiles both displays.
+- **Cleanup of the committed first cut:** extracted a `reassign_window_to_space`
+  helper collapsing the three duplicated cross-space branches; removed the
+  stream-of-consciousness comments (`// Wait…`, `// can refine later`, `// The C
+  behavior for swap is complex`); fixed a doc comment that had been split across
+  `managed_space_at_point` / `managed_window_at_point`. `handle_drag` now takes the
+  daemon's existing `ScriptingAddition` instead of building a fresh one with a
+  hardcoded `"eric"` USER fallback (which would have pointed at the wrong SA socket
+  on the remote `student` box). Rewrote the sloppy `cross_space_mouse_drop` test and
+  added `cross_space_mouse_drop_swap_returns_target` for the swap-back path. Dropped
+  two scratch test files (`test-cross-space-drag.swift`, `test-e2e-cross-space.sh`)
+  that had been left staged.
+- **Verified live on the remote (two displays, macOS 26.5.1):** display 1 (1470×956,
+  space 1) + display 2 (1600×900, space 92), SA loaded (payload v2.1.30). With
+  `mouse_drop_action swap`, an `fn`+drag of Finder window `1017` from display 1
+  (411,494) onto Finder window `902` on display 2 (2270,465) swapped them across
+  displays: raw SkyLight `windows_on_space` went from space 1 `[…,1017,…]` /
+  space 92 `[…,902,…]` to space 1 `[…,902,…]` / space 92 `[…,1017,…]`, and the
+  daemon's managed `query --windows` confirmed `1017`→`space 92, disp 2` and
+  `902`→`space 1, disp 1` (the other three managed Finder windows untouched). Two
+  independent authoritative sources agree. (Screenshots were unavailable — the SSH
+  session lacked Screen Recording after the re-sign — but the SkyLight + query pair
+  is the same proof standard used for the session-35 cross-display swap.)
+- **Remote gotchas hit this session (for the runbook):** `/tmp` was cleared (reboot),
+  so `/tmp/yabai-c` was gone and the SA wouldn't load — redeploy `bin/yabai` as
+  `/tmp/yabai-c`. Every scp'd binary must be re-signed on the box
+  (`codesign -f -s - <path>`) or it's SIGKILLed (exit 137). The passwordless
+  `--load-sa` sudoers rule is hash-pinned and breaks after any re-sign/redeploy, so
+  the SA load now needs one interactive `sudo /tmp/yabai-c --load-sa` (user password).
+  AX window discovery and `--experimental-space-probe`/`screencapture` all return
+  empty until the display is awake — run `caffeinate -d -u` (a stale daemon socket
+  also needs `rm -f` before rebind).
+- Verification: `cargo fmt --all`; `cargo test --workspace` (167 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
+
+### 2026-07-03 (session 48) — pure `window --stack <sel>` runtime action
+
+- Wired `WindowAction::Stack` through `AppState::dispatch_window`, using the
+  existing `Tree::stack_window_onto` helper from the mouse-drop work. The focused
+  window is moved into the target leaf's stack, matching the pure same-space core
+  of the C stack operation; macOS z-order animation remains outside the pure layer.
+- Added `window_stack_moves_focused_window_into_target_leaf`, verifying the target
+  leaf's `window_list` and `window_order` after a `window --stack` command.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (165 tests);
+  `cargo clippy --workspace --all-targets`; `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 47) — pure `query --windows has-shadow`
 
@@ -2479,8 +2537,11 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified
-   live (sessions 41-43). Still deferred: cross-space/cross-display mouse drops
-   and insertion-feedback overlays.
+   live (sessions 41-43). Cross-space/cross-display drops are also done and verified
+   live (session 49): the dragged window — and, for a swap, the target window — are
+   reassigned in the model and relocated via the SA `move_window_to_space` opcode.
+   Still deferred: insertion-feedback overlays and slot-accurate cross-space
+   placement (the moved window is appended, then the destination re-tile lays it out).
    `mouse_follows_focus` is done (cursor warps to the
    focused window's center on focus, with the contained-skip); `focus_follows_mouse`
    (`autofocus`/`autoraise`) is done too (session 38) via a `CGEventTap` on

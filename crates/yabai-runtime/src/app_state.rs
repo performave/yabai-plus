@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use regex_lite::Regex;
+use yabai_core::layout::HANDLE_ABS;
 use yabai_core::{
     Area, Child, ConfigOp, Direction, DisplayAction, InsertDirection, Layer, Message,
     MouseDropAction, NodeSplit, Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply,
@@ -1172,9 +1173,24 @@ impl AppState {
                     _ => return Err(format!("window toggle '{name}' not yet handled")),
                 },
                 WindowAction::Resize { handle, dw, dh } => {
+                    // Acts on the window's *own* space (like `--ratio`), which may
+                    // not be the active space. Mirrors the tree half of
+                    // `window_manager_resize_window_relative`.
                     let focused = self.require_focused()?;
-                    self.active_tree_mut()?
-                        .resize_window(focused, *handle, *dw, *dh);
+                    // Managed: absolute resizing is rejected; a directional resize
+                    // nudges the enclosing fence(s). An unmanaged window has no tree
+                    // — the macOS layer (daemon) resizes it via AX, nothing to do here.
+                    if let Some(sid) = self.window_space(focused) {
+                        if *handle == HANDLE_ABS {
+                            return Err(
+                                "cannot use absolute resizing on a managed window.\n".to_string()
+                            );
+                        }
+                        let tree = self.spaces.get_mut(&sid).unwrap();
+                        if !tree.resize_window(focused, *handle, *dw, *dh) {
+                            return Err("cannot locate a bsp node fence.\n".to_string());
+                        }
+                    }
                 }
                 WindowAction::Ratio { kind, ratio } => {
                     // Acts on the window's *own* view (like the C
@@ -2932,6 +2948,73 @@ mod tests {
 
         assert_eq!(
             state.handle_tokens(&toks(&["window", "--ratio", "abs:0.7"])),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn window_resize_managed_rejects_abs_and_adjusts_fence() {
+        // Two windows split the space; resizing the left one's right fence moves
+        // the divider. The window's *own* space is used, not the active one.
+        let mut state = state_with_space();
+        state.add_space(2, Area::new(0.0, 0.0, 1000.0, 1000.0));
+        state.set_active_space(2);
+        state.add_window(1).unwrap();
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(1));
+        state.set_active_space(1);
+
+        let before = state
+            .space(2)
+            .unwrap()
+            .capture()
+            .iter()
+            .find(|f| f.window_id == 1)
+            .unwrap()
+            .area
+            .w;
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--resize", "right:100:0"])),
+            Ok(None)
+        );
+        let after = state
+            .space(2)
+            .unwrap()
+            .capture()
+            .iter()
+            .find(|f| f.window_id == 1)
+            .unwrap()
+            .area
+            .w;
+        assert!(after > before, "moving the right fence widens window 1");
+
+        // Absolute resizing of a managed window is rejected with the C string.
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--resize", "abs:400:400"])),
+            Err("cannot use absolute resizing on a managed window.\n".to_string())
+        );
+    }
+
+    #[test]
+    fn window_resize_managed_without_fence_reports_error() {
+        // A lone window is a root node: no fence can move in any direction.
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state.set_focused_window(Some(1));
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--resize", "right:100:0"])),
+            Err("cannot locate a bsp node fence.\n".to_string())
+        );
+    }
+
+    #[test]
+    fn window_resize_unmanaged_is_a_pure_noop() {
+        // An unmanaged (never-added) focused window has no tree; the pure model
+        // leaves it to the macOS layer and does not error.
+        let mut state = state_with_space();
+        state.set_focused_window(Some(99));
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--resize", "abs:400:400"])),
             Ok(None)
         );
     }

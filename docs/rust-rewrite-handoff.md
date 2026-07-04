@@ -58,6 +58,47 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 58) — `window --resize handle:dw:dh` (managed fence + unmanaged AX) + verified live
+
+- Implemented `window --resize`, previously incomplete: the pure `WindowAction::Resize`
+  arm blindly fence-resized the **active** tree (wrong space for a window on another
+  display), never rejected absolute resizing, and did nothing for unmanaged windows.
+  Now faithful to C `window_manager_resize_window_relative`, which splits on whether
+  the acting window is managed:
+  - **Managed (tiled):** absolute (`abs:`) resizing is rejected with `cannot use
+    absolute resizing on a managed window.` (C `WINDOW_OP_ERROR_INVALID_OPERATION`);
+    a directional handle nudges the enclosing fence(s) on the window's **own** space
+    (like `--ratio`), reporting `cannot locate a bsp node fence.` when the window is a
+    lone root node.
+  - **Unmanaged (float/untracked):** `abs:w:h` sets the AX size leaving the origin
+    fixed; a directional handle grows/shrinks the frame from the dragged edge, with
+    `top`/`left` also moving the origin so the opposite edge stays put — the exact
+    arithmetic of `window_manager_resize_window_relative_internal`.
+- **Pure core:** fixed the `WindowAction::Resize` arm in `app_state.rs` to resolve the
+  focused window's own space (`window_space`), reject managed-`abs`, and surface the
+  fence error. Unmanaged windows are a validated no-op in the pure model (the daemon
+  owns the AX effect). Three new runtime tests: managed abs-reject + fence adjust,
+  lone-root fence error, unmanaged pure no-op.
+- **Daemon glue:** new `try_window_resize` interceptor (after `try_window_move`,
+  before `try_space_focus`) mirrors `try_window_move`/`try_window_grid`. It owns the
+  **unmanaged** AX path and the managed-`abs` rejection; a managed **directional**
+  resize returns `None` so the pure fence math runs via the normal dispatch. The
+  relative-frame arithmetic is inlined (trivial, exactly as C, no pure helper — same
+  rationale as `--move`).
+- **Verified live on the remote (macOS 26.5.x):** daemon gap 10 / padding 10.
+  - Unmanaged (floated window 1183): `--resize abs:500:400` → origin fixed, size
+    500×400 (`SLSGetWindowBounds` readback). From a reset 800,100 600×400:
+    `left:60:0` → **860 100 540 400**, `right:120:0` → grows width origin-fixed,
+    `top:0:80` → **800 180 600 320**, `bottom:0:50` → **800 100 600 450** — each
+    matching the C formula exactly (positive `dw`/`dh` on a `left`/`top` handle
+    shrinks from that edge; a settle delay is needed because AX applies size
+    asynchronously, so an immediate readback lags one step).
+  - Managed (tiled window 1182): `--resize abs:400:400` → exit 1,
+    `cannot use absolute resizing on a managed window.`; `--resize right:100:0` →
+    the fence moved, width 692→791, exit 0.
+- Verification: `cargo fmt --all`; `cargo test --workspace` (187 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-03 (session 57) — `window --move abs|rel:dx:dy` (float/unmanaged) + verified live
 
 - Implemented `window --move`, previously an unhandled `WindowAction::Move` (fell to
@@ -1024,7 +1065,12 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    (pure `grid_frame` + `try_window_grid` glue, session 56, verified live; a managed
    window is rejected). `window --move abs|rel:dx:dy` repositions a floating/unmanaged
    window (leaving its size unchanged; managed windows rejected) via `try_window_move`
-   → `AxSink::set_frame` (session 57, verified live). Still to do:
+   → `AxSink::set_frame` (session 57, verified live). `window --resize handle:dw:dh`
+   resizes both kinds (session 58, verified live): a **managed** window's directional
+   handle nudges its own-space fence(s) in the pure core (abs rejected); an
+   **unmanaged** window is AX-resized by `try_window_resize` (`abs` sets the size
+   origin-fixed, a directional handle grows/shrinks from the dragged edge per C
+   `window_manager_resize_window_relative_internal`). Still to do:
    remaining deminimize/native-fullscreen-exit selectors and scratchpad. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop

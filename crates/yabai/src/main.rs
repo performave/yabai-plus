@@ -6,7 +6,7 @@ use std::sync::mpsc::{Sender, SyncSender, channel, sync_channel};
 use std::thread;
 use std::time::Duration;
 
-use yabai_core::layout::{HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
+use yabai_core::layout::{HANDLE_ABS, HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
     Area, FfmMode, Message, MouseAction, MouseModifier, Point, Selector, SignalEvent, SpaceAction,
     ValueType, WindowAction, grid_frame, parse_message, parse_selector,
@@ -1514,6 +1514,92 @@ fn try_window_move(runtime: &Runtime<AxSink>, tokens: &[String]) -> Option<Respo
         Some(Ok(None))
     } else {
         Some(Err(format!("could not move window '{wid}'.\n")))
+    }
+}
+
+/// Intercept `window [sel] --resize handle:dw:dh`, mirroring
+/// `window_manager_resize_window_relative`'s unmanaged branch. Only the
+/// **unmanaged** (floating/untracked) case is handled here via AX; a managed
+/// window's directional resize is left to the pure core's fence math (return
+/// `None` to fall through), while absolute resizing of a managed window is
+/// rejected. For an unmanaged window, `abs` sets the size to `(dw, dh)` leaving
+/// the origin fixed; a directional handle grows/shrinks the frame from the
+/// dragged edge (top/left handles also move the origin so the opposite edge
+/// stays put). Returns `None` for any other command.
+fn try_window_resize(runtime: &Runtime<AxSink>, tokens: &[String]) -> Option<Response> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Resize { handle, dw, dh }] = cmd.actions.as_slice() else {
+        return None;
+    };
+    let (handle, dw, dh) = (*handle, *dw, *dh);
+    let wid = match runtime.state.resolve_window_selector(cmd.target.as_ref()) {
+        Ok(wid) => wid,
+        Err(error) => return Some(Err(error)),
+    };
+    // Managed (tiled) windows are fence-resized by the pure core; only reject
+    // absolute resizing here and let the directional case fall through.
+    if runtime.state.window_space_id(wid).is_some() {
+        if handle == HANDLE_ABS {
+            return Some(Err(
+                "cannot use absolute resizing on a managed window.\n".to_string()
+            ));
+        }
+        return None;
+    }
+    let Some(frame) = runtime.sink.window_frame(wid) else {
+        return Some(Err(format!(
+            "could not locate window with the given id '{wid}'.\n"
+        )));
+    };
+    let target = if handle == HANDLE_ABS {
+        // Absolute: keep the origin, set the size.
+        Area {
+            x: frame.x,
+            y: frame.y,
+            w: dw,
+            h: dh,
+        }
+    } else {
+        // Relative: mirror `window_manager_resize_window_relative_internal`.
+        let x_mod = if handle & HANDLE_LEFT != 0 {
+            -1.0
+        } else if handle & HANDLE_RIGHT != 0 {
+            1.0
+        } else {
+            0.0
+        };
+        let y_mod = if handle & HANDLE_TOP != 0 {
+            -1.0
+        } else if handle & HANDLE_BOTTOM != 0 {
+            1.0
+        } else {
+            0.0
+        };
+        let fw = (frame.w + dw * x_mod).max(1.0);
+        let fh = (frame.h + dh * y_mod).max(1.0);
+        let fx = if handle & HANDLE_LEFT != 0 {
+            frame.x + frame.w - fw
+        } else {
+            frame.x
+        };
+        let fy = if handle & HANDLE_TOP != 0 {
+            frame.y + frame.h - fh
+        } else {
+            frame.y
+        };
+        Area {
+            x: fx,
+            y: fy,
+            w: fw,
+            h: fh,
+        }
+    };
+    if runtime.sink.set_frame(wid, target) {
+        Some(Ok(None))
+    } else {
+        Some(Err(format!("could not resize window '{wid}'.\n")))
     }
 }
 
@@ -3434,14 +3520,17 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                     Some(response) => response,
                                     None => match try_window_move(&runtime, &tokens) {
                                         Some(response) => response,
-                                        None => match try_space_focus(
-                                            &scripting_addition,
-                                            &mut runtime,
-                                            &display_frames,
-                                            &tokens,
-                                        ) {
+                                        None => match try_window_resize(&runtime, &tokens) {
                                             Some(response) => response,
-                                            None => runtime.message(&tokens),
+                                            None => match try_space_focus(
+                                                &scripting_addition,
+                                                &mut runtime,
+                                                &display_frames,
+                                                &tokens,
+                                            ) {
+                                                Some(response) => response,
+                                                None => runtime.message(&tokens),
+                                            },
                                         },
                                     },
                                 },

@@ -1309,6 +1309,7 @@ fn try_window_deminimize(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
     signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
+    display_frames: &[(u32, Area)],
     minimized_pids: &mut HashMap<u32, i32>,
     tokens: &[String],
 ) -> Option<Response> {
@@ -1336,7 +1337,7 @@ fn try_window_deminimize(
         )));
     }
 
-    reconcile_pid(sa, runtime, managed, signaled, pid);
+    reconcile_pid(sa, runtime, managed, signaled, display_frames, pid);
     let meta = runtime.state.window_meta(window_id).or_else(|| {
         signaled
             .get(&pid)
@@ -1413,6 +1414,7 @@ fn try_window_native_fullscreen_exit(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
     signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
+    display_frames: &[(u32, Area)],
     fullscreen_pids: &mut HashMap<u32, i32>,
     tokens: &[String],
 ) -> Option<Response> {
@@ -1435,7 +1437,7 @@ fn try_window_native_fullscreen_exit(
         )));
     }
 
-    reconcile_pid(sa, runtime, managed, signaled, pid);
+    reconcile_pid(sa, runtime, managed, signaled, display_frames, pid);
     Some(Ok(None))
 }
 
@@ -1461,19 +1463,26 @@ fn try_window_grid(
         Ok(wid) => wid,
         Err(error) => return Some(Err(error)),
     };
+    Some(window_grid_for_id(runtime, display_frames, wid, spec).map(|()| None))
+}
+
+fn window_grid_for_id(
+    runtime: &Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    wid: u32,
+    spec: [i32; 6],
+) -> Result<(), String> {
     // A managed (tiled) window lives in a layout tree; grid only applies to
     // unmanaged windows (C returns WINDOW_OP_ERROR_INVALID_SRC_VIEW).
     if runtime.state.window_space_id(wid).is_some() {
-        return Some(Err(
-            "cannot apply grid layout to a managed window.\n".to_string()
-        ));
+        return Err("cannot apply grid layout to a managed window.\n".to_string());
     }
     // Locate the window's display from its live frame, then inset that display's
     // usable bounds by the display's active-space padding/gap, as the C view does.
     let Some(frame) = runtime.sink.window_frame(wid) else {
-        return Some(Err(format!(
+        return Err(format!(
             "could not locate window with the given id '{wid}'.\n"
-        )));
+        ));
     };
     let center = Point {
         x: frame.x + frame.w / 2.0,
@@ -1483,9 +1492,7 @@ fn try_window_grid(
         .iter()
         .find(|(_, area)| area.contains_point(center))
     else {
-        return Some(Err(format!(
-            "could not locate the display of window '{wid}'.\n"
-        )));
+        return Err(format!("could not locate the display of window '{wid}'.\n"));
     };
     let (padding, gap) = match runtime.state.display_active_space_id(did) {
         Some(sid) => runtime.state.grid_insets(sid),
@@ -1501,11 +1508,9 @@ fn try_window_grid(
     };
     let target = grid_frame(bounds, padding, gap, spec);
     if runtime.sink.set_frame(wid, target) {
-        Some(Ok(None))
+        Ok(())
     } else {
-        Some(Err(format!(
-            "could not apply grid layout to window '{wid}'.\n"
-        )))
+        Err(format!("could not apply grid layout to window '{wid}'.\n"))
     }
 }
 
@@ -1946,7 +1951,7 @@ fn try_scripting_addition(
                 .state
                 .apply_rule_and_collect_effects(apply)
                 .map(|applications| {
-                    apply_rule_effects_via_sa(sa, runtime, &applications);
+                    apply_rule_effects_at_boundary(sa, runtime, display_frames, &applications);
                     runtime.state.flush_all_active_to(&mut runtime.sink);
                     None
                 });
@@ -1959,9 +1964,10 @@ fn try_scripting_addition(
     }
 }
 
-fn apply_rule_effects_via_sa(
+fn apply_rule_effects_at_boundary(
     sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
     applications: &[AppliedRuleEffects],
 ) {
     for application in applications {
@@ -1975,6 +1981,10 @@ fn apply_rule_effects_via_sa(
         }
         if let Some(opacity) = effects.opacity {
             let _ = window_opacity_for_id_via_sa(sa, runtime, wid, opacity);
+        }
+        if let Some(grid) = effects.grid {
+            let spec = grid.map(|value| value as i32);
+            let _ = window_grid_for_id(runtime, display_frames, wid, spec);
         }
     }
 }
@@ -3201,12 +3211,14 @@ fn geometry_signal_frame_changed(signal: SignalEvent, expected: Area, actual: Ar
 
 /// Apply matching window rules to a window. Currently enacts the `manage` effect
 /// (off -> float, on -> tile), scratchpad assignment, and SA-backed sticky,
-/// sub-layer, and opacity effects. Other effects (grid/display/space/fullscreen)
-/// are parsed and stored but their application is deferred. Role/subrole are
-/// unknown at the AX layer here, so rules filtering on them will not match yet.
+/// sub-layer, opacity, plus AX-backed grid placement. Other effects
+/// (display/space/fullscreen) are parsed and stored but their application is
+/// deferred. Role/subrole are unknown at the AX layer here, so rules filtering on
+/// them will not match yet.
 fn apply_window_rules(
     sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
     window_id: u32,
     app: &str,
     title: &str,
@@ -3220,7 +3232,7 @@ fn apply_window_rules(
         sid,
         effects,
     };
-    apply_rule_effects_via_sa(sa, runtime, &[application]);
+    apply_rule_effects_at_boundary(sa, runtime, display_frames, &[application]);
 }
 
 fn sync_window_lifecycle_signals(
@@ -3285,6 +3297,7 @@ fn reconcile_pid(
     runtime: &mut Runtime<AxSink>,
     managed: &mut HashMap<i32, HashSet<u32>>,
     signaled: &mut HashMap<i32, HashMap<u32, WindowMeta>>,
+    display_frames: &[(u32, Area)],
     pid: i32,
 ) {
     sync_window_lifecycle_signals(runtime, signaled, pid);
@@ -3321,7 +3334,7 @@ fn reconcile_pid(
             .handle_event(StateEvent::WindowAssignedToSpace { window_id: id, sid });
         // Apply window rules once, when the window is first seen.
         if is_new {
-            apply_window_rules(sa, runtime, id, &app, &title, sid);
+            apply_window_rules(sa, runtime, display_frames, id, &app, &title, sid);
         }
         // Else it is already managed; the freshly discovered duplicate element
         // drops here, leaving the existing registration intact.
@@ -3567,6 +3580,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
             &mut runtime,
             &mut managed,
             &mut signaled,
+            &display_frames,
             *pid,
         );
     }
@@ -3700,6 +3714,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         &mut runtime,
                         &mut managed,
                         &mut signaled,
+                        &display_frames,
                         pid,
                     );
                     // Focus may have moved to a window on another display; point the
@@ -3740,6 +3755,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                 &mut runtime,
                                 &mut managed,
                                 &mut signaled,
+                                &display_frames,
                                 pid,
                             );
                         }
@@ -3773,6 +3789,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                 &mut runtime,
                                 &mut managed,
                                 &mut signaled,
+                                &display_frames,
                                 pid,
                             );
                         }
@@ -3981,6 +3998,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             &mut runtime,
                             &mut managed,
                             &mut signaled,
+                            &display_frames,
                             pid,
                         );
                     }
@@ -3999,6 +4017,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         &mut runtime,
                         &mut managed,
                         &mut signaled,
+                        &display_frames,
                         &mut fullscreen_pids,
                         &tokens,
                     );
@@ -4010,6 +4029,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             &mut runtime,
                             &mut managed,
                             &mut signaled,
+                            &display_frames,
                             &mut minimized_pids,
                             &tokens,
                         ) {
@@ -4101,6 +4121,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                         &mut runtime,
                                         &mut managed,
                                         &mut signaled,
+                                        &display_frames,
                                         pid,
                                     );
                                 }
@@ -4128,6 +4149,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                         &mut runtime,
                                         &mut managed,
                                         &mut signaled,
+                                        &display_frames,
                                         pid,
                                     );
                                 }
@@ -4154,6 +4176,7 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                         &mut runtime,
                                         &mut managed,
                                         &mut signaled,
+                                        &display_frames,
                                         pid,
                                     );
                                 }

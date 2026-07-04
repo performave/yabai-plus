@@ -46,8 +46,8 @@ reconstructing context.
   one-shot removal, regex matching, live pure effects for `manage`
   (`manage=off` floats/untiles, `manage=on` retiles) and `scratchpad=`
   (assigns/floats), plus best-effort SA-backed `sticky`, `sub-layer`, and
-  `opacity` effects for new windows and `rule --apply`; remaining rule effects
-  are parsed/stored but deferred. Per-space
+  `opacity` effects and AX-backed `grid=` placement for new windows and
+  `rule --apply`; remaining rule effects are parsed/stored but deferred. Per-space
   `space --gap`/`--padding` (abs/rel) are dispatched and
   survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
   `window --raise`/`--lower` reorder a window's z-stacking (above/below an optional
@@ -65,6 +65,29 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 73) — rule `grid=` effect via daemon boundary
+
+- Extended the rule-effect daemon boundary beyond SA-only effects: matching
+  `grid=r:c:x:y:w:h` now reuses the same `window --grid` frame computation and AX
+  placement path for both newly discovered windows and `rule --apply`.
+- Extracted a shared `window_grid_for_id` helper from `try_window_grid` so direct
+  commands keep their existing errors while rule effects remain best-effort, like
+  the C `window_manager_apply_rule_effects_to_window` caller.
+- Renamed the pure collection test to
+  `rule_apply_collects_daemon_boundary_effects` and included `grid=` in the
+  collected effects handed from `AppState` to the daemon.
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with `com.test.yabai`, refreshed the SSH-session Accessibility grant,
+  and confirmed SA healthy. Isolated Finder daemon on `/tmp/yabai_rulegrid.socket`
+  applied `rule --apply app=^Finder$ manage=off grid=1:2:0:0:1:1`; direct
+  `--experimental-window-bounds` readback for Finder windows reported exact
+  left-half frames (`55 33 707 923`). Restored with
+  `rule --apply app=^Finder$ manage=on`, confirmed the daemon query returned 18
+  tiled Finder windows, then stopped the isolated daemon.
+- Verification: `cargo fmt --all`; targeted runtime/daemon tests;
+  `cargo test --workspace` (193 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-04 (session 72) — SA-backed rule effects for sticky/layer/opacity
 
@@ -1335,7 +1358,9 @@ deminimize/title-change events and app/title filters for metadata-carrying event
     (autofocus/autoraise) via a mouse-moved `CGEventTap`; `window_opacity` auto
     active/normal opacity on focus change; mouse drag-to-move/resize/drop
     (`mouse_modifier` + left/right drag, `mouse_action1`/`mouse_action2`,
-    `mouse_drop_action`) via an active `CGEventTap`.
+    `mouse_drop_action`) via an active `CGEventTap`; `rule` effects for
+    `manage=`, `scratchpad=`, `sticky=`, `sub-layer=`, `opacity=`, and `grid=`
+    on new windows and `rule --apply`.
 
 ### Do these next, in order (Phase 5/6 breadth — the big remaining work)
 

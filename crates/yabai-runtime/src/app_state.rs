@@ -4019,7 +4019,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_apply_collects_sa_backed_effects_for_daemon() {
+    fn rule_apply_collects_daemon_boundary_effects() {
         let mut state = state_with_space();
         state.add_window(1).unwrap();
         state.add_window(2).unwrap();
@@ -4048,6 +4048,7 @@ mod tests {
                 "sticky=on",
                 "opacity=0.5",
                 "sub-layer=above",
+                "grid=2:2:0:1:1:1",
             ]))
             .unwrap();
 
@@ -4060,6 +4061,7 @@ mod tests {
         assert_eq!(applications[0].effects.sticky, Some(true));
         assert_eq!(applications[0].effects.opacity, Some(0.5));
         assert_eq!(applications[0].effects.layer, Some(Layer::Above));
+        assert_eq!(applications[0].effects.grid, Some([2, 2, 0, 1, 1, 1]));
     }
 
     #[test]

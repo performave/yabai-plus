@@ -1264,24 +1264,32 @@ fn is_window_close(tokens: &[String]) -> bool {
     )
 }
 
-/// Extract the target from a standalone `window <sel> --deminimize`. Minimized
-/// windows are no longer in the layout tree, so only numeric ids and registry
-/// order selectors are resolved here.
+/// Extract the target selector from a standalone `window` command that accepts
+/// either a leading target (`window <sel> --cmd`) or the C-style trailing target
+/// (`window --cmd <sel>`). The trailing form matters for commands such as
+/// `--deminimize`, where the target window is absent from the layout tree.
+fn standalone_window_selector(tokens: &[String], command: &str) -> Option<Option<Selector>> {
+    match tokens {
+        [domain, cmd] if domain == "window" && cmd == command => Some(None),
+        [domain, sel, cmd] if domain == "window" && cmd == command => {
+            Some(Some(parse_selector(sel)))
+        }
+        [domain, cmd, sel] if domain == "window" && cmd == command => {
+            Some(Some(parse_selector(sel)))
+        }
+        _ => None,
+    }
+}
+
+/// Extract the target from a standalone `window [sel] --deminimize` or
+/// `window --deminimize <sel>`. Minimized windows are no longer in the layout
+/// tree, so only numeric ids and registry order selectors are resolved here.
 fn window_deminimize_target(
     tokens: &[String],
     minimized_ids: &[u32],
 ) -> Option<Result<u32, String>> {
-    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
-        return None;
-    };
-    let [WindowAction::Deminimize] = cmd.actions.as_slice() else {
-        return None;
-    };
-
-    Some(resolve_deminimize_target(
-        cmd.target.as_ref(),
-        minimized_ids,
-    ))
+    let target = standalone_window_selector(tokens, "--deminimize")?;
+    Some(resolve_deminimize_target(target.as_ref(), minimized_ids))
 }
 
 fn resolve_deminimize_target(
@@ -1354,6 +1362,23 @@ fn try_window_deminimize(
     Some(Ok(None))
 }
 
+/// Extract the target selector from a standalone `window [sel] --toggle
+/// native-fullscreen` or `window --toggle native-fullscreen [sel]` command.
+fn standalone_native_fullscreen_selector(tokens: &[String]) -> Option<Option<Selector>> {
+    match tokens {
+        [domain, toggle, name] if domain == "window" && toggle == "--toggle" => {
+            (name == "native-fullscreen").then_some(None)
+        }
+        [domain, sel, toggle, name] if domain == "window" && toggle == "--toggle" => {
+            (name == "native-fullscreen").then(|| Some(parse_selector(sel)))
+        }
+        [domain, toggle, name, sel] if domain == "window" && toggle == "--toggle" => {
+            (name == "native-fullscreen").then(|| Some(parse_selector(sel)))
+        }
+        _ => None,
+    }
+}
+
 /// True if `tokens` is a `window [sel] --toggle native-fullscreen` command.
 fn is_window_native_fullscreen(tokens: &[String]) -> bool {
     matches!(
@@ -1366,24 +1391,17 @@ fn is_window_native_fullscreen(tokens: &[String]) -> bool {
     )
 }
 
-/// Resolve the target of `window [sel] --toggle native-fullscreen` against the
-/// set of windows currently in native fullscreen (which have left the layout
-/// trees). The outer `Option` distinguishes "not this toggle" (`None`) from "this
-/// toggle"; the inner `Option` is the resolved fullscreen window id, or `None`
-/// when no fullscreen window matches — meaning this is an *enter* request that
-/// the normal command path handles. Numeric ids, `first`/`last`, and a bare
-/// command when exactly one window is fullscreen are resolved here.
+/// Resolve the target of `window [sel] --toggle native-fullscreen` or `window
+/// --toggle native-fullscreen [sel]` against the set of windows currently in
+/// native fullscreen (which have left the layout trees). The outer `Option`
+/// distinguishes "not this toggle" (`None`) from "this toggle"; the inner
+/// `Option` is the resolved fullscreen window id, or `None` when no fullscreen
+/// window matches — meaning this is an *enter* request that the normal command
+/// path handles. Numeric ids, `first`/`last`, and a bare command when exactly one
+/// window is fullscreen are resolved here.
 fn window_fullscreen_exit_target(tokens: &[String], fullscreen_ids: &[u32]) -> Option<Option<u32>> {
-    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
-        return None;
-    };
-    let [WindowAction::Toggle(name)] = cmd.actions.as_slice() else {
-        return None;
-    };
-    if name != "native-fullscreen" {
-        return None;
-    }
-    let resolved = match cmd.target.as_ref() {
+    let target = standalone_native_fullscreen_selector(tokens)?;
+    let resolved = match target.as_ref() {
         Some(Selector::Index(id)) if fullscreen_ids.contains(id) => Some(*id),
         Some(Selector::First) => fullscreen_ids.first().copied(),
         Some(Selector::Last) => fullscreen_ids.last().copied(),
@@ -4290,6 +4308,13 @@ mod tests {
         .unwrap();
         assert_eq!(first, Ok(7));
 
+        let trailing_first = window_deminimize_target(
+            &["window".into(), "--deminimize".into(), "first".into()],
+            &[7, 9],
+        )
+        .unwrap();
+        assert_eq!(trailing_first, Ok(7));
+
         let last = window_deminimize_target(
             &["window".into(), "last".into(), "--deminimize".into()],
             &[7, 9],
@@ -4326,6 +4351,15 @@ mod tests {
         tokens
     }
 
+    fn fs_toggle_trailing(sel: &str) -> Vec<String> {
+        vec![
+            "window".to_string(),
+            "--toggle".to_string(),
+            "native-fullscreen".to_string(),
+            sel.to_string(),
+        ]
+    }
+
     #[test]
     fn fullscreen_exit_target_resolves_only_registered_windows() {
         // Not the native-fullscreen toggle: outer None so the normal path runs.
@@ -4346,6 +4380,10 @@ mod tests {
         // Exact id, first, last, and the single-entry bare form all resolve.
         assert_eq!(
             window_fullscreen_exit_target(&fs_toggle(Some("9")), &[7, 9]),
+            Some(Some(9))
+        );
+        assert_eq!(
+            window_fullscreen_exit_target(&fs_toggle_trailing("9"), &[7, 9]),
             Some(Some(9))
         );
         assert_eq!(

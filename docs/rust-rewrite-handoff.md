@@ -17,8 +17,9 @@ reconstructing context.
   the first real `LayoutSink` (`AxSink`) moving windows via the Accessibility API
   plus live CoreGraphics display discovery, display/space topology reconciliation,
   and AX window diagnostics. Live `window --deminimize` works for numeric,
-  `first`, and `last` selectors restored from the daemon's minimized-window AX
-  registry, and `window --close` is wired through the AX close button.
+  `first`, and `last` selectors (including C-style trailing selector syntax)
+  restored from the daemon's minimized-window AX registry, and `window --close`
+  is wired through the AX close button.
   `window --toggle native-fullscreen` enters/exits via the `AXFullScreen`
   attribute with a fullscreen AX registry mirroring minimize. `mouse_action1` /
   `mouse_action2` drags now move or resize windows via an active mouse event tap
@@ -61,6 +62,28 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-04 (session 63) — C-style trailing selectors for deminimize + native-fullscreen exit
+
+- Fixed a selector-grammar compatibility gap in the Rust WM daemon interceptors.
+  `window --deminimize <sel>` now resolves the same numeric/`first`/`last`
+  minimized-window registry selectors as the earlier leading-target form
+  (`window <sel> --deminimize`). This matches the documented C command shape in
+  `docs/rust-rewrite-compat.md`; unsupported selectors still fail explicitly
+  instead of being guessed from unrelated live state.
+- `window --toggle native-fullscreen <id|first|last>` now resolves registered
+  fullscreen windows for the exit half, in addition to the existing leading-target
+  form and bare single-fullscreen-window exit. Non-registered numeric ids still
+  fall through as enter/normal command validation, preserving the prior behavior.
+- **Verified live on the remote (macOS 26):** Rust WM daemon on
+  `/tmp/yabai_selector.socket`, SA healthy. Minimized Finder window `1321`; it left
+  `query --windows`, then `window --deminimize first` restored it. Entered native
+  fullscreen for the same Finder window (`window 1321 --toggle native-fullscreen`);
+  it left `query --windows`, then `window --toggle native-fullscreen 1321` restored
+  it to the query. Isolated remote daemon was stopped afterward.
+- Verification: `cargo fmt --all`; `cargo test -p yabai`; `cargo test --workspace`
+  (191 tests); `cargo clippy --workspace --all-targets` (clean);
+  `cargo build --release -p yabai`.
 
 ### 2026-07-04 (session 62) — `window --scratchpad` + `--toggle <label>` + verified live
 
@@ -1227,7 +1250,9 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    (`yabai_macos::coredock` + `try_window_expose`, session 61 — dispatches cleanly but
    the transient Mission Control animation isn't SSH-verifiable). `window --scratchpad`
    assign/remove/recover and `window --toggle <label>` hide/show are done and verified
-   live (session 62). Still to do: remaining deminimize/native-fullscreen-exit selectors. Mouse
+   live (session 62). Deminimize/native-fullscreen exit support numeric/`first`/`last`
+   in both leading-target and C-style trailing-selector forms (session 63); broader
+   selector breadth is still deferred. Mouse
    drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified

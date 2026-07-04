@@ -9,7 +9,7 @@ use std::time::Duration;
 use yabai_core::layout::{HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
     Area, FfmMode, Message, MouseAction, MouseModifier, Point, Selector, SignalEvent, SpaceAction,
-    WindowAction, parse_message, parse_selector,
+    WindowAction, grid_frame, parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
@@ -1400,6 +1400,76 @@ fn try_window_native_fullscreen_exit(
 
     reconcile_pid(runtime, managed, signaled, pid);
     Some(Ok(None))
+}
+
+/// Intercept `window [sel] --grid r:c:x:y:w:h`, mirroring the C
+/// `window_manager_apply_grid`. Grid targets an **unmanaged** (floating/untracked)
+/// window: a managed (tiled) window is rejected. The frame is computed purely from
+/// the acting window's display's usable bounds inset by that space's padding/gap
+/// ([`grid_frame`]) and applied directly via AX. Returns `None` for any other
+/// command so the normal dispatch chain handles it.
+fn try_window_grid(
+    runtime: &Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    tokens: &[String],
+) -> Option<Response> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    let [WindowAction::Grid(spec)] = cmd.actions.as_slice() else {
+        return None;
+    };
+    let spec = *spec;
+    let wid = match runtime.state.resolve_window_selector(cmd.target.as_ref()) {
+        Ok(wid) => wid,
+        Err(error) => return Some(Err(error)),
+    };
+    // A managed (tiled) window lives in a layout tree; grid only applies to
+    // unmanaged windows (C returns WINDOW_OP_ERROR_INVALID_SRC_VIEW).
+    if runtime.state.window_space_id(wid).is_some() {
+        return Some(Err(
+            "cannot apply grid layout to a managed window.\n".to_string()
+        ));
+    }
+    // Locate the window's display from its live frame, then inset that display's
+    // usable bounds by the display's active-space padding/gap, as the C view does.
+    let Some(frame) = runtime.sink.window_frame(wid) else {
+        return Some(Err(format!(
+            "could not locate window with the given id '{wid}'.\n"
+        )));
+    };
+    let center = Point {
+        x: frame.x + frame.w / 2.0,
+        y: frame.y + frame.h / 2.0,
+    };
+    let Some(&(did, bounds)) = display_frames
+        .iter()
+        .find(|(_, area)| area.contains_point(center))
+    else {
+        return Some(Err(format!(
+            "could not locate the display of window '{wid}'.\n"
+        )));
+    };
+    let (padding, gap) = match runtime.state.display_active_space_id(did) {
+        Some(sid) => runtime.state.grid_insets(sid),
+        None => (
+            [
+                runtime.state.config.top_padding,
+                runtime.state.config.bottom_padding,
+                runtime.state.config.left_padding,
+                runtime.state.config.right_padding,
+            ],
+            runtime.state.config.window_gap,
+        ),
+    };
+    let target = grid_frame(bounds, padding, gap, spec);
+    if runtime.sink.set_frame(wid, target) {
+        Some(Ok(None))
+    } else {
+        Some(Err(format!(
+            "could not apply grid layout to window '{wid}'.\n"
+        )))
+    }
 }
 
 /// Intercept a standalone `space --focus <selector>` and enact the active-space
@@ -3315,8 +3385,9 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                 &tokens,
                             ) {
                                 Some(response) => response,
-                                None => {
-                                    match try_space_focus(
+                                None => match try_window_grid(&runtime, &display_frames, &tokens) {
+                                    Some(response) => response,
+                                    None => match try_space_focus(
                                         &scripting_addition,
                                         &mut runtime,
                                         &display_frames,
@@ -3324,8 +3395,8 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                     ) {
                                         Some(response) => response,
                                         None => runtime.message(&tokens),
-                                    }
-                                }
+                                    },
+                                },
                             },
                         },
                     };

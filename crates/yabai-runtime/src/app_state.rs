@@ -869,6 +869,19 @@ impl AppState {
         ])
     }
 
+    /// The `([top, bottom, left, right] padding, gap)` a space lays out with —
+    /// the per-space `space --gap`/`--padding` overrides if set, else the global
+    /// config. Used by `window --grid` to inset the display bounds the way the
+    /// space's own view would (C `window_manager_apply_grid`).
+    pub fn grid_insets(&self, sid: u64) -> ([i32; 4], i32) {
+        let gap = self
+            .spaces
+            .get(&sid)
+            .map(|tree| tree.config.gap)
+            .unwrap_or(self.config.window_gap);
+        (self.space_padding(sid), gap)
+    }
+
     /// `space_manager_set_gap_for_space`: set (`abs`) or adjust (`rel`, clamped to
     /// zero) a space's own window gap and re-tile. Errors on a float space.
     fn set_space_gap(&mut self, sid: u64, kind: ValueType, gap: i32) -> Result<(), String> {

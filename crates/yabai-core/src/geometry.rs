@@ -120,6 +120,60 @@ fn truncate_like_c(value: f32) -> f32 {
     (value as i32) as f32
 }
 
+/// The frame for `window --grid r:c:x:y:w:h` within `bounds` (a display's usable
+/// area, C `display_bounds_constrained`), inset by `padding` (`[top, bottom, left,
+/// right]`) and `gap`. Mirrors the cell math in the C
+/// `window_manager_apply_grid`: the spec is clamped into range, the bounds are
+/// inset by the space's padding and (per-edge) window gap, then the requested
+/// `w`x`h` block of a `c`x`r` cell grid is measured back from the far edge so
+/// rounding accumulates away from the origin exactly as the C does.
+///
+/// `spec` is `[r, c, x, y, w, h]` (rows, cols, cell col, cell row, col span, row
+/// span), the order the `--grid` parser produces.
+///
+/// Divergence from C: `r`/`c` are clamped to at least 1 (C uses `unsigned`, so a
+/// `0` there underflows); every other clamp matches.
+pub fn grid_frame(bounds: Area, padding: [i32; 4], gap: i32, spec: [i32; 6]) -> Area {
+    let [r, c, x, y, w, h] = spec;
+    let r = r.max(1);
+    let c = c.max(1);
+    let x = x.clamp(0, c - 1);
+    let y = y.clamp(0, r - 1);
+    let w = w.max(1).min(c - x);
+    let h = h.max(1).min(r - y);
+
+    let [top, bottom, left, right] = padding;
+    let mut bx = bounds.x + left as f32;
+    let mut by = bounds.y + top as f32;
+    let mut bw = bounds.w - (left + right) as f32;
+    let mut bh = bounds.h - (top + bottom) as f32;
+
+    let gap = gap as f32;
+    if x > 0 {
+        bx += gap;
+        bw -= gap;
+    }
+    if y > 0 {
+        by += gap;
+        bh -= gap;
+    }
+    if c > x + w {
+        bw -= gap;
+    }
+    if r > y + h {
+        bh -= gap;
+    }
+
+    let cw = bw / c as f32;
+    let ch = bh / r as f32;
+    Area::new(
+        bx + bw - cw * (c - x) as f32,
+        by + bh - ch * (r - y) as f32,
+        cw * w as f32,
+        ch * h as f32,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +326,64 @@ mod tests {
         assert_eq!(
             closest_display_in_direction(&display_list, 2, Direction::East),
             None
+        );
+    }
+
+    #[test]
+    fn grid_frame_no_padding_no_gap() {
+        let bounds = Area::new(0.0, 0.0, 1000.0, 800.0);
+        // Full display: 1x1 grid, cell (0,0) 1x1 -> the whole bounds.
+        assert_eq!(
+            grid_frame(bounds, [0; 4], 0, [1, 1, 0, 0, 1, 1]),
+            Area::new(0.0, 0.0, 1000.0, 800.0)
+        );
+        // 2x2 grid, top-left cell (col 0, row 0) -> left half, top half.
+        assert_eq!(
+            grid_frame(bounds, [0; 4], 0, [2, 2, 0, 0, 1, 1]),
+            Area::new(0.0, 0.0, 500.0, 400.0)
+        );
+        // 2x2 grid, bottom-right cell (col 1, row 1) -> right half, bottom half.
+        assert_eq!(
+            grid_frame(bounds, [0; 4], 0, [2, 2, 1, 1, 1, 1]),
+            Area::new(500.0, 400.0, 500.0, 400.0)
+        );
+        // A 2x1 block spanning both columns of the top row -> full width, top half.
+        assert_eq!(
+            grid_frame(bounds, [0; 4], 0, [2, 2, 0, 0, 2, 1]),
+            Area::new(0.0, 0.0, 1000.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn grid_frame_applies_padding_and_gap() {
+        // 20px on every edge of padding, 10px gap; 2x2 grid, top-left cell.
+        // Width after padding: 1000-40 = 960; the interior edge loses the 10px gap
+        // -> 950 across two columns = 475 each. Height: 800-40 = 760, -10 = 750,
+        // /2 = 375 each.
+        let bounds = Area::new(0.0, 0.0, 1000.0, 800.0);
+        assert_eq!(
+            grid_frame(bounds, [20, 20, 20, 20], 10, [2, 2, 0, 0, 1, 1]),
+            Area::new(20.0, 20.0, 475.0, 375.0)
+        );
+        // The bottom-right cell starts a gap past the midpoint (origin += gap).
+        assert_eq!(
+            grid_frame(bounds, [20, 20, 20, 20], 10, [2, 2, 1, 1, 1, 1]),
+            Area::new(505.0, 405.0, 475.0, 375.0)
+        );
+    }
+
+    #[test]
+    fn grid_frame_clamps_out_of_range_spec() {
+        let bounds = Area::new(0.0, 0.0, 1000.0, 800.0);
+        // x/y past the grid clamp to the last cell; w/h past the edge clamp to fit.
+        assert_eq!(
+            grid_frame(bounds, [0; 4], 0, [2, 2, 5, 5, 9, 9]),
+            grid_frame(bounds, [0; 4], 0, [2, 2, 1, 1, 1, 1])
+        );
+        // A degenerate 0x0 grid is treated as 1x1 (avoids divide-by-zero).
+        assert_eq!(
+            grid_frame(bounds, [0; 4], 0, [0, 0, 0, 0, 1, 1]),
+            Area::new(0.0, 0.0, 1000.0, 800.0)
         );
     }
 }

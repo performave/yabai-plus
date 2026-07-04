@@ -12,7 +12,7 @@ pub use command::{
     WindowCommand, parse_config, parse_display, parse_domain, parse_message, parse_query,
     parse_rule, parse_signal, parse_space, parse_window,
 };
-pub use geometry::{Area, Direction, Point, Split};
+pub use geometry::{Area, Direction, Point, Split, grid_frame};
 pub use layout::{
     Child, InsertDirection, InsertionPolicy, LayoutConfig, Node, NodeId, NodeSplit, Tree, ViewType,
     WindowFrame, ZoomKind,

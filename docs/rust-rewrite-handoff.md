@@ -45,7 +45,8 @@ reconstructing context.
   one-shot removal, regex matching, and the live `manage` effect (`manage=off`
   floats/untiles, `manage=on` retiles); other rule effects are parsed/stored but
   deferred. Per-space `space --gap`/`--padding` (abs/rel) are dispatched and
-  survive reconciles. 181 workspace tests pass. The shipped C `make` flow is unchanged.
+  survive reconciles; `window --grid` places a floating/unmanaged window on a grid.
+  184 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-03.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -56,6 +57,40 @@ reconstructing context.
     forcing literal Rust at the cost of fragile injection behavior.
 
 ## Progress log
+
+### 2026-07-03 (session 56) — `window --grid r:c:x:y:w:h` (float/unmanaged) + verified live
+
+- Implemented `window --grid`, previously an unhandled `WindowAction::Grid` (fell to
+  the "window action not yet handled" arm). Mirrors C `window_manager_apply_grid`:
+  grid targets an **unmanaged** (floating/untracked) window and places it in a
+  `w`×`h` block of a `c`×`r` cell grid over its display's usable area; a **managed**
+  (tiled) window is rejected with `cannot apply grid layout to a managed window.`
+  (C `WINDOW_OP_ERROR_INVALID_SRC_VIEW`).
+- **Pure core:** new `yabai_core::geometry::grid_frame(bounds, padding, gap, spec)`
+  (`spec = [r,c,x,y,w,h]`). Clamps the spec into range, insets `bounds` (the
+  display's usable frame, C `display_bounds_constrained`) by the space's padding and
+  per-edge window gap, then measures the requested block back from the far edge so
+  rounding accumulates away from the origin exactly as C does. One documented
+  divergence: `r`/`c` are clamped to ≥1 (C uses `unsigned`, so `0` underflows).
+  Three unit tests (no-inset cells, padding+gap insets, out-of-range/degenerate
+  clamping).
+- **Daemon glue:** `try_window_grid` interceptor (before the generic dispatch)
+  resolves the acting window, rejects it if it's in a layout tree
+  (`window_space_id(wid).is_some()`), finds its display from its live AX frame
+  (`AxSink::window_frame` → center in `display_frames`), pulls that display's
+  active-space padding/gap via the new `AppState::grid_insets(sid)` (per-space
+  `space --gap`/`--padding` overrides else global config), computes the frame, and
+  applies it with `AxSink::set_frame`.
+- **Verified live on the remote (macOS 26.5.1):** daemon gap 0 / padding 0, display
+  1 usable frame ≈ (55, 33, 1415, 923).
+  - `window --focus 1151; --toggle float; --grid 1:2:0:0:1:1` (left half) →
+    **(55, 33, 707, 923)**, exact (`SLSGetWindowBounds` readback).
+  - `--grid 2:2:1:1:1:1` (bottom-right quarter) → **(762, 495, 707, 462)**, matching
+    the computed (762.5, 494.5, 707.5, 461.5) modulo AX half-pixel rounding.
+  - `window 1150 --grid 1:2:0:0:1:1` on a still-**managed** window → exit 1,
+    `cannot apply grid layout to a managed window.`
+- Verification: `cargo fmt --all`; `cargo test --workspace` (184 tests);
+  `cargo clippy --workspace --all-targets` (clean); `cargo build --release -p yabai`.
 
 ### 2026-07-03 (session 55) — per-space `space --gap` / `space --padding` (abs/rel) + verified live
 
@@ -946,9 +981,12 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    sticky` (SA `set_sticky` + untile/re-tile) and `--toggle shadow` (SA `set_shadow`)
    are all wired through the SA and verified live (session 37); the parser already
    produces `--sub-layer` as `WindowAction::Raw`, so no grammar change was needed
-   (the C command is `--sub-layer`, not `--layer`). Still to do:
-   remaining deminimize/native-fullscreen-exit selectors, and
-   scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag),
+   (the C command is `--sub-layer`, not `--layer`). `window --grid r:c:x:y:w:h`
+   places a floating/unmanaged window on a grid over its display's usable area
+   (pure `grid_frame` + `try_window_grid` glue, session 56, verified live; a managed
+   window is rejected). Still to do:
+   remaining deminimize/native-fullscreen-exit selectors, `window --move` (floating
+   reposition), and scratchpad. Mouse drag-to-**move** (`mouse_modifier` + left-drag),
    drag-to-**resize** (`mouse_action2` + right-drag), and same-space tiled drop
    actions (`swap`/`stack` center drops plus edge-zone warps) are done and verified
    live (sessions 41-43). Cross-space/cross-display drops are also done and verified

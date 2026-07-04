@@ -1251,7 +1251,7 @@ fn is_window_minimize(tokens: &[String]) -> bool {
     matches!(
         parse_message(tokens),
         Ok(Message::Window(cmd))
-            if cmd.actions.iter().any(|action| matches!(action, WindowAction::Minimize))
+            if cmd.actions.iter().any(|action| matches!(action, WindowAction::Minimize(_)))
     )
 }
 
@@ -1260,7 +1260,7 @@ fn is_window_close(tokens: &[String]) -> bool {
     matches!(
         parse_message(tokens),
         Ok(Message::Window(cmd))
-            if cmd.actions.iter().any(|action| matches!(action, WindowAction::Close))
+            if cmd.actions.iter().any(|action| matches!(action, WindowAction::Close(_)))
     )
 }
 

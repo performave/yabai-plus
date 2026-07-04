@@ -1174,12 +1174,20 @@ impl AppState {
                     self.window_tree_mut(focused)?
                         .stack_window_onto(focused, target);
                 }
-                WindowAction::Minimize => {
+                WindowAction::Minimize(sel) => {
+                    if let Some(sel) = sel {
+                        let resolved = self.resolve_window(sel)?;
+                        self.set_focused_window(Some(resolved));
+                    }
                     // Validate a window is focused; the macOS layer (daemon) sets
                     // AXMinimized and reconcile drops it from the tree.
                     self.require_focused()?;
                 }
-                WindowAction::Close => {
+                WindowAction::Close(sel) => {
+                    if let Some(sel) = sel {
+                        let resolved = self.resolve_window(sel)?;
+                        self.set_focused_window(Some(resolved));
+                    }
                     // Validate a window is focused; the macOS layer (daemon)
                     // presses the AX close button and later reconciliation drops it.
                     self.require_focused()?;
@@ -2703,6 +2711,13 @@ mod tests {
             Ok(None)
         );
         assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+        state.add_window(2).unwrap();
+        state.set_focused_window(Some(1));
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--minimize", "last"])),
+            Ok(None)
+        );
+        assert_eq!(state.focused_window, Some(2));
         // With nothing focused, it reports the same error as other window ops.
         state.set_focused_window(None);
         assert!(
@@ -2750,6 +2765,12 @@ mod tests {
             Ok(None)
         );
         assert_eq!(state.focused_window, Some(1));
+
+        assert_eq!(
+            state.handle_tokens(&toks(&["window", "--close", "last"])),
+            Ok(None)
+        );
+        assert_eq!(state.focused_window, Some(2));
     }
 
     #[test]

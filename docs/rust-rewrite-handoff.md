@@ -63,6 +63,28 @@ reconstructing context.
 
 ## Progress log
 
+### 2026-07-04 (session 65) — trailing selectors for `window --close` / `--minimize`
+
+- Added command-specific trailing selector support for `window --close <sel>` and
+  `window --minimize <sel>` in the typed command model. `WindowAction::Close` and
+  `WindowAction::Minimize` now carry optional selectors, matching the C
+  `parse_window_selector(..., optional=true)` behavior for those commands while
+  preserving the existing leading-target form (`window <sel> --close/--minimize`).
+- Runtime dispatch now resolves a trailing close/minimize selector and makes it the
+  acting/focused window before the daemon's macOS post-action runs. This lets the
+  existing AX close-button and AX minimize paths operate on the selected window
+  without adding a second macOS implementation path.
+- **Verified live on the remote (macOS 26):** rebuilt/redeployed `/tmp/yabai-rust`,
+  re-signed with the stable test identifier, SA healthy. Rust WM daemon on
+  `/tmp/yabai_minimize.socket`; `window --minimize first` minimized Finder window
+  `1386` (it left `query --windows`), then `window --deminimize first` restored it.
+  Isolated daemon was stopped afterward. `window --close <sel>` was not live-tested
+  to avoid destroying a Finder window; parser/runtime retargeting is covered by
+  tests and uses the already-verified close post-action.
+- Verification: `cargo fmt --all`; targeted parser/runtime tests;
+  `cargo test --workspace` (191 tests); `cargo clippy --workspace --all-targets`
+  (clean); `cargo build --release -p yabai`.
+
 ### 2026-07-04 (session 64) — typed parser support for `window --deminimize <sel>`
 
 - Promoted the C-style trailing `window --deminimize <WINDOW_SEL>` shape into the
@@ -1234,10 +1256,12 @@ deminimize/title-change events and app/title filters for metadata-carrying event
 3. App launch/termination are now observed directly through NSWorkspace; the 3s
    tick remains a backstop for missed AX/window changes and CGWindowList pickup.
 4. More window ops needing live state: done — `window --focus` with-raise
-   (`AxSink::focus_window`), `--close`, `--warp`, `--toggle float`, `--toggle
-   zoom-fullscreen`/`zoom-parent`, `--toggle native-fullscreen` (enter on the
+   (`AxSink::focus_window`), `--close` (including trailing selector parsing),
+   `--warp`, `--toggle float`, `--toggle zoom-fullscreen`/`zoom-parent`,
+   `--toggle native-fullscreen` (enter on the
    focused window; exit via id/`first`/`last`/single-window bare toggle),
-   `--minimize`, `--deminimize` for numeric ids and `first`/`last`; `--swap`
+   `--minimize` (including trailing selector parsing), `--deminimize` for numeric
+   ids and `first`/`last`; `--swap`
    already worked. `window --opacity <float>` is now wired through the SA
    (`set_opacity` + `config.window_opacity_duration`), verified live via the
    `--experimental-window-alpha` (`SLSGetWindowAlpha`) readback. `window --display`

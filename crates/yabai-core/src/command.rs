@@ -283,8 +283,8 @@ pub struct WindowCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowAction {
     Focus(Option<Selector>),
-    Close,
-    Minimize,
+    Close(Option<Selector>),
+    Minimize(Option<Selector>),
     Deminimize(Option<Selector>),
     Raise(Option<Selector>),
     Lower(Option<Selector>),
@@ -315,8 +315,18 @@ pub fn parse_window(tokens: &[String]) -> Result<WindowCommand, ParseError> {
     let mut actions = Vec::new();
     while let Some(command) = iter.next() {
         let action = match command.as_str() {
-            "--close" => WindowAction::Close,
-            "--minimize" => WindowAction::Minimize,
+            "--close" => match iter.peek() {
+                Some(tok) if !tok.starts_with("--") => {
+                    WindowAction::Close(Some(parse_selector(iter.next().unwrap())))
+                }
+                _ => WindowAction::Close(None),
+            },
+            "--minimize" => match iter.peek() {
+                Some(tok) if !tok.starts_with("--") => {
+                    WindowAction::Minimize(Some(parse_selector(iter.next().unwrap())))
+                }
+                _ => WindowAction::Minimize(None),
+            },
             "--deminimize" => match iter.peek() {
                 Some(tok) if !tok.starts_with("--") => {
                     WindowAction::Deminimize(Some(parse_selector(iter.next().unwrap())))
@@ -1200,11 +1210,23 @@ mod tests {
     fn window_target_and_simple_actions() {
         let cmd = parse_window(&toks(&["--close"])).unwrap();
         assert_eq!(cmd.target, None);
-        assert_eq!(cmd.actions, vec![WindowAction::Close]);
+        assert_eq!(cmd.actions, vec![WindowAction::Close(None)]);
+
+        let cmd = parse_window(&toks(&["--close", "first"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Close(Some(Selector::First))]
+        );
 
         let cmd = parse_window(&toks(&["5", "--minimize"])).unwrap();
         assert_eq!(cmd.target, Some(Selector::Index(5)));
-        assert_eq!(cmd.actions, vec![WindowAction::Minimize]);
+        assert_eq!(cmd.actions, vec![WindowAction::Minimize(None)]);
+
+        let cmd = parse_window(&toks(&["--minimize", "last"])).unwrap();
+        assert_eq!(
+            cmd.actions,
+            vec![WindowAction::Minimize(Some(Selector::Last))]
+        );
 
         let cmd = parse_window(&toks(&["--deminimize"])).unwrap();
         assert_eq!(cmd.actions, vec![WindowAction::Deminimize(None)]);

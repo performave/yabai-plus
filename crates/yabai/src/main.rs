@@ -153,8 +153,12 @@ fn run_production_daemon(args: &[String]) -> ExitCode {
     if let Some(config) = config {
         let socket = socket_path.clone();
         thread::spawn(move || {
+            // Wait until the daemon is actually *listening*, not merely until the
+            // socket file exists: after an unclean restart a stale socket file is
+            // present before the new daemon rebinds, and a bare existence check
+            // would race the config's `yabai -m` calls ahead of the bind.
             for _ in 0..100 {
-                if std::path::Path::new(&socket).exists() {
+                if UnixStream::connect(&socket).is_ok() {
                     break;
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -302,6 +306,24 @@ fn seed_live_displays(state: &mut AppState) {
 }
 
 fn bind_experimental_daemon(socket_path: &str) -> io::Result<UnixListener> {
+    // A daemon that exited uncleanly leaves its socket file behind, so a fresh
+    // `bind()` fails with EADDRINUSE. Probe the leftover: if something still
+    // answers, a live daemon owns it — refuse (single-instance is also enforced
+    // by the lock-file, but this keeps the experimental probes honest). If the
+    // connect is refused, the file is stale — unlink it and bind fresh. Mirrors
+    // upstream yabai's `socket_open`/`unlink` handling.
+    match UnixStream::connect(socket_path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "another yabai daemon is already listening on this socket",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {
+            let _ = std::fs::remove_file(socket_path);
+        }
+    }
     UnixListener::bind(socket_path)
 }
 
@@ -1195,6 +1217,60 @@ fn is_window_focus(tokens: &[String]) -> bool {
         .iter()
         .any(|action| matches!(action, WindowAction::Focus(Some(_))));
     has_focus_action && (cmd.target.is_some() || has_focus_selector)
+}
+
+/// Split a chained `window`/`space`/`display` command into one sub-command per
+/// action, so each `--action` runs through the full macOS-layer dispatch chain
+/// (the single-action interceptors — grid, move, resize — only match a lone
+/// action). `window [SEL] --toggle float --grid …` becomes `window [SEL] --toggle
+/// float` and `window [SEL] --grid …`, each carrying the shared target selector,
+/// matching upstream yabai's per-action processing.
+///
+/// Only the mutation domains are split: `query --spaces --space` chains a
+/// selector *modifier*, not two actions, so query/config/rule/signal are left
+/// intact. A command with zero or one action yields a single entry equal to the
+/// input, preserving today's behavior for the common case.
+fn split_action_commands(tokens: &[String]) -> Vec<Vec<String>> {
+    let Some(domain) = tokens.first() else {
+        return vec![tokens.to_vec()];
+    };
+    if !matches!(domain.as_str(), "window" | "space" | "display") {
+        return vec![tokens.to_vec()];
+    }
+    let rest = &tokens[1..];
+    // A leading non-`--` token is the target selector, shared by every action.
+    let (target, actions) = match rest.first() {
+        Some(tok) if !tok.starts_with("--") => (Some(tok.clone()), &rest[1..]),
+        _ => (None, rest),
+    };
+    // Group tokens by `--flag` boundary; each flag plus its trailing args is one
+    // action. A stray non-flag token before any flag means the shape is not what
+    // we expect — leave the command unsplit rather than guess.
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    for tok in actions {
+        if tok.starts_with("--") {
+            groups.push(vec![tok.clone()]);
+        } else if let Some(last) = groups.last_mut() {
+            last.push(tok.clone());
+        } else {
+            return vec![tokens.to_vec()];
+        }
+    }
+    if groups.len() <= 1 {
+        return vec![tokens.to_vec()];
+    }
+    groups
+        .into_iter()
+        .map(|group| {
+            let mut cmd = Vec::with_capacity(2 + group.len());
+            cmd.push(domain.clone());
+            if let Some(target) = &target {
+                cmd.push(target.clone());
+            }
+            cmd.extend(group);
+            cmd
+        })
+        .collect()
 }
 
 /// True if `tokens` is a `window --minimize` command.
@@ -3262,52 +3338,62 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                 .set_space_native_fullscreen(sid, space_is_native_fullscreen(sid));
                         }
                     }
-                    // Some commands need macOS-layer state/effects the pure core can't
-                    // perform; handle those here, otherwise fall through.
-                    let fullscreen_exit = try_window_native_fullscreen_exit(
-                        &scripting_addition,
-                        &mut runtime,
-                        &mut managed,
-                        &mut signaled,
-                        &display_frames,
-                        &mut fullscreen_pids,
-                        &tokens,
-                    );
-                    let was_fullscreen_exit = fullscreen_exit.is_some();
-                    let response = match fullscreen_exit {
-                        Some(response) => response,
-                        None => match try_window_deminimize(
+                    // A chained window/space/display command (`--a … --b …`) is
+                    // split into one sub-command per action so each runs through
+                    // the full dispatch chain below; a single-action command
+                    // yields exactly one entry (unchanged behavior).
+                    let sub_commands = split_action_commands(&tokens);
+                    let mut response: Response = Ok(None);
+                    for tokens in sub_commands {
+                        // Some commands need macOS-layer state/effects the pure core can't
+                        // perform; handle those here, otherwise fall through.
+                        let fullscreen_exit = try_window_native_fullscreen_exit(
                             &scripting_addition,
                             &mut runtime,
                             &mut managed,
                             &mut signaled,
                             &display_frames,
-                            &mut minimized_pids,
+                            &mut fullscreen_pids,
                             &tokens,
-                        ) {
+                        );
+                        let was_fullscreen_exit = fullscreen_exit.is_some();
+                        response = match fullscreen_exit {
                             Some(response) => response,
-                            None => match try_scripting_addition(
+                            None => match try_window_deminimize(
                                 &scripting_addition,
                                 &mut runtime,
-                                &mut display_frames,
+                                &mut managed,
+                                &mut signaled,
+                                &display_frames,
+                                &mut minimized_pids,
                                 &tokens,
                             ) {
                                 Some(response) => response,
-                                None => match try_window_grid(&runtime, &display_frames, &tokens) {
+                                None => match try_scripting_addition(
+                                    &scripting_addition,
+                                    &mut runtime,
+                                    &mut display_frames,
+                                    &tokens,
+                                ) {
                                     Some(response) => response,
-                                    None => match try_window_move(&runtime, &tokens) {
-                                        Some(response) => response,
-                                        None => match try_window_resize(&runtime, &tokens) {
+                                    None => {
+                                        match try_window_grid(&runtime, &display_frames, &tokens) {
                                             Some(response) => response,
-                                            None => match try_window_windowed_fullscreen(
-                                                &runtime,
-                                                &display_frames,
-                                                &mut windowed_frames,
-                                                &tokens,
-                                            ) {
+                                            None => match try_window_move(&runtime, &tokens) {
                                                 Some(response) => response,
                                                 None => {
-                                                    match try_window_expose(&runtime, &tokens) {
+                                                    match try_window_resize(&runtime, &tokens) {
+                                                        Some(response) => response,
+                                                        None => {
+                                                            match try_window_windowed_fullscreen(
+                                                                &runtime,
+                                                                &display_frames,
+                                                                &mut windowed_frames,
+                                                                &tokens,
+                                                            ) {
+                                                                Some(response) => response,
+                                                                None => {
+                                                                    match try_window_expose(&runtime, &tokens) {
                                                         Some(response) => response,
                                                         None => match try_space_focus(
                                                             &scripting_addition,
@@ -3327,131 +3413,141 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                                             },
                                                         },
                                                     }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             },
-                                        },
-                                    },
+                                        }
+                                    }
                                 },
                             },
-                        },
-                    };
-                    // A successful `window --focus` updated the pure focus target;
-                    // now enact it on the real window (raise + make key).
-                    if response.is_ok() && is_window_focus(&tokens) {
-                        if let Some(window_id) = runtime.state.focused_window_id() {
-                            runtime.sink.focus_window(window_id);
-                            center_mouse_on_focus(&runtime, window_id);
-                            // Fire `window_focused` here too: command-driven focus does
-                            // not always produce an AX observer notification. De-dup
-                            // with the observer path via `last_focus_signal`.
-                            if last_focus_signal != Some(window_id) {
-                                if runtime.state.config.enable_window_opacity {
-                                    apply_auto_opacity(
-                                        &scripting_addition,
+                        };
+                        // A successful `window --focus` updated the pure focus target;
+                        // now enact it on the real window (raise + make key).
+                        if response.is_ok() && is_window_focus(&tokens) {
+                            if let Some(window_id) = runtime.state.focused_window_id() {
+                                runtime.sink.focus_window(window_id);
+                                center_mouse_on_focus(&runtime, window_id);
+                                // Fire `window_focused` here too: command-driven focus does
+                                // not always produce an AX observer notification. De-dup
+                                // with the observer path via `last_focus_signal`.
+                                if last_focus_signal != Some(window_id) {
+                                    if runtime.state.config.enable_window_opacity {
+                                        apply_auto_opacity(
+                                            &scripting_addition,
+                                            &runtime,
+                                            Some(window_id),
+                                        );
+                                    }
+                                    last_focus_signal = Some(window_id);
+                                    let meta = runtime.state.window_meta(window_id);
+                                    fire_signals(
                                         &runtime,
-                                        Some(window_id),
-                                    );
-                                }
-                                last_focus_signal = Some(window_id);
-                                let meta = runtime.state.window_meta(window_id);
-                                fire_signals(
-                                    &runtime,
-                                    SignalEvent::WindowFocused,
-                                    &[("YABAI_WINDOW_ID", window_id.to_string())],
-                                    meta.map(|m| m.app.as_str()),
-                                    meta.map(|m| m.title.as_str()),
-                                    None,
-                                );
-                            }
-                        }
-                    }
-                    // `window --minimize`: AX-minimize the focused window, then
-                    // reconcile its app so the now-untileable window leaves the tree
-                    // and the rest re-tile.
-                    if response.is_ok() && is_window_minimize(&tokens) {
-                        if let Some(window_id) = runtime.state.focused_window_id() {
-                            let pid = runtime.state.window_pid(window_id);
-                            let active = runtime.state.focused_window_id() == Some(window_id);
-                            let meta = runtime.state.window_meta(window_id).cloned();
-                            if runtime.sink.set_minimized(window_id, true) {
-                                if let Some(pid) = pid {
-                                    minimized_pids.insert(window_id, pid);
-                                    reconcile_pid(
-                                        &scripting_addition,
-                                        &mut runtime,
-                                        &mut managed,
-                                        &mut signaled,
-                                        &display_frames,
-                                        pid,
-                                    );
-                                }
-                                fire_signals(
-                                    &runtime,
-                                    SignalEvent::WindowMinimized,
-                                    &[("YABAI_WINDOW_ID", window_id.to_string())],
-                                    meta.as_ref().map(|m| m.app.as_str()),
-                                    meta.as_ref().map(|m| m.title.as_str()),
-                                    Some(active),
-                                );
-                            }
-                        }
-                    }
-                    // `window --close`: press the AX close button for the acting
-                    // window. AX destroy is unreliable, so reconcile immediately and
-                    // let the 3s tick catch any delayed close.
-                    if response.is_ok() && is_window_close(&tokens) {
-                        if let Some(window_id) = runtime.state.focused_window_id() {
-                            let pid = runtime.state.window_pid(window_id);
-                            if runtime.sink.close_window(window_id) {
-                                if let Some(pid) = pid {
-                                    reconcile_pid(
-                                        &scripting_addition,
-                                        &mut runtime,
-                                        &mut managed,
-                                        &mut signaled,
-                                        &display_frames,
-                                        pid,
+                                        SignalEvent::WindowFocused,
+                                        &[("YABAI_WINDOW_ID", window_id.to_string())],
+                                        meta.map(|m| m.app.as_str()),
+                                        meta.map(|m| m.title.as_str()),
+                                        None,
                                     );
                                 }
                             }
                         }
-                    }
-                    // `window --toggle native-fullscreen` (enter half): focus the
-                    // window (the AX attribute is only honored on the key window, per
-                    // the C daemon), set AXFullscreen, then reconcile so the window —
-                    // now on its own fullscreen space — leaves the tiled layout. The
-                    // exit half is handled by the intercept above.
-                    if !was_fullscreen_exit
-                        && response.is_ok()
-                        && is_window_native_fullscreen(&tokens)
-                    {
-                        if let Some(window_id) = runtime.state.focused_window_id() {
-                            let pid = runtime.state.window_pid(window_id);
-                            runtime.sink.focus_window(window_id);
-                            if runtime.sink.enter_native_fullscreen(window_id) {
-                                if let Some(pid) = pid {
-                                    fullscreen_pids.insert(window_id, pid);
-                                    reconcile_pid(
-                                        &scripting_addition,
-                                        &mut runtime,
-                                        &mut managed,
-                                        &mut signaled,
-                                        &display_frames,
-                                        pid,
+                        // `window --minimize`: AX-minimize the focused window, then
+                        // reconcile its app so the now-untileable window leaves the tree
+                        // and the rest re-tile.
+                        if response.is_ok() && is_window_minimize(&tokens) {
+                            if let Some(window_id) = runtime.state.focused_window_id() {
+                                let pid = runtime.state.window_pid(window_id);
+                                let active = runtime.state.focused_window_id() == Some(window_id);
+                                let meta = runtime.state.window_meta(window_id).cloned();
+                                if runtime.sink.set_minimized(window_id, true) {
+                                    if let Some(pid) = pid {
+                                        minimized_pids.insert(window_id, pid);
+                                        reconcile_pid(
+                                            &scripting_addition,
+                                            &mut runtime,
+                                            &mut managed,
+                                            &mut signaled,
+                                            &display_frames,
+                                            pid,
+                                        );
+                                    }
+                                    fire_signals(
+                                        &runtime,
+                                        SignalEvent::WindowMinimized,
+                                        &[("YABAI_WINDOW_ID", window_id.to_string())],
+                                        meta.as_ref().map(|m| m.app.as_str()),
+                                        meta.as_ref().map(|m| m.title.as_str()),
+                                        Some(active),
                                     );
                                 }
                             }
                         }
-                    }
-                    // A `window_opacity` / `active`/`normal_window_opacity` change
-                    // re-applies auto opacity across all managed windows.
-                    if response.is_ok() && is_opacity_config(&tokens) {
-                        let focused = runtime.state.focused_window_id();
-                        apply_auto_opacity(&scripting_addition, &runtime, focused);
-                    }
-                    // Keep the drag tap's armed modifier in sync with `mouse_modifier`.
-                    if response.is_ok() {
-                        set_drag_modifier(mouse_modifier_mask(runtime.state.config.mouse_modifier));
+                        // `window --close`: press the AX close button for the acting
+                        // window. AX destroy is unreliable, so reconcile immediately and
+                        // let the 3s tick catch any delayed close.
+                        if response.is_ok() && is_window_close(&tokens) {
+                            if let Some(window_id) = runtime.state.focused_window_id() {
+                                let pid = runtime.state.window_pid(window_id);
+                                if runtime.sink.close_window(window_id) {
+                                    if let Some(pid) = pid {
+                                        reconcile_pid(
+                                            &scripting_addition,
+                                            &mut runtime,
+                                            &mut managed,
+                                            &mut signaled,
+                                            &display_frames,
+                                            pid,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // `window --toggle native-fullscreen` (enter half): focus the
+                        // window (the AX attribute is only honored on the key window, per
+                        // the C daemon), set AXFullscreen, then reconcile so the window —
+                        // now on its own fullscreen space — leaves the tiled layout. The
+                        // exit half is handled by the intercept above.
+                        if !was_fullscreen_exit
+                            && response.is_ok()
+                            && is_window_native_fullscreen(&tokens)
+                        {
+                            if let Some(window_id) = runtime.state.focused_window_id() {
+                                let pid = runtime.state.window_pid(window_id);
+                                runtime.sink.focus_window(window_id);
+                                if runtime.sink.enter_native_fullscreen(window_id) {
+                                    if let Some(pid) = pid {
+                                        fullscreen_pids.insert(window_id, pid);
+                                        reconcile_pid(
+                                            &scripting_addition,
+                                            &mut runtime,
+                                            &mut managed,
+                                            &mut signaled,
+                                            &display_frames,
+                                            pid,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // A `window_opacity` / `active`/`normal_window_opacity` change
+                        // re-applies auto opacity across all managed windows.
+                        if response.is_ok() && is_opacity_config(&tokens) {
+                            let focused = runtime.state.focused_window_id();
+                            apply_auto_opacity(&scripting_addition, &runtime, focused);
+                        }
+                        // Keep the drag tap's armed modifier in sync with `mouse_modifier`.
+                        if response.is_ok() {
+                            set_drag_modifier(mouse_modifier_mask(
+                                runtime.state.config.mouse_modifier,
+                            ));
+                        }
+                        // A failing action aborts the rest of a chained command.
+                        if response.is_err() {
+                            break;
+                        }
                     }
                     let _ = reply.send(response);
                 }
@@ -3790,6 +3886,59 @@ mod tests {
         assert_eq!(
             window_fullscreen_exit_target(&fs_toggle(None), &[5, 6]),
             Some(None)
+        );
+    }
+
+    #[test]
+    fn split_action_commands_splits_chained_window_actions() {
+        // The user's `shift+alt-t` binding: two actions in one message.
+        let out = split_action_commands(&toks(&[
+            "window",
+            "--toggle",
+            "float",
+            "--grid",
+            "4:4:1:1:2:2",
+        ]));
+        assert_eq!(
+            out,
+            vec![
+                toks(&["window", "--toggle", "float"]),
+                toks(&["window", "--grid", "4:4:1:1:2:2"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_action_commands_preserves_the_shared_target_selector() {
+        let out = split_action_commands(&toks(&[
+            "window", "0x1F", "--focus", "east", "--swap", "west",
+        ]));
+        assert_eq!(
+            out,
+            vec![
+                toks(&["window", "0x1F", "--focus", "east"]),
+                toks(&["window", "0x1F", "--swap", "west"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_action_commands_leaves_single_action_and_non_mutation_domains() {
+        // Single action → unchanged (one entry equal to the input).
+        assert_eq!(
+            split_action_commands(&toks(&["window", "--focus", "east"])),
+            vec![toks(&["window", "--focus", "east"])]
+        );
+        // `query --spaces --space` chains a selector modifier, not two actions:
+        // it must not be split.
+        assert_eq!(
+            split_action_commands(&toks(&["query", "--spaces", "--space"])),
+            vec![toks(&["query", "--spaces", "--space"])]
+        );
+        // Other domains are never split.
+        assert_eq!(
+            split_action_commands(&toks(&["config", "layout", "bsp"])),
+            vec![toks(&["config", "layout", "bsp"])]
         );
     }
 }

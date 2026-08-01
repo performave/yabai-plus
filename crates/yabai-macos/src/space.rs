@@ -106,6 +106,12 @@ unsafe extern "C" {
         c_str: *const c_char,
         encoding: u32,
     ) -> CFStringRef;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut c_char,
+        buffer_size: isize,
+        encoding: u32,
+    ) -> u8;
     fn CFUUIDCreateFromString(alloc: CFAllocatorRef, uuid_str: CFStringRef) -> CFUUIDRef;
     fn CFUUIDCreateString(alloc: CFAllocatorRef, uuid: CFUUIDRef) -> CFStringRef;
 }
@@ -131,6 +137,7 @@ unsafe extern "C" {
     fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
     fn SLSGetWindowLevel(cid: i32, wid: u32, level: *mut i32) -> i32;
     fn SLSSpaceGetType(cid: i32, sid: u64) -> i32;
+    fn SLSSpaceCopyName(cid: i32, sid: u64) -> CFStringRef;
     fn SLSGetWindowTransform(cid: i32, wid: u32, transform: *mut CGAffineTransform) -> i32;
     fn SLSWindowIsOrderedIn(cid: i32, wid: u32, ordered_in: *mut u8) -> i32;
 }
@@ -609,6 +616,36 @@ pub fn window_alpha(window_id: u32) -> io::Result<f32> {
     } else {
         Ok(alpha)
     }
+}
+
+/// A space's UUID string (`SLSSpaceCopyName`), backing `query --spaces uuid`.
+pub fn space_uuid(sid: u64) -> Option<String> {
+    // SAFETY: `SLSMainConnectionID` is the process' connection; `sid` is a plain
+    // space id. `SLSSpaceCopyName` returns an owned CFString (or null).
+    let name = unsafe { SLSSpaceCopyName(SLSMainConnectionID(), sid) };
+    if name.is_null() {
+        return None;
+    }
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    let mut buffer = [0_i8; 128];
+    // SAFETY: `name` is a valid CFString; the buffer and its length are valid;
+    // `CFStringGetCString` NUL-terminates on success. `name` is released after.
+    let out = unsafe {
+        let ok = CFStringGetCString(
+            name,
+            buffer.as_mut_ptr(),
+            buffer.len() as isize,
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        CFRelease(name);
+        ok
+    };
+    if out == 0 {
+        return None;
+    }
+    // SAFETY: the buffer is NUL-terminated UTF-8 written by CoreFoundation.
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    cstr.to_str().ok().map(str::to_owned)
 }
 
 /// Whether a space is a native-fullscreen space (`SLSSpaceGetType == 4`),

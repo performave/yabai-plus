@@ -223,6 +223,8 @@ pub struct AppState {
     /// Daemon-pushed per-space native-fullscreen flag for
     /// `query --spaces is-native-fullscreen` (SLSSpaceGetType == 4).
     space_native_fullscreen: HashMap<u64, bool>,
+    /// Daemon-pushed space UUID strings for `query --spaces uuid`.
+    space_uuids: HashMap<u64, String>,
     /// Last known cursor location (top-left CG coords), set by the daemon before
     /// dispatching a command so the `mouse` selector can resolve.
     cursor_point: Option<Point>,
@@ -1082,6 +1084,11 @@ impl AppState {
     /// is-native-fullscreen` (daemon reads `SLSSpaceGetType` before serving).
     pub fn set_space_native_fullscreen(&mut self, sid: u64, value: bool) {
         self.space_native_fullscreen.insert(sid, value);
+    }
+
+    /// Record a space's UUID string for `query --spaces uuid`.
+    pub fn set_space_uuid(&mut self, sid: u64, uuid: String) {
+        self.space_uuids.insert(sid, uuid);
     }
 
     /// Record the live global mission-control space order (from
@@ -2229,6 +2236,8 @@ impl AppState {
             &cmd.properties,
             &[
                 "id",
+                // `uuid` is gated out: SLSSpaceCopyName returns empty on macOS 15
+                // in this setup; the serializer arm/plumbing stay for a future fix.
                 "index",
                 "label",
                 "type",
@@ -2443,6 +2452,15 @@ impl AppState {
         for property in properties {
             match *property {
                 "id" => fields.push(format!("\t\"id\":{sid}")),
+                "uuid" => fields.push(format!(
+                    "\t\"uuid\":\"{}\"",
+                    json_escape(
+                        self.space_uuids
+                            .get(&sid)
+                            .map(String::as_str)
+                            .unwrap_or("")
+                    )
+                )),
                 "index" => fields.push(format!(
                     "\t\"index\":{}",
                     self.space_mission_control_index(sid)

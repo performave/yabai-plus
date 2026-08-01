@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  203 workspace tests pass. The shipped C `make` flow is unchanged.
+  204 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -74,48 +74,30 @@ fully preserved in git history (`git log -- docs/rust-rewrite-handoff.md`) and
 superseded by the **RESUME HERE** section below, which is the ground truth for
 current state. Only recent milestones are kept here going forward.
 
-- **2026-07-31 (session 75)** — Rust toolchain installed locally (rustup
-  stable). Closed out the remaining command surface so **all 7 domains are now
-  fully handled**:
-  - `display --focus`/`--space` via a daemon `try_display` interceptor (C
-    `display_manager_focus_display` / `display_manager_focus_space`).
-  - `space --toggle padding/gap/mission-control/show-desktop` — pure per-space
-    enable flags (`padding_disabled`/`gap_disabled`, C VIEW_ENABLE_*) for the
-    first two; CoreDock notifications (`toggle_mission_control`/
-    `toggle_show_desktop`) for the latter two.
-  - `config` domain completed: the last 6 keys (`display_arrangement_order`,
-    `window_origin_display`, `window_animation_easing`, `insert_feedback_color`,
-    `external_bar`, `skip_window_focus_animation`) now parse/store/round-trip
-    with C-faithful values and print formats.
-  - Refactor: extracted the 12 experimental diagnostic probes into
-    `crates/yabai/src/probes.rs` (main.rs 4703 → 4430 lines).
-  - Enacted two previously-inert config effects: `display_arrangement_order`
-    (display indexing/selectors sort by center x/y, C
-    `display_manager_coordinate_comparator`) and `external_bar` (reserves
-    top/bottom screen space per `all`/`main`/`off`, C
-    `display_bounds_constrained`; tracks `CGMainDisplayID`;
-    `dispatch_config` now re-insets spaces immediately on layout-config change).
-  - Organization: `app_state.rs`, `command.rs`, `layout.rs` are now directory
-    modules (`<name>/mod.rs` + `<name>/tests.rs`, test blocks in sibling files).
-    The `yabai` binary is split into child modules of `main` — `probes`
-    (diagnostic subcommands), `sa_ops` (the `*_via_sa` SA helpers), `mouse_ctl`
-    (ffm + drag/resize/drop) — via the `use super::*` (child → parent) /
-    `use <mod>::*` (parent → child) pattern; child modules reach parent helpers
-    freely, only items the parent calls need `pub(crate)`. main.rs 4703 → 3493
-    lines. Remaining main.rs is the daemon loop + interceptors + reconcile +
-    interleaved signal helpers (not a clean contiguous block).
-  - Enacted `window_origin_display` (new windows route to physical/focused/
-    cursor space, C `event_loop` app-launched routing) via pure
-    `AppState::origin_space_for_new_window`, called in daemon reconcile for
-    genuinely-new windows.
-  - `mission_control_enter`/`exit` signals via a Dock `AXExpose*` observer
-    (`observe_mission_control` + `dock_pid`), completing the signal domain.
-    `dock_pid` live-verified; enter/exit firing GUI-only, unverified.
-  203 workspace tests, clippy clean. The only still-inert config keys are the
-  cosmetic/animation-only ones — `window_animation_easing`,
-  `insert_feedback_color`, `skip_window_focus_animation` — which need
-  window-move animation / insert-feedback overlay infrastructure that is not
-  ported (low value; left stored + round-tripping).
+- **2026-07-31 (session 75)** — installed the Rust toolchain locally (rustup
+  stable) and drove the port to functional completeness (details in git log):
+  - **All 7 command domains fully handled**: added `display --focus`/`--space`
+    (daemon `try_display`), `space --toggle padding/gap/mission-control/
+    show-desktop`, and completed the `config` domain (last 6 keys parse/store/
+    round-trip with C-faithful print formats).
+  - **Config effects enacted**: `display_arrangement_order` (center-x/y display
+    ordering), `external_bar` (screen-space reservation per all/main/off, tracks
+    `CGMainDisplayID`, immediate re-inset on config change), `window_origin_
+    display` (new-window routing to physical/focused/cursor space). Still inert:
+    the cosmetic/animation-only keys (`window_animation_easing`,
+    `insert_feedback_color`, `skip_window_focus_animation`) — need animation/
+    overlay infra, low value.
+  - **Signal domain complete**: `mission_control_enter`/`exit` via a Dock
+    `AXExpose*` observer (`observe_mission_control` + live-verified `dock_pid`;
+    firing is GUI-only, unverified).
+  - **`query --windows`**: added pure `is-floating`/`is-sticky`; the remaining C
+    fields + off-tree windows need daemon live-read augmentation (documented in
+    the compat breaking-changes ledger) — the main remaining functional gap.
+  - **Organization**: `app_state`/`command`/`layout` are now `mod.rs`+`tests.rs`
+    directory modules; the `yabai` binary is split into `probes`/`sa_ops`/
+    `mouse_ctl` child modules of `main` (via `use super::*` ↔ `use <mod>::*`;
+    only parent-called items need `pub(crate)`). main.rs 4703 → 3493 lines.
+  204 workspace tests, clippy clean.
 - Sessions 40–74 (2026-07-03/04) — window `--grid`/`--move`/`--resize`/`--ratio`/
   `--raise`/`--lower`/`--insert`/`--scratchpad`, all `--toggle` variants
   (split/windowed-fullscreen/pip/expose/native-fullscreen), per-space
@@ -685,7 +667,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 203 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 204 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

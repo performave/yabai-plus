@@ -183,6 +183,9 @@ pub struct AppState {
     /// Live AX/SkyLight per-window state pushed by the daemon before a
     /// `query --windows` (see [`LiveWindowInfo`]).
     window_live_info: HashMap<u32, LiveWindowInfo>,
+    /// Daemon-pushed AX frames for windows not in a BSP tree (floating/sticky/
+    /// scratchpad), so `query --windows` can list them (the tree capture can't).
+    off_tree_frames: HashMap<u32, Area>,
     window_spaces: HashMap<u32, u64>,
     /// Windows the user floated (`window --toggle float`): kept out of every tree
     /// so they are never tiled, and skipped by reconcile's space assignment.
@@ -688,6 +691,45 @@ impl AppState {
     /// Record (or replace) a window's live AX/SkyLight info for the next query.
     pub fn set_window_live_info(&mut self, window_id: u32, info: LiveWindowInfo) {
         self.window_live_info.insert(window_id, info);
+    }
+
+    /// Record a tracked window's live AX frame, used to list off-tree
+    /// (floating/sticky/scratchpad) windows in `query --windows`.
+    pub fn set_off_tree_frame(&mut self, window_id: u32, area: Area) {
+        self.off_tree_frames.insert(window_id, area);
+    }
+
+    /// Ids of tracked windows that are NOT in a BSP tree (floating/sticky/
+    /// scratchpad), which the tree-based query would otherwise omit. Sorted/deduped.
+    /// Public so the daemon can AX-read and push their frames before a query.
+    pub fn off_tree_window_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self
+            .floating
+            .iter()
+            .chain(self.sticky.iter())
+            .chain(self.scratchpads.keys())
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Off-tree tracked windows as [`WindowFrame`]s (daemon-pushed frame, or zero
+    /// when unknown), optionally restricted to windows known to be on `sid`.
+    fn off_tree_window_frames(&self, sid_filter: Option<u64>) -> Vec<WindowFrame> {
+        self.off_tree_window_ids()
+            .into_iter()
+            .filter(|&id| sid_filter.is_none_or(|sid| self.window_known_space_id(id) == Some(sid)))
+            .map(|id| WindowFrame {
+                window_id: id,
+                area: self
+                    .off_tree_frames
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(Area::new(0.0, 0.0, 0.0, 0.0)),
+            })
+            .collect()
     }
 
     /// The live info for a window, or a default (all-zero/empty) when the daemon
@@ -2252,8 +2294,15 @@ impl AppState {
                     Some(selector) => self.resolve_window(selector)?,
                     None => self.require_focused()?,
                 };
+                // A tiled window's frame comes from its tree; an off-tree
+                // (floating/sticky/scratchpad) window uses its pushed AX frame.
                 let frame = self
                     .window_frame(window_id)
+                    .or_else(|| {
+                        self.off_tree_window_frames(None)
+                            .into_iter()
+                            .find(|frame| frame.window_id == window_id)
+                    })
                     .ok_or_else(|| "could not retrieve window details.".to_string())?;
                 Ok(Some(format!(
                     "{}\n",
@@ -2262,27 +2311,32 @@ impl AppState {
             }
             Some((QueryScopeKind::Space, selector)) => {
                 let sid = self.resolve_space_selector(selector.as_ref())?;
-                let frames = self
+                let mut frames = self
                     .flush(sid)
                     .ok_or_else(|| "could not retrieve windows for space.".to_string())?;
+                frames.extend(self.off_tree_window_frames(Some(sid)));
                 Ok(Some(self.serialize_window_array(&frames, &properties)))
             }
             None => {
                 let mut sids = self.spaces.keys().copied().collect::<Vec<_>>();
                 sids.sort_unstable();
-                let frames = sids
+                let mut frames = sids
                     .into_iter()
                     .flat_map(|sid| self.flush(sid).unwrap_or_default())
                     .collect::<Vec<_>>();
+                frames.extend(self.off_tree_window_frames(None));
                 Ok(Some(self.serialize_window_array(&frames, &properties)))
             }
             Some((QueryScopeKind::Display, selector)) => {
                 let display_id = self.resolve_display_selector(selector.as_ref())?;
-                let frames = self
-                    .display_spaces(display_id)
-                    .into_iter()
-                    .flat_map(|sid| self.flush(sid).unwrap_or_default())
+                let spaces = self.display_spaces(display_id);
+                let mut frames = spaces
+                    .iter()
+                    .flat_map(|&sid| self.flush(sid).unwrap_or_default())
                     .collect::<Vec<_>>();
+                for &sid in &spaces {
+                    frames.extend(self.off_tree_window_frames(Some(sid)));
+                }
                 Ok(Some(self.serialize_window_array(&frames, &properties)))
             }
         }

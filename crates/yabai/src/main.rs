@@ -1024,6 +1024,13 @@ fn is_window_query(tokens: &[String]) -> bool {
 /// Read the live AX/SkyLight per-window fields the pure serializer can't (opacity
 /// via SkyLight for now) into `AppState`, for every window the daemon tracks.
 fn populate_window_live_info(runtime: &mut Runtime<AxSink>) {
+    // Off-tree (floating/sticky/scratchpad) windows aren't in a tree, so the query
+    // has no frame for them — push their live AX frame so they get listed.
+    for wid in runtime.state.off_tree_window_ids() {
+        if let Some(area) = runtime.sink.window_frame(wid) {
+            runtime.state.set_off_tree_frame(wid, area);
+        }
+    }
     for wid in runtime.state.all_window_ids() {
         let level = window_level(wid).unwrap_or(0);
         let info = LiveWindowInfo {

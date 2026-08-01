@@ -1126,6 +1126,38 @@ fn query_windows_serializes_stack_index() {
 }
 
 #[test]
+fn query_windows_lists_off_tree_floating_window() {
+    // A floating window leaves its tree, but must still appear in `query
+    // --windows` (with is-floating:true and its daemon-pushed AX frame).
+    let mut state = state_with_space();
+    state.add_window(10).unwrap();
+    state.add_window(20).unwrap();
+    state.set_focused_window(Some(20));
+    state
+        .handle_tokens(&toks(&["window", "--toggle", "float"]))
+        .unwrap();
+    state.set_off_tree_frame(20, Area::new(100.0, 200.0, 300.0, 400.0));
+
+    // 10 (tiled) and 20 (floating) both appear; 20 carries the pushed frame.
+    let out = state
+        .handle_tokens(&toks(&["query", "--windows", "id,is-floating"]))
+        .unwrap()
+        .unwrap();
+    assert!(out.contains("\"id\":10"), "tiled window listed: {out}");
+    assert!(
+        out.contains("\"id\":20,\n\t\"is-floating\":true"),
+        "floating window listed with is-floating: {out}"
+    );
+
+    // Querying the floating window by id returns its pushed frame.
+    let by_id = state
+        .handle_tokens(&toks(&["query", "--windows", "--window", "20", "id,frame"]))
+        .unwrap()
+        .unwrap();
+    assert!(by_id.contains("\"x\":100.0000"), "off-tree frame: {by_id}");
+}
+
+#[test]
 fn query_windows_serializes_opacity_from_live_info() {
     // The daemon pushes live AX/SkyLight info before a query; the pure serializer
     // reports it. Absent info defaults to opacity 0.

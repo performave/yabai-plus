@@ -218,6 +218,8 @@ pub struct AppState {
     /// User-assigned display labels (`display --label <name>`), `did -> label`,
     /// also unique across displays.
     display_labels: HashMap<u32, String>,
+    /// Daemon-pushed display UUID strings for `query --displays uuid`.
+    display_uuids: HashMap<u32, String>,
     /// Last known cursor location (top-left CG coords), set by the daemon before
     /// dispatching a command so the `mouse` selector can resolve.
     cursor_point: Option<Point>,
@@ -1066,6 +1068,11 @@ impl AppState {
     /// be scoped to it. Set by the daemon during display discovery.
     pub fn set_main_display(&mut self, display_id: u32) {
         self.main_display = Some(display_id);
+    }
+
+    /// Record a display's UUID string for `query --displays uuid`.
+    pub fn set_display_uuid(&mut self, display_id: u32, uuid: String) {
+        self.display_uuids.insert(display_id, uuid);
     }
 
     /// Record the live global mission-control space order (from
@@ -2130,7 +2137,15 @@ impl AppState {
     fn query_displays(&self, cmd: &QueryCommand) -> Response {
         let properties = query_properties(
             &cmd.properties,
-            &["id", "label", "index", "frame", "spaces", "has-focus"],
+            &[
+                "id",
+                "uuid",
+                "index",
+                "label",
+                "frame",
+                "spaces",
+                "has-focus",
+            ],
             "display",
         )?;
 
@@ -2375,6 +2390,15 @@ impl AppState {
         for property in properties {
             match *property {
                 "id" => fields.push(format!("\t\"id\":{display_id}")),
+                "uuid" => fields.push(format!(
+                    "\t\"uuid\":\"{}\"",
+                    json_escape(
+                        self.display_uuids
+                            .get(&display_id)
+                            .map(String::as_str)
+                            .unwrap_or("")
+                    )
+                )),
                 "label" => fields.push(format!(
                     "\t\"label\":\"{}\"",
                     json_escape(

@@ -18,8 +18,8 @@ use yabai_macos::{
     AxSink, MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT,
     MissionControlEvent, MouseDragButton, MouseDragEvent, ObservedEvent, WorkspaceEvent,
     accessibility_trusted_with_prompt, active_displays, application_pids_with_windows,
-    current_space_for_display, cursor_display_id, cursor_location, display_for_space, dock_pid,
-    focused_window, focused_window_diagnostics, main_display_id, main_visible_frame,
+    current_space_for_display, cursor_display_id, cursor_location, display_for_space, display_uuid,
+    dock_pid, focused_window, focused_window_diagnostics, main_display_id, main_visible_frame,
     mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
     observe_display_reconfiguration, observe_mission_control, observe_mouse_drag,
     observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
@@ -162,6 +162,9 @@ fn seed_live_displays(state: &mut AppState) {
         Ok(displays) => {
             for display in displays {
                 state.add_display(display.id, display.frame);
+                if let Some(uuid) = display_uuid(display.id) {
+                    state.set_display_uuid(display.id, uuid);
+                }
             }
         }
         Err(error) => eprintln!("yabai-rust: failed to discover displays: {error}"),
@@ -757,6 +760,9 @@ fn refresh_live_display_state(
             display_id: display.id,
             frame: display.frame,
         });
+        if let Some(uuid) = display_uuid(display.id) {
+            runtime.state.set_display_uuid(display.id, uuid);
+        }
 
         let mut spaces = match spaces_for_display(display.id) {
             Ok(spaces) => spaces,

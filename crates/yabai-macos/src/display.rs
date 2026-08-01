@@ -7,6 +7,7 @@
 
 use std::ffi::c_void;
 use std::io;
+use std::os::raw::c_char;
 
 use crate::workspace::{WorkspaceEvent, send_workspace_event};
 use yabai_core::{Area, Point};
@@ -66,6 +67,36 @@ pub fn main_display_id() -> u32 {
 unsafe extern "C" {
     fn CFRelease(cf: CFTypeRef);
     fn CFUUIDCreateString(alloc: *const c_void, uuid: CFUUIDRef) -> CFStringRef;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut c_char,
+        buffer_size: isize,
+        encoding: u32,
+    ) -> u8;
+}
+
+/// A display's UUID as a string (`CGDisplayCreateUUIDFromDisplayID` +
+/// `CFUUIDCreateString`), backing `query --displays uuid`. C `display_uuid`.
+pub fn display_uuid(display_id: u32) -> Option<String> {
+    let uuid = display_uuid_string(display_id).ok()?;
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    let mut buffer = [0_i8; 128];
+    // SAFETY: `uuid.as_ptr()` is a valid CFString; the buffer and its length are
+    // valid; `CFStringGetCString` NUL-terminates on success (returns non-zero).
+    let ok = unsafe {
+        CFStringGetCString(
+            uuid.as_ptr() as CFStringRef,
+            buffer.as_mut_ptr(),
+            buffer.len() as isize,
+            K_CF_STRING_ENCODING_UTF8,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: the buffer is NUL-terminated ASCII/UTF-8 written by CoreFoundation.
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    cstr.to_str().ok().map(str::to_owned)
 }
 
 #[link(name = "SkyLight", kind = "framework")]

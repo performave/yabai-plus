@@ -1474,6 +1474,18 @@ fn query_spaces_serializes_mission_control_index() {
 }
 
 #[test]
+fn query_displays_serializes_uuid() {
+    let mut state = state_with_displays();
+    state.set_display_uuid(42, "ABC-123".into());
+    assert_eq!(
+        state.handle_tokens(&toks(&["query", "--displays", "id,uuid", "--display", "1"])),
+        Ok(Some(
+            "{\n\t\"id\":42,\n\t\"uuid\":\"ABC-123\"\n}\n".to_string()
+        ))
+    );
+}
+
+#[test]
 fn query_displays_serializes_registered_displays() {
     let mut state = state_with_displays();
     state.set_active_space(2);

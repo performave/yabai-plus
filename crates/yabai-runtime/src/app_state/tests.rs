@@ -1885,6 +1885,95 @@ fn manage_on_default_tiles_unmatched_new_window() {
     assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
 }
 
+fn meta(state: &mut AppState, id: u32, app: &str) {
+    state.set_window_meta(
+        id,
+        WindowMeta {
+            app: app.to_string(),
+            title: String::new(),
+            pid: 10,
+        },
+    );
+}
+
+#[test]
+fn config_manage_off_retroactively_floats_existing_tiled_windows() {
+    // Pre-existing windows are seeded tiled at startup (manage defaults on) before
+    // the config sets `manage off`. Toggling manage off must retroactively float
+    // them, not leave them tiled — otherwise hybrid mode is honored only for
+    // windows opened after the config runs.
+    let mut state = state_with_space();
+    state.add_window(1).unwrap();
+    state.add_window(2).unwrap();
+    meta(&mut state, 1, "Finder");
+    meta(&mut state, 2, "TextEdit");
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1, 2]);
+
+    state
+        .handle_tokens(&toks(&["config", "manage", "off"]))
+        .unwrap();
+
+    assert!(state.is_floating(1));
+    assert!(state.is_floating(2));
+    assert!(state.space(1).unwrap().window_list().is_empty());
+    // Still tracked, so they remain listed and focusable.
+    assert_eq!(state.window_known_space_id(1), Some(1));
+    assert!(state.off_tree_window_ids().contains(&2));
+}
+
+#[test]
+fn config_manage_on_retroactively_tiles_existing_floating_windows() {
+    // The inverse: flipping manage back on re-tiles windows that were floating
+    // only because of the global default (no `manage=off` rule pinned them).
+    let mut state = state_with_space();
+    state.config.manage = false;
+    state.apply_new_window_rules(1, "Finder", "", "", "", 1);
+    meta(&mut state, 1, "Finder");
+    assert!(state.is_floating(1));
+
+    state
+        .handle_tokens(&toks(&["config", "manage", "on"]))
+        .unwrap();
+
+    assert!(!state.is_floating(1));
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+}
+
+#[test]
+fn config_manage_toggle_respects_explicit_rules() {
+    // A `manage=on` rule keeps its window tiled through a `manage off` toggle, and
+    // a `manage=off` rule keeps its window floating through a `manage on` toggle —
+    // the effective value is the rule's when it sets one, only the config default
+    // otherwise.
+    let mut state = state_with_space();
+    state
+        .handle_tokens(&toks(&["rule", "--add", "app=^Kitty$", "manage=on"]))
+        .unwrap();
+    state
+        .handle_tokens(&toks(&["rule", "--add", "app=^CleanShot$", "manage=off"]))
+        .unwrap();
+    state.add_window(1).unwrap(); // Kitty, tiled by rule
+    state.add_window(2).unwrap(); // CleanShot, will be floated by rule
+    meta(&mut state, 1, "Kitty");
+    meta(&mut state, 2, "CleanShot");
+    state.apply_new_window_rules(2, "CleanShot", "", "", "", 1);
+    assert!(state.is_floating(2));
+
+    // manage off: Kitty stays tiled (rule), CleanShot stays floating (rule).
+    state
+        .handle_tokens(&toks(&["config", "manage", "off"]))
+        .unwrap();
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+    assert!(state.is_floating(2));
+
+    // manage on: unchanged, because both are pinned by explicit rules.
+    state
+        .handle_tokens(&toks(&["config", "manage", "on"]))
+        .unwrap();
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+    assert!(state.is_floating(2));
+}
+
 #[test]
 fn parse_error_surfaces_as_response_error() {
     let mut state = AppState::new();

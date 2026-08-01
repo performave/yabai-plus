@@ -1452,6 +1452,7 @@ impl AppState {
     }
 
     fn dispatch_config(&mut self, ops: &[ConfigOp]) -> Response {
+        let manage_before = self.config.manage;
         let mut output = String::new();
         let mut layout_dirty = false;
         for op in ops {
@@ -1461,6 +1462,13 @@ impl AppState {
             } else {
                 layout_dirty = true;
             }
+        }
+        // A `config manage` toggle applies retroactively: re-classify every tracked
+        // window's tiling for the new value, then re-flow so the change is visible
+        // immediately (no restart needed), as hybrid mode documents.
+        if self.config.manage != manage_before {
+            self.reclassify_windows_for_manage();
+            layout_dirty = true;
         }
         // A config change that affects layout re-flows every known space. Refresh
         // each tree's layout policy, then re-inset its root area from the stored
@@ -2074,6 +2082,24 @@ impl AppState {
             });
         }
         applications
+    }
+
+    /// Re-classify every tracked window's tiling for the current `config.manage`
+    /// (effective manage = a matching rule's explicit setting, else `config.manage`).
+    /// This makes a `config manage` toggle retroactive: `off` floats windows no
+    /// `manage=on` rule claimed, `on` re-tiles windows no `manage=off` rule floated —
+    /// so pre-existing windows honor hybrid mode instead of keeping the tiling they
+    /// were seeded with at startup. The focused window is preserved across the sweep.
+    fn reclassify_windows_for_manage(&mut self) {
+        let focused = self.focused_window;
+        for (window_id, app, title, sid) in self.windows_with_meta() {
+            let manage = self
+                .matched_rule_effects_for_window(&app, &title, "", "", false)
+                .and_then(|effects| effects.manage)
+                .unwrap_or(self.config.manage);
+            self.set_window_managed(window_id, sid, manage);
+        }
+        self.focused_window = focused;
     }
 
     fn apply_compiled_rule_to_known_windows(

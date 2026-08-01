@@ -74,6 +74,19 @@ fully preserved in git history (`git log -- docs/rust-rewrite-handoff.md`) and
 superseded by the **RESUME HERE** section below, which is the ground truth for
 current state. Only recent milestones are kept here going forward.
 
+- **2026-08-01 (session 76)** — SA loaded locally (SIP off + `-arm64e_preview_abi`,
+  payload v2.1.30) enabling full live testing, which caught **3 real parity bugs
+  (all fixed + verified live)**: (1) numeric space selectors resolved as raw sids
+  instead of mission-control indices (`window --space 2`/`space 2 --destroy`
+  no-op'd) — fixed via a daemon-pushed `AppState::mission_control_order`; (2)
+  `reconcile_pid` dropped windows moved to non-visible spaces (AX can't enumerate
+  them) — now reassigns via `managed_space_for_window` instead of dropping, plus
+  `window --space` updates the model immediately (`finish_window_to_space`); (3)
+  moving the focused window followed the space to it — now re-focus a source-space
+  window first (`keep_source_space_focused`, C `send_window_to_space`). Live-verified
+  SA window ops (opacity/sub-layer/sticky/raise/lower), space create/focus, and
+  cross-space moves. Lesson: unit tests passed on all three; only live testing
+  caught them — keep testing live (SA stays loaded).
 - **2026-07-31 (session 75)** — installed the Rust toolchain locally (rustup
   stable) and drove the port to functional completeness (details in git log):
   - **All 7 command domains fully handled**: added `display --focus`/`--space`

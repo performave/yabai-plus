@@ -129,6 +129,7 @@ unsafe extern "C" {
     ) -> CFArrayRef;
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
     fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
+    fn SLSGetWindowLevel(cid: i32, wid: u32, level: *mut i32) -> i32;
     fn SLSGetWindowTransform(cid: i32, wid: u32, transform: *mut CGAffineTransform) -> i32;
     fn SLSWindowIsOrderedIn(cid: i32, wid: u32, ordered_in: *mut u8) -> i32;
 }
@@ -606,6 +607,22 @@ pub fn window_alpha(window_id: u32) -> io::Result<f32> {
         )))
     } else {
         Ok(alpha)
+    }
+}
+
+/// A window's CG window level via SkyLight (`SLSGetWindowLevel`), backing
+/// `query --windows level` (and `layer`, derived from it). C `window_level`.
+pub fn window_level(window_id: u32) -> io::Result<i32> {
+    let mut level = 0i32;
+    // SAFETY: `SLSMainConnectionID` is the process' SkyLight connection;
+    // `window_id` is a plain CG window id and `level` is a valid out pointer.
+    let err = unsafe { SLSGetWindowLevel(SLSMainConnectionID(), window_id, &mut level) };
+    if err != 0 {
+        Err(io::Error::other(format!(
+            "failed to read level for window {window_id} (SkyLight error {err})"
+        )))
+    } else {
+        Ok(level)
     }
 }
 

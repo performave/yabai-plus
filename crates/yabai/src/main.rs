@@ -26,7 +26,7 @@ use yabai_macos::{
     regular_application_pids, set_active_display, set_drag_modifier, spaces_for_display,
     spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
     warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_is_ordered_in,
-    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
+    window_level, windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, LiveWindowInfo, RecordingSink,
@@ -1025,13 +1025,17 @@ fn is_window_query(tokens: &[String]) -> bool {
 /// via SkyLight for now) into `AppState`, for every window the daemon tracks.
 fn populate_window_live_info(runtime: &mut Runtime<AxSink>) {
     for wid in runtime.state.all_window_ids() {
+        let level = window_level(wid).unwrap_or(0);
         let info = LiveWindowInfo {
             opacity: window_alpha(wid).unwrap_or(1.0),
             role: runtime.sink.window_role(wid).unwrap_or_default(),
             subrole: runtime.sink.window_subrole(wid).unwrap_or_default(),
             can_move: runtime.sink.window_can_move(wid),
             can_resize: runtime.sink.window_can_resize(wid),
-            ..Default::default()
+            level: level as i64,
+            // C reads sub-level via a fragile magic-id mach_msg; defer it and
+            // report sub-level 0 / sub-layer "normal" for now.
+            sub_level: 0,
         };
         runtime.state.set_window_live_info(wid, info);
     }

@@ -2236,6 +2236,8 @@ impl AppState {
                 "opacity",
                 "role",
                 "subrole",
+                "level",
+                "layer",
                 "can-move",
                 "can-resize",
                 "is-floating",

@@ -1149,6 +1149,29 @@ fn query_windows_serializes_opacity_from_live_info() {
 }
 
 #[test]
+fn query_windows_serializes_level_and_derived_layer() {
+    let mut state = state_with_space();
+    state.add_window(10).unwrap();
+    state.add_window(20).unwrap();
+    // level 0 -> "normal"; level 3 (kCGFloatingWindowLevel) -> "above".
+    state.set_window_live_info(10, LiveWindowInfo::default());
+    state.set_window_live_info(
+        20,
+        LiveWindowInfo {
+            level: 3,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        state.handle_tokens(&toks(&["query", "--windows", "id,level,layer"])),
+        Ok(Some(
+            "[{\n\t\"id\":10,\n\t\"level\":0,\n\t\"layer\":\"normal\"\n},{\n\t\"id\":20,\n\t\"level\":3,\n\t\"layer\":\"above\"\n}]\n"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
 fn query_windows_serializes_role_subrole_and_can_flags() {
     let mut state = state_with_space();
     state.add_window(10).unwrap();
@@ -1447,12 +1470,12 @@ fn query_display_scope_filters_spaces_and_windows() {
 
 #[test]
 fn query_unsupported_property_reports() {
-    // `level` is a still-deferred field (needs a fragile version-specific private
-    // SkyLight read), so it stays rejected; role/opacity/etc. are now supported.
+    // `sub-level` is a still-deferred field (needs a fragile magic-id mach_msg),
+    // so it stays rejected; role/opacity/level/etc. are now supported.
     let mut state = state_with_space();
     assert_eq!(
-        state.handle_tokens(&toks(&["query", "--windows", "level"])),
-        Err("'level' is not available from pure window state".to_string())
+        state.handle_tokens(&toks(&["query", "--windows", "sub-level"])),
+        Err("'sub-level' is not available from pure window state".to_string())
     );
 }
 

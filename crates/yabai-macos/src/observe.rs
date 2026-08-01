@@ -329,3 +329,94 @@ pub fn observe_pid(pid: i32, tx: Sender<ObservedEvent>) -> Result<(), String> {
         Ok(())
     }
 }
+
+/// Mission Control transition, observed on the Dock process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissionControlEvent {
+    /// Entered Mission Control / Exposé (any show mode).
+    Enter,
+    /// Exited Mission Control / Exposé.
+    Exit,
+}
+
+struct McObserverCtx {
+    tx: Sender<MissionControlEvent>,
+}
+
+/// The Dock Expose-notification callback: the three "show" notifications map to
+/// [`MissionControlEvent::Enter`], `AXExposeExit` to `Exit`, mirroring the C
+/// `mission_control_notification_handler`.
+extern "C" fn mission_control_callback(
+    _observer: AXObserverRef,
+    _element: AXUIElementRef,
+    notification: CFStringRef,
+    refcon: *mut c_void,
+) {
+    if refcon.is_null() {
+        return;
+    }
+    // SAFETY: `refcon` is the `&McObserverCtx` passed to every
+    // `AXObserverAddNotification`; it lives on `observe_mission_control`'s stack,
+    // which blocks in the run loop. Callbacks are serialized on that thread.
+    let ctx = unsafe { &*(refcon as *const McObserverCtx) };
+    let Some(name) = cfstring_to_string(notification) else {
+        return;
+    };
+    let event = match name.as_str() {
+        "AXExposeShowAllWindows" | "AXExposeShowFrontWindows" | "AXExposeShowDesktop" => {
+            MissionControlEvent::Enter
+        }
+        "AXExposeExit" => MissionControlEvent::Exit,
+        _ => return,
+    };
+    let _ = ctx.tx.send(event);
+}
+
+/// Observe Mission Control enter/exit by watching the Dock process's private
+/// `AXExpose*` notifications, mirroring the C `mission_control_observe`. Blocks in
+/// the run loop; run on a dedicated thread. Returns `Err` only if the observer
+/// could not be created.
+pub fn observe_mission_control(
+    dock_pid: i32,
+    tx: Sender<MissionControlEvent>,
+) -> Result<(), String> {
+    // SAFETY: standard AX observer setup on the Dock app element; every CF/AX ref
+    // is released or kept alive for the run loop's duration (the ctx and app live
+    // on this stack frame, which blocks in CFRunLoopRun).
+    unsafe {
+        let app = AXUIElementCreateApplication(dock_pid);
+        if app.is_null() {
+            return Err(format!("no AX application element for Dock pid {dock_pid}"));
+        }
+        let mut observer: AXObserverRef = std::ptr::null_mut();
+        let err = AXObserverCreate(dock_pid, mission_control_callback, &mut observer);
+        if err != 0 || observer.is_null() {
+            CFRelease(app);
+            return Err(format!(
+                "AXObserverCreate failed for Dock pid {dock_pid} (err {err})"
+            ));
+        }
+
+        let notes = [
+            cfstring(b"AXExposeShowAllWindows\0"),
+            cfstring(b"AXExposeShowFrontWindows\0"),
+            cfstring(b"AXExposeShowDesktop\0"),
+            cfstring(b"AXExposeExit\0"),
+        ];
+        let ctx = Box::new(McObserverCtx { tx });
+        let refcon = (&*ctx as *const McObserverCtx) as *mut c_void;
+        for note in notes {
+            AXObserverAddNotification(observer, app, note, refcon);
+            CFRelease(note);
+        }
+
+        let run_loop = CFRunLoopGetCurrent();
+        let source = AXObserverGetRunLoopSource(observer);
+        CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
+        CFRunLoopRun();
+
+        CFRelease(app);
+        drop(ctx);
+        Ok(())
+    }
+}

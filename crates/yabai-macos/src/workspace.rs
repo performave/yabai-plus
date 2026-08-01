@@ -353,6 +353,44 @@ pub fn regular_application_pids() -> Vec<i32> {
     }
 }
 
+/// The Dock process id (`NSRunningApplication runningApplicationsWithBundle
+/// Identifier:@"com.apple.dock"`), mirroring the C `workspace_get_dock_pid`.
+/// `None` if the Dock is not running or the lookup fails.
+pub fn dock_pid() -> Option<i32> {
+    let running_app_class = class(c"NSRunningApplication");
+    if running_app_class.is_null() {
+        return None;
+    }
+    // SAFETY: `runningApplicationsWithBundleIdentifier:` is `(Class, NSString) ->
+    // NSArray`; `count`/`objectAtIndex:`/`processIdentifier` match their `msg*`
+    // ABIs. The toll-free-bridged CFString is released after the call.
+    unsafe {
+        let bundle_id = cfstring(b"com.apple.dock\0");
+        if bundle_id.is_null() {
+            return None;
+        }
+        let apps: Id = msg1(
+            running_app_class,
+            sel(c"runningApplicationsWithBundleIdentifier:"),
+            bundle_id as Id,
+        );
+        CFRelease(bundle_id as CFTypeRef);
+        if apps.is_null() {
+            return None;
+        }
+        let count: usize = msg0(apps, sel(c"count"));
+        if count == 0 {
+            return None;
+        }
+        let app: Id = msg1(apps, sel(c"objectAtIndex:"), 0usize);
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg0(app, sel(c"processIdentifier"));
+        (pid > 0).then_some(pid)
+    }
+}
+
 /// Observe active-space changes on the current thread, forwarding events to
 /// `tx`. This blocks in `NSApp run`; run it on a dedicated thread.
 pub fn observe_workspace(tx: Sender<WorkspaceEvent>) -> Result<(), String> {
@@ -513,4 +551,19 @@ unsafe fn add_workspace_observer(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dock_pid_resolves() {
+        // The Dock is always running on macOS; this verifies the
+        // NSRunningApplication FFI end-to-end (the mission-control observer
+        // depends on it).
+        let pid = dock_pid();
+        assert!(pid.is_some(), "expected a Dock pid");
+        assert!(pid.unwrap() > 0);
+    }
 }

@@ -16,17 +16,17 @@ use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_
 use yabai_macos::ax::DiscoveredAxWindow;
 use yabai_macos::{
     AxSink, MOUSE_MOD_ALT, MOUSE_MOD_CMD, MOUSE_MOD_CTRL, MOUSE_MOD_FN, MOUSE_MOD_SHIFT,
-    MouseDragButton, MouseDragEvent, ObservedEvent, WorkspaceEvent,
+    MissionControlEvent, MouseDragButton, MouseDragEvent, ObservedEvent, WorkspaceEvent,
     accessibility_trusted_with_prompt, active_displays, application_pids_with_windows,
-    current_space_for_display, cursor_display_id, cursor_location, display_for_space,
+    current_space_for_display, cursor_display_id, cursor_location, display_for_space, dock_pid,
     focused_window, focused_window_diagnostics, main_display_id, main_visible_frame,
     mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
-    observe_display_reconfiguration, observe_mouse_drag, observe_mouse_moved, observe_pid,
-    observe_workspace, pid_window_infos, regular_application_pids, set_active_display,
-    set_drag_modifier, spaces_for_display, spaces_for_window, switch_space_by_gesture,
-    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
-    warp_cursor_to_point, window_is_ordered_in, windows_for_pid, windows_for_pid_diagnostics,
-    windows_on_space,
+    observe_display_reconfiguration, observe_mission_control, observe_mouse_drag,
+    observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
+    regular_application_pids, set_active_display, set_drag_modifier, spaces_for_display,
+    spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
+    warp_cursor_to_display_center, warp_cursor_to_point, window_is_ordered_in, windows_for_pid,
+    windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, RecordingSink, Response, Runtime,
@@ -589,6 +589,8 @@ fn run_rust_tile_daemon(args: &[String]) -> ExitCode {
 enum WmWork {
     Observed(ObservedEvent),
     Workspace(WorkspaceEvent),
+    /// A Mission Control enter/exit transition (Dock Expose AX observer).
+    MissionControl(MissionControlEvent),
     /// The cursor moved to `point` (from the `focus_follows_mouse` event tap).
     MouseMoved(Point),
     /// A mouse-drag event (down/dragged/up) while the `mouse_modifier` is held.
@@ -613,6 +615,33 @@ fn spawn_observer(pid: i32, tx: &Sender<WmWork>) {
     thread::spawn(move || {
         for event in orx {
             if tx.send(WmWork::Observed(event)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Spawn the Mission Control (Dock Expose) observer on its own run-loop thread,
+/// forwarding enter/exit transitions into the shared `WmWork` channel. No-op if
+/// the Dock pid can't be resolved. NOTE: the Dock AX observer registers cleanly,
+/// but the enter/exit *firing* has not been verified over a headless SSH session
+/// (Mission Control is a GUI-only transition) — same caveat as the display
+/// reconfiguration signals.
+fn spawn_mission_control_observer(tx: &Sender<WmWork>) {
+    let Some(dock) = dock_pid() else {
+        eprintln!("yabai-rust: could not resolve Dock pid; mission_control signals disabled");
+        return;
+    };
+    let (mtx, mrx) = channel::<MissionControlEvent>();
+    thread::spawn(move || {
+        if let Err(error) = observe_mission_control(dock, mtx) {
+            eprintln!("yabai-rust: mission control observer failed: {error}");
+        }
+    });
+    let tx = tx.clone();
+    thread::spawn(move || {
+        for event in mrx {
+            if tx.send(WmWork::MissionControl(event)).is_err() {
                 break;
             }
         }
@@ -2557,6 +2586,8 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
         spawn_observer(*pid, &tx);
     }
     let workspace_tx = start_workspace_bridge(&tx);
+    // Mission Control enter/exit via the Dock Expose AX observer.
+    spawn_mission_control_observer(&tx);
 
     // Periodic self-heal tick (also picks up newly launched apps in `all` mode).
     {
@@ -2918,6 +2949,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         );
                     }
                 },
+                WmWork::MissionControl(event) => {
+                    let signal = match event {
+                        MissionControlEvent::Enter => SignalEvent::MissionControlEnter,
+                        MissionControlEvent::Exit => SignalEvent::MissionControlExit,
+                    };
+                    fire_signals(&runtime, signal, &[], None, None, None);
+                }
                 WmWork::MouseMoved(point) => {
                     handle_mouse_moved(
                         &scripting_addition,

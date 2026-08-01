@@ -43,7 +43,7 @@ pub use mouse::{
     post_right_mouse_drag, set_drag_modifier,
 };
 #[cfg(target_os = "macos")]
-pub use observe::{ObservedEvent, observe_pid};
+pub use observe::{MissionControlEvent, ObservedEvent, observe_mission_control, observe_pid};
 #[cfg(target_os = "macos")]
 pub use screen::{main_visible_frame, visible_frame_for_display};
 #[cfg(target_os = "macos")]
@@ -54,7 +54,7 @@ pub use space::{
 };
 #[cfg(target_os = "macos")]
 pub use workspace::{
-    WorkspaceEvent, ns_application_load, observe_workspace, regular_application_pids,
+    WorkspaceEvent, dock_pid, ns_application_load, observe_workspace, regular_application_pids,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

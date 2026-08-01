@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  202 workspace tests pass. The shipped C `make` flow is unchanged.
+  203 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -108,7 +108,10 @@ current state. Only recent milestones are kept here going forward.
     cursor space, C `event_loop` app-launched routing) via pure
     `AppState::origin_space_for_new_window`, called in daemon reconcile for
     genuinely-new windows.
-  202 workspace tests, clippy clean. The only still-inert config keys are the
+  - `mission_control_enter`/`exit` signals via a Dock `AXExpose*` observer
+    (`observe_mission_control` + `dock_pid`), completing the signal domain.
+    `dock_pid` live-verified; enter/exit firing GUI-only, unverified.
+  203 workspace tests, clippy clean. The only still-inert config keys are the
   cosmetic/animation-only ones — `window_animation_easing`,
   `insert_feedback_color`, `skip_window_focus_animation` — which need
   window-move animation / insert-feedback overlay infrastructure that is not
@@ -643,8 +646,11 @@ deminimize/title-change events and app/title filters for metadata-carrying event
    and the `CFRunLoopRun`→`[NSApp run]` swap are verified live on macOS 26, but the
    actual moved/resized firing on a real reconfiguration is not yet verified (needs a
    physical two-display resolution/arrangement change). `dock_did_restart` is wired
-   but unverified (needs `[NSApp run]`; see session 20). Still to do:
-   `mission_control_enter`/`exit` (need SLS/private notifications).
+   but unverified (needs `[NSApp run]`; see session 20).
+   `mission_control_enter`/`exit` are now wired via a Dock `AXExpose*` observer
+   (`observe_mission_control` + `dock_pid`, session 75); `dock_pid` is
+   live-verified, the enter/exit firing is not (GUI-only transition). The signal
+   domain is now feature-complete.
    The NSWorkspace-driven application signals (launch/terminate/activate/
    deactivate/hide/visible) and app filters are now verified live from a
    `gui/501` LaunchAgent daemon — see session 17, which also fixed the long-
@@ -679,7 +685,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 202 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 203 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

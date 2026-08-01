@@ -998,23 +998,29 @@ pub fn pid_window_infos(pid: i32) -> io::Result<Vec<AxWindowInfo>> {
     Ok(result)
 }
 
-/// Whether an AX element's `kAXPosition` attribute is settable — the cleanest
-/// "can the layout engine move this window" test, independent of CG ids.
-fn is_position_settable(element: AXUIElementRef) -> bool {
+/// Whether an AX element's named attribute is settable (C `window_can_move` /
+/// `window_can_resize` test `AXPosition` / `AXSize`).
+fn is_attribute_settable(element: AXUIElementRef, attribute: &[u8]) -> bool {
     // SAFETY: creates an owned CFString for the duration of the query.
-    let position_attr = unsafe { cfstring(b"AXPosition\0") };
-    if position_attr.is_null() {
+    let attr = unsafe { cfstring(attribute) };
+    if attr.is_null() {
         return false;
     }
     let mut settable: Boolean = 0;
-    // SAFETY: `element` and `position_attr` are valid; `settable` is valid
-    // writable storage. The CFString is released immediately after.
+    // SAFETY: `element` and `attr` are valid; `settable` is valid writable
+    // storage. The CFString is released immediately after.
     let ok = unsafe {
-        let err = AXUIElementIsAttributeSettable(element, position_attr, &mut settable);
-        CFRelease(position_attr);
+        let err = AXUIElementIsAttributeSettable(element, attr, &mut settable);
+        CFRelease(attr);
         err == 0
     };
     ok && settable != 0
+}
+
+/// Whether an AX element's `kAXPosition` attribute is settable — the cleanest
+/// "can the layout engine move this window" test, independent of CG ids.
+fn is_position_settable(element: AXUIElementRef) -> bool {
+    is_attribute_settable(element, b"AXPosition\0")
 }
 
 /// Whether an AX window is minimized (in the Dock). Minimized windows still
@@ -1136,6 +1142,30 @@ impl AxSink {
     /// Forget an active/tileable window, releasing its element.
     pub fn unregister(&mut self, window_id: u32) {
         self.windows.remove(&window_id);
+    }
+
+    /// The window's AX `role`/`subrole` strings (`query --windows role/subrole`),
+    /// or `None` if the window isn't registered / the attribute is unreadable.
+    pub fn window_role(&self, window_id: u32) -> Option<String> {
+        ax_string_attribute(self.windows.get(&window_id)?.element, b"AXRole\0")
+    }
+
+    pub fn window_subrole(&self, window_id: u32) -> Option<String> {
+        ax_string_attribute(self.windows.get(&window_id)?.element, b"AXSubrole\0")
+    }
+
+    /// Whether the window's `AXPosition`/`AXSize` is settable (C
+    /// `window_can_move`/`window_can_resize`). `false` for an unregistered window.
+    pub fn window_can_move(&self, window_id: u32) -> bool {
+        self.windows
+            .get(&window_id)
+            .is_some_and(|window| is_position_settable(window.element))
+    }
+
+    pub fn window_can_resize(&self, window_id: u32) -> bool {
+        self.windows
+            .get(&window_id)
+            .is_some_and(|window| is_attribute_settable(window.element, b"AXSize\0"))
     }
 
     /// Forget a minimized window, releasing its held element.

@@ -1149,6 +1149,33 @@ fn query_windows_serializes_opacity_from_live_info() {
 }
 
 #[test]
+fn query_windows_serializes_role_subrole_and_can_flags() {
+    let mut state = state_with_space();
+    state.add_window(10).unwrap();
+    state.set_window_live_info(
+        10,
+        LiveWindowInfo {
+            role: "AXWindow".into(),
+            subrole: "AXStandardWindow".into(),
+            can_move: true,
+            can_resize: false,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        state.handle_tokens(&toks(&[
+            "query",
+            "--windows",
+            "id,role,subrole,can-move,can-resize"
+        ])),
+        Ok(Some(
+            "[{\n\t\"id\":10,\n\t\"role\":\"AXWindow\",\n\t\"subrole\":\"AXStandardWindow\",\n\t\"can-move\":true,\n\t\"can-resize\":false\n}]\n"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
 fn query_windows_serializes_is_floating_and_is_sticky() {
     // Tiled windows report both as false; the fields are now requestable instead
     // of erroring (C never rejects is-floating/is-sticky). Floating/sticky windows
@@ -1420,10 +1447,12 @@ fn query_display_scope_filters_spaces_and_windows() {
 
 #[test]
 fn query_unsupported_property_reports() {
+    // `level` is a still-deferred field (needs a fragile version-specific private
+    // SkyLight read), so it stays rejected; role/opacity/etc. are now supported.
     let mut state = state_with_space();
     assert_eq!(
-        state.handle_tokens(&toks(&["query", "--windows", "role"])),
-        Err("'role' is not available from pure window state".to_string())
+        state.handle_tokens(&toks(&["query", "--windows", "level"])),
+        Err("'level' is not available from pure window state".to_string())
     );
 }
 

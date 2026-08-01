@@ -1027,6 +1027,10 @@ fn populate_window_live_info(runtime: &mut Runtime<AxSink>) {
     for wid in runtime.state.all_window_ids() {
         let info = LiveWindowInfo {
             opacity: window_alpha(wid).unwrap_or(1.0),
+            role: runtime.sink.window_role(wid).unwrap_or_default(),
+            subrole: runtime.sink.window_subrole(wid).unwrap_or_default(),
+            can_move: runtime.sink.window_can_move(wid),
+            can_resize: runtime.sink.window_can_resize(wid),
             ..Default::default()
         };
         runtime.state.set_window_live_info(wid, info);

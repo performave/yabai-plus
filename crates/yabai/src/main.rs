@@ -1789,6 +1789,27 @@ fn try_scripting_addition(
                     SpaceAction::Switch(selector) => {
                         space_switch_via_sa(sa, runtime, display_frames, selector)
                     }
+                    // `--toggle mission-control`/`show-desktop`: focus the acting
+                    // space (best-effort, like C), then fire the CoreDock
+                    // notification. `--toggle padding`/`gap` are pure and handled by
+                    // `AppState`, so let them fall through.
+                    SpaceAction::Toggle(name)
+                        if name == "mission-control" || name == "show-desktop" =>
+                    {
+                        match runtime.state.resolve_space(cmd.target.as_ref()) {
+                            Ok(sid) => {
+                                let _ = sa.focus_space(sid);
+                                let _ = activate_space_display_if_cross(sid);
+                                if name == "mission-control" {
+                                    yabai_macos::coredock::toggle_mission_control();
+                                } else {
+                                    yabai_macos::coredock::toggle_show_desktop();
+                                }
+                                Ok(None)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
                     _ => continue,
                 };
                 if result.is_ok() {

@@ -56,3 +56,15 @@ fn send_notification(name: &str) -> bool {
 pub fn toggle_expose() -> bool {
     send_notification("com.apple.expose.front.awake")
 }
+
+/// Toggle Mission Control, mirroring the C `space_manager_toggle_mission_control`
+/// (`CoreDockSendNotification(CFSTR("com.apple.expose.awake"), 0)`).
+pub fn toggle_mission_control() -> bool {
+    send_notification("com.apple.expose.awake")
+}
+
+/// Toggle Show Desktop, mirroring the C `space_manager_toggle_show_desktop`
+/// (`CoreDockSendNotification(CFSTR("com.apple.showdesktop.awake"), 0)`).
+pub fn toggle_show_desktop() -> bool {
+    send_notification("com.apple.showdesktop.awake")
+}

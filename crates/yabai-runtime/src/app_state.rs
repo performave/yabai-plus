@@ -221,6 +221,14 @@ pub struct AppState {
     /// The last un-padded (usable) frame the daemon handed each space, so a later
     /// `space --padding` can re-inset without waiting for the next reconcile.
     space_usable: HashMap<u64, Area>,
+    /// Spaces whose padding is toggled off (`space --toggle padding`, C
+    /// `VIEW_ENABLE_PADDING` cleared). While present, [`Self::space_padding`]
+    /// reports zero padding regardless of the override/config value.
+    padding_disabled: HashSet<u64>,
+    /// Spaces whose gap is toggled off (`space --toggle gap`, C `VIEW_ENABLE_GAP`
+    /// cleared), mapping `sid -> saved gap value` so a re-toggle restores it. The
+    /// live `tree.config.gap` is held at zero while a space is present here.
+    gap_disabled: HashMap<u64, i32>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -932,9 +940,13 @@ impl AppState {
         Ok(())
     }
 
-    /// The effective `[top, bottom, left, right]` padding for a space: its
+    /// The effective `[top, bottom, left, right]` padding for a space: zero when
+    /// padding is toggled off for it (C `VIEW_ENABLE_PADDING` cleared), else its
     /// `space --padding` override if set, else the global config padding.
     fn space_padding(&self, sid: u64) -> [i32; 4] {
+        if self.padding_disabled.contains(&sid) {
+            return [0, 0, 0, 0];
+        }
         self.space_paddings.get(&sid).copied().unwrap_or([
             self.config.top_padding,
             self.config.bottom_padding,
@@ -959,6 +971,16 @@ impl AppState {
     /// `space_manager_set_gap_for_space`: set (`abs`) or adjust (`rel`, clamped to
     /// zero) a space's own window gap and re-tile. Errors on a float space.
     fn set_space_gap(&mut self, sid: u64, kind: ValueType, gap: i32) -> Result<(), String> {
+        // When gap is toggled off, the live `tree.config.gap` is held at zero and
+        // the value lives in `gap_disabled`; update that slot so a later re-toggle
+        // restores the new value. C keeps the gap value independent of the flag.
+        if let Some(saved) = self.gap_disabled.get_mut(&sid) {
+            *saved = match kind {
+                ValueType::Abs => gap,
+                ValueType::Rel => (*saved + gap).max(0),
+            };
+            return Ok(());
+        }
         let tree = self
             .spaces
             .get_mut(&sid)
@@ -968,6 +990,58 @@ impl AppState {
             ValueType::Abs => gap,
             ValueType::Rel => (tree.config.gap + gap).max(0),
         };
+        let root = tree.root();
+        tree.update(root);
+        Ok(())
+    }
+
+    /// `space --toggle padding` (C `space_manager_toggle_padding_for_space`): flip
+    /// whether a space applies padding, then re-inset its root from the last usable
+    /// frame and re-tile. Errors on a float space.
+    fn toggle_space_padding(&mut self, sid: u64) -> Result<(), String> {
+        let is_float = self
+            .spaces
+            .get(&sid)
+            .ok_or_else(|| "cannot toggle padding for a non-managed space.".to_string())?
+            .layout
+            == ViewType::Float;
+        if is_float {
+            return Err("cannot toggle padding for a non-managed space.".to_string());
+        }
+        if !self.padding_disabled.remove(&sid) {
+            self.padding_disabled.insert(sid);
+        }
+        if let Some(usable) = self.space_usable.get(&sid).copied() {
+            self.set_space_frame(sid, usable)?;
+        }
+        Ok(())
+    }
+
+    /// `space --toggle gap` (C `space_manager_toggle_gap_for_space`): flip whether a
+    /// space applies its window gap, then re-tile. The gap value is preserved
+    /// across the toggle. Errors on a float space.
+    fn toggle_space_gap(&mut self, sid: u64) -> Result<(), String> {
+        let is_float = self
+            .spaces
+            .get(&sid)
+            .ok_or_else(|| "cannot toggle gap for a non-managed space.".to_string())?
+            .layout
+            == ViewType::Float;
+        if is_float {
+            return Err("cannot toggle gap for a non-managed space.".to_string());
+        }
+        let new_gap = match self.gap_disabled.remove(&sid) {
+            // Re-enable: restore the saved gap.
+            Some(saved) => saved,
+            // Disable: save the live gap and hold it at zero.
+            None => {
+                let live = self.spaces.get(&sid).map_or(0, |tree| tree.config.gap);
+                self.gap_disabled.insert(sid, live);
+                0
+            }
+        };
+        let tree = self.spaces.get_mut(&sid).unwrap();
+        tree.config.gap = new_gap;
         let root = tree.root();
         tree.update(root);
         Ok(())
@@ -1333,6 +1407,29 @@ impl AppState {
             {
                 let sid = self.resolve_space_selector(target)?;
                 self.set_space_padding(sid, *kind, *top, *bottom, *left, *right)?;
+                continue;
+            }
+            // `--toggle padding`/`gap` act on the selected space itself; the
+            // `mission-control`/`show-desktop` variants need the macOS layer and are
+            // intercepted in the daemon before dispatch.
+            if let SpaceAction::Toggle(name) = action {
+                match name.as_str() {
+                    "padding" => {
+                        let sid = self.resolve_space_selector(target)?;
+                        self.toggle_space_padding(sid)?;
+                    }
+                    "gap" => {
+                        let sid = self.resolve_space_selector(target)?;
+                        self.toggle_space_gap(sid)?;
+                    }
+                    // `mission-control`/`show-desktop` are handled at the daemon
+                    // boundary; anything else is an unknown toggle value.
+                    other => {
+                        return Err(format!(
+                            "unknown value '{other}' given to command '--toggle' for domain 'space'\n"
+                        ));
+                    }
+                }
                 continue;
             }
             let tree = self.active_tree_mut()?;
@@ -2980,6 +3077,80 @@ mod tests {
         assert_eq!(
             state.handle_tokens(&toks(&["space", "--padding", "abs:1:1:1:1"])),
             Err("cannot set padding for a non-managed space.".to_string())
+        );
+    }
+
+    #[test]
+    fn space_toggle_padding_zeros_and_restores() {
+        let mut state = state_with_space();
+        state.add_window(1).unwrap();
+        state
+            .set_space_frame(1, Area::new(0.0, 0.0, 1000.0, 1000.0))
+            .unwrap();
+        state
+            .handle_tokens(&toks(&["space", "--padding", "abs:20:20:10:10"]))
+            .unwrap();
+        assert_eq!(state.flush(1).unwrap()[0].area.x as i32, 10);
+        // Toggle off: padding is ignored, the window fills the raw usable frame.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--toggle", "padding"])),
+            Ok(None)
+        );
+        let frame = state.flush(1).unwrap()[0].area;
+        assert_eq!(
+            (
+                frame.x as i32,
+                frame.y as i32,
+                frame.w as i32,
+                frame.h as i32
+            ),
+            (0, 0, 1000, 1000)
+        );
+        // Toggle on: the override applies again.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--toggle", "padding"])),
+            Ok(None)
+        );
+        assert_eq!(state.flush(1).unwrap()[0].area.x as i32, 10);
+    }
+
+    #[test]
+    fn space_toggle_gap_zeros_and_restores_preserving_value() {
+        let mut state = state_with_space();
+        state
+            .handle_tokens(&toks(&["space", "--gap", "abs:12"]))
+            .unwrap();
+        assert_eq!(state.space(1).unwrap().config.gap, 12);
+        // Toggle off: the live gap drops to zero but the value is remembered.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--toggle", "gap"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(1).unwrap().config.gap, 0);
+        // `space --gap` while toggled off updates the saved value, not the live one.
+        state
+            .handle_tokens(&toks(&["space", "--gap", "abs:30"]))
+            .unwrap();
+        assert_eq!(state.space(1).unwrap().config.gap, 0);
+        // Toggle on: the updated saved gap is restored.
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--toggle", "gap"])),
+            Ok(None)
+        );
+        assert_eq!(state.space(1).unwrap().config.gap, 30);
+    }
+
+    #[test]
+    fn space_toggle_gap_padding_error_on_float_and_unknown_value() {
+        let mut state = state_with_space();
+        state.spaces.get_mut(&1).unwrap().layout = ViewType::Float;
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--toggle", "gap"])),
+            Err("cannot toggle gap for a non-managed space.".to_string())
+        );
+        assert_eq!(
+            state.handle_tokens(&toks(&["space", "--toggle", "padding"])),
+            Err("cannot toggle padding for a non-managed space.".to_string())
         );
     }
 

@@ -96,11 +96,14 @@ current state. Only recent milestones are kept here going forward.
     `display_bounds_constrained`; tracks `CGMainDisplayID`;
     `dispatch_config` now re-insets spaces immediately on layout-config change).
   - Organization: `app_state.rs`, `command.rs`, `layout.rs` are now directory
-    modules (`<name>/mod.rs` + `<name>/tests.rs`) — test blocks split into
-    sibling files, no behavior change. `main.rs` (4437 lines, code-heavy)
-    remains monolithic; its `*_via_sa` SA-helper block is a future extraction
-    target but is tightly coupled to the interceptors (needs a wide
-    `pub(crate)` surface), so do it carefully, not in a rushed pass.
+    modules (`<name>/mod.rs` + `<name>/tests.rs`, test blocks in sibling files).
+    The `yabai` binary is split into child modules of `main` — `probes`
+    (diagnostic subcommands), `sa_ops` (the `*_via_sa` SA helpers), `mouse_ctl`
+    (ffm + drag/resize/drop) — via the `use super::*` (child → parent) /
+    `use <mod>::*` (parent → child) pattern; child modules reach parent helpers
+    freely, only items the parent calls need `pub(crate)`. main.rs 4703 → 3493
+    lines. Remaining main.rs is the daemon loop + interceptors + reconcile +
+    interleaved signal helpers (not a clean contiguous block).
   - Enacted `window_origin_display` (new windows route to physical/focused/
     cursor space, C `event_loop` app-launched routing) via pure
     `AppState::origin_space_for_new_window`, called in daemon reconcile for

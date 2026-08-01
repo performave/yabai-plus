@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  209 workspace tests pass. The shipped C `make` flow is unchanged.
+  210 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -74,18 +74,22 @@ fully preserved in git history (`git log -- docs/rust-rewrite-handoff.md`) and
 superseded by the **RESUME HERE** section below, which is the ground truth for
 current state. Only recent milestones are kept here going forward.
 
-- **2026-08-01 (session 77)** — started closing the `query --windows`
-  completeness gap via daemon live-read augmentation: new
-  `AppState::LiveWindowInfo` + `set_window_live_info`, populated by
-  `populate_window_live_info` before serving a `query --windows`. Landed +
-  live-verified: `opacity` (SLSGetWindowAlpha), `role`/`subrole`
-  (`ax_string_attribute`), `can-move`/`can-resize` (`AXPosition`/`AXSize`
-  settable, new AxSink accessors). Also landed level+layer (SLSGetWindowLevel). Still deferred: `sub-level`/`sub-layer` (fragile version-specific private SkyLight — `level` via
-  `SLSWindowQuery*`, `sub-level` a raw magic-id `mach_msg`) and the mostly-hollow
-  `root-window`/`has-ax-reference`/`is-native-fullscreen`/`is-minimized`/
-  `is-hidden`/`is-grabbed` (those states remove a window from its tree, so they're
-  not in the tree-based query output). Serializer arms + `window_layer_str` for
-  the deferred fields already exist, gated out of the default list. 207 tests.
+- **2026-08-01 (session 77)** — **closed the `query` completeness gap for the
+  common surface** via daemon live-read augmentation (`AppState::LiveWindowInfo` +
+  `set_window_live_info`, populated by `populate_window_live_info` before serving
+  a `query --windows`). Landed + live-verified window fields: `opacity`
+  (SLSGetWindowAlpha), `role`/`subrole` (`ax_string_attribute`),
+  `can-move`/`can-resize` (`AXPosition`/`AXSize` settable), `level`+derived
+  `layer` (SLSGetWindowLevel). **Off-tree floating/sticky/scratchpad windows are
+  now listed** (daemon AX-reads their frames: `off_tree_window_ids` →
+  `AxSink::window_frame` → `set_off_tree_frame` → `off_tree_window_frames`).
+  A final smoke test caught **space `index` missing** — added (mission-control
+  index from `mission_control_order`). Deferred (edge/fragile, documented in the
+  compat ledger): window `sub-level`/`sub-layer` (magic-id `mach_msg`),
+  `root-window`/`is-grabbed`/`has-ax-reference`, listing minimized/native-fs
+  windows; space/display `uuid`; space `is-native-fullscreen`. 210 tests.
+  **The port now has functional parity with C yabai for the practical surface;
+  remaining work is the gated production cutover and the deferred OSAX island.**
 - **2026-08-01 (session 76)** — SA loaded locally (SIP off + `-arm64e_preview_abi`,
   payload v2.1.30) enabling full live testing, which caught **3 real parity bugs
   (all fixed + verified live)**: (1) numeric space selectors resolved as raw sids
@@ -721,7 +725,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 209 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 210 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

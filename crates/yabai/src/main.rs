@@ -3028,13 +3028,40 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                         // `window_known_space_id` (not `window_space_id`) so a
                         // floating/off-tree window — e.g. any window under `config
                         // manage off` — is still tracked as the focused window,
-                        // letting focused-window commands act on it.
-                        if let Some(sid) = runtime.state.window_known_space_id(window_id) {
+                        // letting focused-window commands act on it. A window idling
+                        // on a non-visible space can fall out of the model's tracking
+                        // (AX enumerates only the visible space), leaving it space-
+                        // less; resolve its space authoritatively so focus still
+                        // registers — otherwise focused-window keybinds (`--toggle
+                        // float`, `--space`, ...) would silently act on a stale
+                        // window instead of the one the user just focused.
+                        let known = runtime.state.window_known_space_id(window_id);
+                        let sid =
+                            known.or_else(|| managed_space_for_window(&runtime.state, window_id));
+                        if let Some(sid) = sid {
+                            if known.is_none() {
+                                // Re-attach a window the model had lost track of, so
+                                // it is tracked and focus can register on it.
+                                let _ =
+                                    runtime
+                                        .state
+                                        .handle_event(StateEvent::WindowAssignedToSpace {
+                                            window_id,
+                                            sid,
+                                        });
+                            }
                             runtime.state.set_active_space(sid);
-                            let _ = runtime
-                                .state
-                                .handle_event(StateEvent::WindowFocused { window_id });
                         }
+                        // Register focus even when the window's space cannot be
+                        // resolved (e.g. a floating window when SkyLight's space
+                        // enumeration is unavailable), so focused-window keybinds
+                        // (`--toggle float`, `--space`, ...) still act on the window
+                        // the user just focused rather than a stale one. Fires
+                        // unconditionally; the `sid` block above only adjusts the
+                        // active space when it is known.
+                        let _ = runtime
+                            .state
+                            .handle_event(StateEvent::WindowFocused { window_id });
                         center_mouse_on_focus(&runtime, window_id);
                         // `window_focused` signal (observer-driven focus, e.g. a
                         // click). De-duplicated against the command path below.

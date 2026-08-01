@@ -1861,6 +1861,72 @@ fn manage_off_floats_and_tracks_unmatched_new_window() {
 }
 
 #[test]
+fn manage_off_opted_in_window_follows_across_spaces() {
+    // Regression for the "tiled on space 2, floats on space 1, re-tiled back on 2"
+    // bug: under `config manage off`, a window the user opted into tiling (here via
+    // `--toggle float`) must be relocated into the destination space's tree when it
+    // moves, not merely re-recorded in `window_spaces` while stuck in its origin
+    // tree. Previously the hybrid `WindowAssignedToSpace` branch never touched the
+    // trees, so the window appeared tiled only on the space it was first tiled on.
+    let mut state = state_with_space();
+    state.add_space(2, Area::new(0.0, 0.0, 1000.0, 1000.0));
+    state.config.manage = false;
+
+    // Opt window 1 into tiling on space 1 (its default-float mark cleared, tiled).
+    state.apply_new_window_rules(1, "Finder", "", "", "", 1);
+    assert!(state.is_floating(1));
+    state.set_active_space(1);
+    state
+        .handle_tokens(&toks(&["window", "1", "--toggle", "float"]))
+        .unwrap();
+    assert!(!state.is_floating(1));
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+
+    // Move it to space 2: it must leave space 1's tree and enter space 2's.
+    state
+        .handle_event(StateEvent::WindowAssignedToSpace {
+            window_id: 1,
+            sid: 2,
+        })
+        .unwrap();
+    assert!(state.space(1).unwrap().window_list().is_empty());
+    assert_eq!(state.space(2).unwrap().window_list(), vec![1]);
+    assert_eq!(state.window_known_space_id(1), Some(2));
+
+    // And back to space 1: it follows, no phantom left behind on space 2.
+    state
+        .handle_event(StateEvent::WindowAssignedToSpace {
+            window_id: 1,
+            sid: 1,
+        })
+        .unwrap();
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+    assert!(state.space(2).unwrap().window_list().is_empty());
+}
+
+#[test]
+fn manage_off_floating_window_stays_floating_across_spaces() {
+    // The dual guarantee: a float-by-default window (never opted in) must NOT get
+    // tiled by a space move — it stays floating and merely tracked to the new space.
+    let mut state = state_with_space();
+    state.add_space(2, Area::new(0.0, 0.0, 1000.0, 1000.0));
+    state.config.manage = false;
+    state.apply_new_window_rules(1, "Zen", "", "", "", 1);
+    assert!(state.is_floating(1));
+
+    state
+        .handle_event(StateEvent::WindowAssignedToSpace {
+            window_id: 1,
+            sid: 2,
+        })
+        .unwrap();
+    assert!(state.is_floating(1));
+    assert!(state.space(1).unwrap().window_list().is_empty());
+    assert!(state.space(2).unwrap().window_list().is_empty());
+    assert_eq!(state.window_known_space_id(1), Some(2));
+}
+
+#[test]
 fn manage_off_still_tiles_manage_on_ruled_window() {
     // Under `config manage off`, an explicit `manage=on` rule must still tile the
     // window, even though it was never floating first.

@@ -1397,14 +1397,22 @@ impl AppState {
                 }
             }
             StateEvent::WindowAssignedToSpace { window_id, sid } => {
-                if self.config.manage {
+                // `assign_window_to_space` records space membership for every
+                // window but only relocates a *tiled* one into `sid`'s tree — it is
+                // already a no-op (membership only) for floating/sticky windows.
+                // That is exactly right in both modes:
+                //   * `config manage on`  — everything tiles, so relocate.
+                //   * `config manage off` — tiling is opt-in (`--toggle float`, or a
+                //     `manage=on` rule). Float-by-default windows sit in
+                //     `self.floating`, so they only get tracked here; but a window
+                //     the user opted into tiling is NOT floating and must FOLLOW its
+                //     window across spaces. Merely recording membership (the old
+                //     behavior) left it stuck in its origin space's tree — tiled
+                //     there, floating everywhere else, re-tiled on return.
+                // Guard on a known space under hybrid mode so an as-yet-unseeded
+                // target is skipped rather than erroring; reconcile re-fires later.
+                if self.config.manage || self.spaces.contains_key(&sid) {
                     self.assign_window_to_space(window_id, sid)?;
-                } else if self.spaces.contains_key(&sid) {
-                    // Hybrid mode (`config manage off`): tiling is opt-in via a
-                    // `manage=on` rule, applied separately. Don't auto-tile here,
-                    // but still record space membership so an off-tree (floating)
-                    // window stays listed and focusable as it moves between spaces.
-                    self.window_spaces.insert(window_id, sid);
                 }
             }
             StateEvent::WindowDestroyed { window_id } => {

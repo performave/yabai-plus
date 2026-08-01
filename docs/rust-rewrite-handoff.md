@@ -86,7 +86,10 @@ current state. Only recent milestones are kept here going forward.
   window first (`keep_source_space_focused`, C `send_window_to_space`). Live-verified
   SA window ops (opacity/sub-layer/sticky/raise/lower), space create/focus, and
   cross-space moves. Lesson: unit tests passed on all three; only live testing
-  caught them — keep testing live (SA stays loaded).
+  caught them — keep testing live (SA stays loaded). Follow-up live pass found
+  no new bugs across `space --rotate/--mirror/--balance`, `window --warp/--stack`,
+  sticky (shows on all spaces), scratchpad (assign/hide/show/recover), and `rule
+  manage=off` on new windows — all confirmed correct.
 - **2026-07-31 (session 75)** — installed the Rust toolchain locally (rustup
   stable) and drove the port to functional completeness (details in git log):
   - **All 7 command domains fully handled**: added `display --focus`/`--space`

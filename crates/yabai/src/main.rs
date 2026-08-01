@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use yabai_core::layout::{HANDLE_ABS, HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
-    Area, DisplayAction, FfmMode, Layer, Message, MouseAction, MouseModifier, Point, RuleCommand,
-    ScratchpadAction, Selector, SignalEvent, SpaceAction, ValueType, WindowAction, grid_frame,
-    parse_message, parse_selector,
+    Area, Direction, DisplayAction, FfmMode, Layer, Message, MouseAction, MouseModifier, Point,
+    RuleCommand, ScratchpadAction, Selector, SignalEvent, SpaceAction, ValueType, WindowAction,
+    grid_frame, parse_message, parse_selector,
 };
 use yabai_ipc::{FAILURE_MARKER, daemon_socket_path, decode_client_payload, send_message};
 use yabai_macos::ax::DiscoveredAxWindow;
@@ -1217,6 +1217,79 @@ fn is_window_focus(tokens: &[String]) -> bool {
         .iter()
         .any(|action| matches!(action, WindowAction::Focus(Some(_))));
     has_focus_action && (cmd.target.is_some() || has_focus_selector)
+}
+
+/// The direction of a bare `window --focus <dir>` command (e.g. `west`), or `None`
+/// for any other command. Used to intercept directional focus when the focused
+/// window is floating, which the tree-only pure resolver cannot navigate.
+fn window_focus_direction(tokens: &[String]) -> Option<Direction> {
+    let Ok(Message::Window(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+    match cmd.actions.as_slice() {
+        [WindowAction::Focus(Some(Selector::Direction(dir)))] => Some(*dir),
+        _ => None,
+    }
+}
+
+/// Squared center-to-center distance from `origin` to `candidate` when `candidate`
+/// lies in `dir`, else `None`. The direction test gates to a 90° cone (the delta's
+/// dominant axis must match `dir`), so `east` only considers windows predominantly
+/// to the right, etc.; the nearest passing window wins.
+fn directional_score(origin: Area, candidate: Area, dir: Direction) -> Option<f32> {
+    let dx = (candidate.x + candidate.w / 2.0) - (origin.x + origin.w / 2.0);
+    let dy = (candidate.y + candidate.h / 2.0) - (origin.y + origin.h / 2.0);
+    let in_dir = match dir {
+        Direction::West => dx < 0.0 && dx.abs() >= dy.abs(),
+        Direction::East => dx > 0.0 && dx.abs() >= dy.abs(),
+        Direction::North => dy < 0.0 && dy.abs() >= dx.abs(),
+        Direction::South => dy > 0.0 && dy.abs() >= dx.abs(),
+    };
+    in_dir.then_some(dx * dx + dy * dy)
+}
+
+/// Handle `window --focus <dir>` when the focused window is not in a BSP tree — a
+/// floating / `config manage off` window, which the pure tree-only resolver
+/// rejects with "focused window is not on the active space". Picks the nearest
+/// window in `dir` geometrically (by live AX frame) across every window the daemon
+/// tracks on the focused window's space — tiled and floating alike — so focus (and
+/// thus the `mouse_follows_focus` warp) works regardless of tiling. Returns `None`
+/// for non-directional commands or when the focused window is tiled, letting the
+/// normal tree path run; sets the pure focus target on success so the shared
+/// post-focus block raises the window and warps the cursor.
+fn try_floating_directional_focus(
+    runtime: &mut Runtime<AxSink>,
+    tokens: &[String],
+) -> Option<Response> {
+    let dir = window_focus_direction(tokens)?;
+    let focused = runtime.state.focused_window_id()?;
+    // A tiled window is in a tree; let the (well-tested) tree resolver handle it.
+    if runtime.state.window_space_id(focused).is_some() {
+        return None;
+    }
+    let origin = runtime.sink.window_frame(focused)?;
+    let sid = runtime.state.window_known_space_id(focused);
+    let mut best: Option<(u32, f32)> = None;
+    for wid in runtime.state.all_window_ids() {
+        if wid == focused || runtime.state.window_known_space_id(wid) != sid {
+            continue;
+        }
+        let Some(area) = runtime.sink.window_frame(wid) else {
+            continue;
+        };
+        if let Some(score) = directional_score(origin, area, dir) {
+            if best.is_none_or(|(_, best_score)| score < best_score) {
+                best = Some((wid, score));
+            }
+        }
+    }
+    match best {
+        Some((target, _)) => {
+            runtime.state.set_focused_window(Some(target));
+            Some(Ok(None))
+        }
+        None => Some(Err("no window in that direction\n".to_string())),
+    }
 }
 
 /// Split a chained `window`/`space`/`display` command into one sub-command per
@@ -3475,7 +3548,13 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                                                 &tokens,
                                                             ) {
                                                                 Some(response) => response,
-                                                                None => runtime.message(&tokens),
+                                                                None => match try_floating_directional_focus(
+                                                                    &mut runtime,
+                                                                    &tokens,
+                                                                ) {
+                                                                    Some(response) => response,
+                                                                    None => runtime.message(&tokens),
+                                                                },
                                                             },
                                                         },
                                                     }
@@ -3815,6 +3894,42 @@ mod tests {
         assert!(is_window_close(&toks(&["window", "--close"])));
         assert!(is_window_close(&toks(&["window", "42", "--close"])));
         assert!(!is_window_close(&toks(&["window", "--minimize"])));
+    }
+
+    #[test]
+    fn window_focus_direction_matches_only_bare_directional_focus() {
+        assert_eq!(
+            window_focus_direction(&toks(&["window", "--focus", "east"])),
+            Some(Direction::East)
+        );
+        assert_eq!(
+            window_focus_direction(&toks(&["window", "--focus", "42"])),
+            None
+        );
+        assert_eq!(
+            window_focus_direction(&toks(&["window", "--swap", "west"])),
+            None
+        );
+    }
+
+    #[test]
+    fn directional_score_picks_nearest_in_cone() {
+        // Origin window centered near (500, 500).
+        let origin = Area::new(450.0, 450.0, 100.0, 100.0);
+        let east_near = Area::new(650.0, 450.0, 100.0, 100.0); // center (700, 500)
+        let east_far = Area::new(1450.0, 450.0, 100.0, 100.0); // center (1500, 500)
+        let north = Area::new(450.0, 50.0, 100.0, 100.0); // center (500, 100)
+
+        // East windows score (nearer is smaller); the north window is out of the
+        // east cone entirely.
+        let near = directional_score(origin, east_near, Direction::East).unwrap();
+        let far = directional_score(origin, east_far, Direction::East).unwrap();
+        assert!(near < far);
+        assert_eq!(directional_score(origin, north, Direction::East), None);
+
+        // The north window is in the north cone; an east window is not.
+        assert!(directional_score(origin, north, Direction::North).is_some());
+        assert_eq!(directional_score(origin, east_near, Direction::North), None);
     }
 
     #[test]

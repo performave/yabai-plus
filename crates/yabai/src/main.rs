@@ -38,15 +38,24 @@ use yabai_sa::{ScriptingAddition, ScriptingAdditionStatus};
 mod mouse_ctl;
 mod probes;
 mod sa_ops;
+mod service;
 use mouse_ctl::*;
 use sa_ops::*;
+
+/// The yabai version. The C fork compiled the pushed git tag in; release builds
+/// can override this via `YABAI_VERSION` at build time (see build.rs / CI),
+/// otherwise it falls back to the current fork version.
+const YABAI_VERSION: &str = match option_env!("YABAI_VERSION") {
+    Some(version) => version,
+    None => "v7.1.25-plus.7",
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
         Some("--version") | Some("-v") => {
-            println!("yabai-rust-{}", env!("CARGO_PKG_VERSION"));
+            println!("yabai-{YABAI_VERSION}");
             ExitCode::SUCCESS
         }
         Some("--help") | Some("-h") => {
@@ -54,6 +63,11 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--message") | Some("-m") => run_message(&args[1..]),
+        Some("--install-service") => service::install(),
+        Some("--uninstall-service") => service::uninstall(),
+        Some("--start-service") => service::start(),
+        Some("--restart-service") => service::restart(),
+        Some("--stop-service") => service::stop(),
         // Scripting-addition install/load/uninstall + sudoers (ported from C sa.m).
         Some("--load-sa") => ExitCode::from(yabai_sa::loader::load() as u8),
         Some("--uninstall-sa") => ExitCode::from(yabai_sa::loader::uninstall() as u8),
@@ -97,11 +111,118 @@ fn main() -> ExitCode {
         }
         Some("--experimental-window-bounds") => probes::run_window_bounds(&args[1..]),
         Some("--experimental-window-transform") => probes::run_window_transform(&args[1..]),
-        _ => {
-            eprintln!("yabai-rust: daemon skeleton is not implemented yet");
+        // No subcommand (or only daemon flags like --config/-c/--verbose): start
+        // the production WM daemon. This is what the launchd service runs.
+        None => run_production_daemon(&args),
+        Some(flag) if is_daemon_flag(flag) => run_production_daemon(&args),
+        Some(other) => {
+            eprintln!("yabai: unknown command '{other}' (try --help)");
             ExitCode::from(64)
         }
     }
+}
+
+/// Whether the leading argument is a daemon-mode flag (so `yabai --config … -V`
+/// starts the daemon rather than erroring on an unknown command).
+fn is_daemon_flag(flag: &str) -> bool {
+    matches!(flag, "--config" | "-c" | "--verbose" | "-V")
+}
+
+/// Start the production WM daemon: acquire the per-user lock, bind the real
+/// `/tmp/yabai_$USER.socket`, run the config file once the socket is up, and tile
+/// all apps. Mirrors the C `yabai` default startup.
+fn run_production_daemon(args: &[String]) -> ExitCode {
+    let Ok(user) = std::env::var("USER")
+        .map_err(|_| ())
+        .and_then(|u| if u.is_empty() { Err(()) } else { Ok(u) })
+    else {
+        eprintln!("yabai: 'env USER' not set! abort..");
+        return ExitCode::from(1);
+    };
+
+    // Per-user lock so launchd (KeepAlive) never runs two daemons at once.
+    if !acquire_lock_file(&user) {
+        eprintln!("yabai: could not acquire lock-file! abort..");
+        return ExitCode::from(1);
+    }
+
+    // Resolve the config file (`--config`/`-c <path>` or the default locations)
+    // and run it once the daemon socket is bound; it sends `yabai -m config …`.
+    let config = resolve_config_path(args);
+    let socket_path = daemon_socket_path(&user);
+    if let Some(config) = config {
+        let socket = socket_path.clone();
+        thread::spawn(move || {
+            for _ in 0..100 {
+                if std::path::Path::new(&socket).exists() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = std::process::Command::new(&config).status();
+        });
+    }
+
+    // The WM daemon tiles every app ("all") on the real socket; gap/padding start
+    // at 0 and the config sets them.
+    run_rust_wm_daemon(&[
+        socket_path,
+        "all".to_string(),
+        "0".to_string(),
+        "0".to_string(),
+    ])
+}
+
+/// The config file to run at startup: `--config`/`-c <path>`, else the first of
+/// `$XDG_CONFIG_HOME/yabai/yabairc`, `~/.config/yabai/yabairc`, `~/.yabairc`.
+fn resolve_config_path(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config" || arg == "-c" {
+            return iter.next().cloned();
+        }
+    }
+    let candidates = [
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(|base| format!("{base}/yabai/yabairc")),
+        std::env::var("HOME")
+            .ok()
+            .map(|home| format!("{home}/.config/yabai/yabairc")),
+        std::env::var("HOME")
+            .ok()
+            .map(|home| format!("{home}/.yabairc")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|path| std::path::Path::new(path).is_file())
+}
+
+/// Acquire an exclusive advisory lock on `/tmp/yabai_$USER.lock` (C
+/// `acquire_lock_file`), so only one daemon runs. The lock is released when the
+/// process exits (the fd is intentionally leaked for the process lifetime).
+fn acquire_lock_file(user: &str) -> bool {
+    use std::os::fd::IntoRawFd;
+    let path = format!("/tmp/yabai_{user}.lock");
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+    else {
+        return false;
+    };
+    let fd = file.into_raw_fd();
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    // SAFETY: `fd` is a valid open file descriptor; `flock` with LOCK_EX|LOCK_NB
+    // takes an exclusive non-blocking lock. The fd is leaked so the lock lives for
+    // the process lifetime.
+    unsafe { flock(fd, LOCK_EX | LOCK_NB) == 0 }
 }
 
 fn run_message(tokens: &[String]) -> ExitCode {

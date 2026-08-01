@@ -70,6 +70,39 @@ rebuilds keep Accessibility as long as the identifier is unchanged. If the daemo
 still logs `Accessibility permission is not granted`, the identifier changed
 (re-run the block) or SIP is not sufficiently disabled (`csrutil status`).
 
+## VM gotcha: `mouse_follows_focus` can't move the visible cursor
+
+Running the daemon inside a **VirtualBuddy / Virtualization.framework** guest? A
+cursor warp (`mouse_follows_focus`, `window --focus` centering, display focus)
+**will not move the pointer you see**, and no amount of yabai-side fixing changes
+that — it is a VM limitation, not a bug.
+
+Why: the VM uses an integrated/absolute pointing device, so the **host** owns the
+visible pointer and the guest's own cursor sprite is hidden.
+`CGWarpMouseCursorPosition` moves the guest's *logical* cursor —
+`SLSGetCurrentCursorLocation` / `CGEventGetLocation` faithfully report the warped
+coordinates, and it holds there — but the visible pointer stays wherever the host
+put it. Every technique that could move it from inside the guest was tried and
+none work: a raw warp, decouple→warp→recouple
+(`CGAssociateMouseAndMouseCursorPosition(false/true)` around the warp), and a
+synthetic HID move event (`CGEvent(mouseType: .mouseMoved …).post(tap:
+.cghidEventTap)`).
+
+Consequences for debugging:
+
+- **Don't chase a "`mouse_follows_focus` doesn't work" report as a code bug when
+  the daemon runs in the VM.** Verify the *logical* warp instead: read the cursor
+  before/after a focus change with `SLSGetCurrentCursorLocation` (or a one-line
+  Swift `CGEvent(source: nil)!.location`) — if it lands on the focused window's
+  frame center, the yabai side is correct.
+- To confirm the visible-cursor behavior is the VM and not the code, warp the
+  cursor with a **short-lived** process on the host vs. in the guest: on real
+  hardware the pointer visibly hops; in the guest it does not. A ready-made hop
+  test lives in the shared folder (`host-cursor-test.sh`).
+- Everything else (tiling, focus tracking, spaces, opacity, signals) works
+  normally in the VM — only the *visible* cursor warp is affected. Validate
+  cursor-warp features on the host.
+
 ## Getting traces
 
 The daemon logs to **stdout/stderr** directly (Rust `println!`/`eprintln!`) —

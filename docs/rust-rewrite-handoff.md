@@ -97,6 +97,21 @@ current state. Only recent milestones are kept here going forward.
     directory modules; the `yabai` binary is split into `probes`/`sa_ops`/
     `mouse_ctl` child modules of `main` (via `use super::*` ↔ `use <mod>::*`;
     only parent-called items need `pub(crate)`). main.rs 4703 → 3493 lines.
+  - **Live-verified locally** (macOS 15.6.1 arm64, SA v2.1.30 loaded on this box
+    now — SIP disabled + `-arm64e_preview_abi`): tiling, `--grid`/`--move`/
+    `--swap`/`--ratio`/`--toggle split`, `space --toggle padding/gap`,
+    `external_bar` (window y +40 on `all:40:0`), the new `config` keys,
+    `display --focus`/`--space` error paths, and the SA ops
+    `--opacity`/`--sub-layer`/`--toggle sticky`/`--raise`/`--lower`,
+    `space --create`/`--focus`.
+  - **BUG found live (fix next):** after `space --create`, the daemon does not
+    reconcile the new space into its model, so mission-control-index selectors
+    (`window --space <n>`, `space <n> --destroy`) don't resolve to the new space
+    (no effect, though rc=0). The SA opcodes are fine (destroying the space
+    directly via `--experimental-sa-destroy-space` works) — it's the daemon's
+    space-index mapping that's stale after a dynamic create. Likely
+    `refresh_live_display_state` / the space-discovery path not picking up the
+    just-created space before the next selector resolves.
   204 workspace tests, clippy clean.
 - Sessions 40–74 (2026-07-03/04) — window `--grid`/`--move`/`--resize`/`--ratio`/
   `--raise`/`--lower`/`--insert`/`--scratchpad`, all `--toggle` variants

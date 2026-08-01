@@ -16,10 +16,10 @@ use std::collections::{HashMap, HashSet};
 use regex_lite::Regex;
 use yabai_core::layout::HANDLE_ABS;
 use yabai_core::{
-    Area, Child, ConfigOp, Direction, DisplayAction, Layer, Message, MouseDropAction, NodeSplit,
-    Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply, RuleCommand, RuleEffects,
-    Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree, ValueType, ViewType,
-    WindowAction, WindowFrame, ZoomKind, parse_message,
+    Area, Child, ConfigOp, Direction, DisplayAction, DisplayArrangementOrder, Layer, Message,
+    MouseDropAction, NodeSplit, Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply,
+    RuleCommand, RuleEffects, Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree,
+    ValueType, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -365,10 +365,37 @@ impl AppState {
         self.space_displays.retain(|_, did| *did != display_id);
     }
 
+    /// Display ids in arrangement order (1-based index = position + 1), honoring
+    /// `config.display_arrangement_order`. `default` keeps the id-ascending order
+    /// (Rust's stand-in for the OS `SLSCopyManagedDisplays` order); `horizontal`
+    /// sorts by display-center x (tiebreak y) and `vertical` by center y (tiebreak
+    /// x), mirroring C `display_manager_coordinate_comparator`.
     pub fn display_ids(&self) -> Vec<u32> {
         let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
-        display_ids.sort_unstable();
+        match self.config.display_arrangement_order {
+            DisplayArrangementOrder::Default => display_ids.sort_unstable(),
+            DisplayArrangementOrder::Horizontal => display_ids.sort_by(|&a, &b| {
+                let (ax, ay) = self.display_center(a);
+                let (bx, by) = self.display_center(b);
+                ax.total_cmp(&bx).then(ay.total_cmp(&by))
+            }),
+            DisplayArrangementOrder::Vertical => display_ids.sort_by(|&a, &b| {
+                let (ax, ay) = self.display_center(a);
+                let (bx, by) = self.display_center(b);
+                ay.total_cmp(&by).then(ax.total_cmp(&bx))
+            }),
+        }
         display_ids
+    }
+
+    /// The `(center_x, center_y)` of a display's frame (unknown display -> origin).
+    fn display_center(&self, did: u32) -> (f32, f32) {
+        self.displays.get(&did).map_or((0.0, 0.0), |info| {
+            (
+                info.frame.x + info.frame.w / 2.0,
+                info.frame.y + info.frame.h / 2.0,
+            )
+        })
     }
 
     /// Register (or replace) a space's layout tree with the given area, using
@@ -1948,8 +1975,7 @@ impl AppState {
                 )))
             }
             None => {
-                let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
-                display_ids.sort_unstable();
+                let display_ids = self.display_ids();
                 let mut output = String::from("[");
                 for (idx, display_id) in display_ids.into_iter().enumerate() {
                     if idx > 0 {
@@ -2396,12 +2422,11 @@ impl AppState {
             .and_then(|sid| self.space_displays.get(&sid).copied())
     }
 
-    /// The 1-based arrangement index of a display (displays sorted by id),
-    /// matching `query --displays` `index` and the C `YABAI_DISPLAY_INDEX`.
+    /// The 1-based arrangement index of a display, matching `query --displays`
+    /// `index` and the C `YABAI_DISPLAY_INDEX`. Honors
+    /// `config.display_arrangement_order` via [`Self::display_ids`].
     pub fn display_index(&self, display_id: u32) -> Option<usize> {
-        let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
-        display_ids.sort_unstable();
-        display_ids
+        self.display_ids()
             .iter()
             .position(|did| *did == display_id)
             .map(|idx| idx + 1)
@@ -2410,8 +2435,7 @@ impl AppState {
     fn resolve_display_selector(&self, selector: Option<&Selector>) -> Result<u32, String> {
         match selector {
             Some(Selector::Index(index)) => {
-                let mut display_ids = self.displays.keys().copied().collect::<Vec<_>>();
-                display_ids.sort_unstable();
+                let display_ids = self.display_ids();
                 let index = (*index as usize).checked_sub(1).ok_or_else(|| {
                     "could not locate display with arrangement index '0'.".to_string()
                 })?;
@@ -2786,6 +2810,45 @@ mod tests {
         state.add_space_to_display(1, 42, Area::new(0.0, 0.0, 1440.0, 900.0));
         state.add_space_to_display(2, 77, Area::new(1440.0, 0.0, 1280.0, 720.0));
         state
+    }
+
+    #[test]
+    fn display_arrangement_order_reorders_index_and_selector() {
+        // Display 100 sits on the right, 200 on the left — id order is the reverse
+        // of spatial (x) order, so the arrangement setting actually changes indices.
+        let mut state = AppState::new();
+        state.add_display(100, Area::new(1500.0, 0.0, 1500.0, 1000.0));
+        state.add_display(200, Area::new(0.0, 500.0, 1500.0, 1000.0));
+
+        // Default: id-ascending.
+        assert_eq!(state.display_ids(), vec![100, 200]);
+        assert_eq!(state.display_index(100), Some(1));
+
+        // Horizontal: by center x — the left display (200) becomes index 1.
+        state
+            .handle_tokens(&toks(&[
+                "config",
+                "display_arrangement_order",
+                "horizontal",
+            ]))
+            .unwrap();
+        assert_eq!(state.display_ids(), vec![200, 100]);
+        assert_eq!(state.display_index(200), Some(1));
+        // The numeric selector now resolves index 1 to the left display.
+        assert_eq!(
+            state.handle_tokens(&toks(&["display", "1", "--label", "leftmost"])),
+            Ok(None)
+        );
+        assert_eq!(
+            state.resolve_display(Some(&Selector::Label("leftmost".into()))),
+            Ok(200)
+        );
+
+        // Vertical: by center y — display 100 (y=500) is above 200 (y=1000).
+        state
+            .handle_tokens(&toks(&["config", "display_arrangement_order", "vertical"]))
+            .unwrap();
+        assert_eq!(state.display_ids(), vec![100, 200]);
     }
 
     #[test]

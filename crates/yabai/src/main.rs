@@ -667,15 +667,23 @@ fn start_workspace_bridge(tx: &Sender<WmWork>) -> Sender<WorkspaceEvent> {
     otx
 }
 
+/// The known space that authoritatively contains `window_id` via the reliable
+/// inverse mapping (`windows_on_space` / `SLSCopyWindowsWithOptionsAndTags`), or
+/// `None`. Unlike [`managed_space_for_window`] this has NO `spaces_for_window`
+/// fallback, so a window that no longer exists anywhere returns `None` — the
+/// reconcile drop path relies on that to distinguish a moved window (still listed
+/// on some space) from a destroyed/phantom one (listed nowhere).
+fn window_space_strict(state: &AppState, window_id: u32) -> Option<u64> {
+    state
+        .space_ids()
+        .into_iter()
+        .find(|&sid| windows_on_space(sid).is_ok_and(|windows| windows.contains(&window_id)))
+}
+
 fn managed_space_for_window(state: &AppState, window_id: u32) -> Option<u64> {
-    // Authoritative on macOS 26: ask each known space which windows it contains
-    // (`windows_on_space` / `SLSCopyWindowsWithOptionsAndTags`). `SLSCopySpacesForWindows`
-    // (below) only ever reports the *current* space on macOS 26, so a window on a
-    // non-visible space would otherwise be mis-assigned to the active space.
-    for sid in state.space_ids() {
-        if windows_on_space(sid).is_ok_and(|windows| windows.contains(&window_id)) {
-            return Some(sid);
-        }
+    // Authoritative on macOS 26: ask each known space which windows it contains.
+    if let Some(sid) = window_space_strict(state, window_id) {
+        return Some(sid);
     }
 
     // Fallback for older macOS (or if the enumeration missed the window): trust
@@ -2375,11 +2383,12 @@ fn reconcile_pid(
 
     for id in known.difference(&current).copied().collect::<Vec<_>>() {
         // A window missing from this pass's AX enumeration is EITHER genuinely
-        // closed OR merely on a non-visible space (AX can't enumerate those). Only
-        // drop it if it is on no known space; otherwise keep tracking it and
-        // reassign it to the space it actually moved to. Without this, moving a
-        // window to another space would make the next reconcile forget it.
-        if let Some(sid) = managed_space_for_window(&runtime.state, id) {
+        // closed OR merely on a non-visible space (AX can't enumerate those).
+        // Keep it only if the RELIABLE inverse mapping still lists it on a known
+        // space (a real cross-space move); the unreliable `spaces_for_window`
+        // fallback must NOT keep it, or a destroyed/phantom window (which that
+        // fallback wrongly reports on the active space) would linger in the model.
+        if let Some(sid) = window_space_strict(&runtime.state, id) {
             let _ = runtime
                 .state
                 .handle_event(StateEvent::WindowAssignedToSpace { window_id: id, sid });

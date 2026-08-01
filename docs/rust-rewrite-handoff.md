@@ -95,7 +95,14 @@ current state. Only recent milestones are kept here going forward.
     top/bottom screen space per `all`/`main`/`off`, C
     `display_bounds_constrained`; tracks `CGMainDisplayID`;
     `dispatch_config` now re-insets spaces immediately on layout-config change).
-  201 workspace tests, clippy clean. Still inert: `window_origin_display`,
+  - Organization: `app_state.rs`, `command.rs`, `layout.rs` are now directory
+    modules (`<name>/mod.rs` + `<name>/tests.rs`) — test blocks split into
+    sibling files, no behavior change. `main.rs` (4437 lines, code-heavy)
+    remains monolithic; its `*_via_sa` SA-helper block is a future extraction
+    target but is tightly coupled to the interceptors (needs a wide
+    `pub(crate)` surface), so do it carefully, not in a rushed pass.
+  201 workspace tests, clippy clean. Still inert: `window_origin_display`
+  (new-window origin display — next enactment candidate),
   `window_animation_easing`, `insert_feedback_color`,
   `skip_window_focus_animation` (cosmetic/animation-only).
 - Sessions 40–74 (2026-07-03/04) — window `--grid`/`--move`/`--resize`/`--ratio`/

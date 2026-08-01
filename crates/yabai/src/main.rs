@@ -54,6 +54,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--message") | Some("-m") => run_message(&args[1..]),
+        // Scripting-addition install/load/uninstall + sudoers (ported from C sa.m).
+        Some("--load-sa") => ExitCode::from(yabai_sa::loader::load() as u8),
+        Some("--uninstall-sa") => ExitCode::from(yabai_sa::loader::uninstall() as u8),
+        Some("--check-sa") => probes::run_sa_status(),
+        Some("--install-sudoers") => ExitCode::from(yabai_sa::loader::install_sudoers() as u8),
+        Some("--uninstall-sudoers") => ExitCode::from(yabai_sa::loader::uninstall_sudoers() as u8),
         Some("--experimental-rust-daemon") => run_experimental_daemon(&args[1..]),
         Some("--experimental-ax-focused-window") => run_ax_focused_window_probe(),
         Some("--experimental-ax-debug") => run_ax_debug_probe(),

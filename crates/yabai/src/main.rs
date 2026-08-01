@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use yabai_core::layout::{HANDLE_ABS, HANDLE_BOTTOM, HANDLE_LEFT, HANDLE_RIGHT, HANDLE_TOP};
 use yabai_core::{
-    Area, FfmMode, Layer, Message, MouseAction, MouseModifier, Point, RuleCommand,
+    Area, DisplayAction, FfmMode, Layer, Message, MouseAction, MouseModifier, Point, RuleCommand,
     ScratchpadAction, Selector, SignalEvent, SpaceAction, ValueType, WindowAction, grid_frame,
     parse_message, parse_selector,
 };
@@ -2723,6 +2723,113 @@ fn mission_control_index(order: &[u64], sid: u64) -> usize {
         .map_or(0, |index| index + 1)
 }
 
+/// `display --focus <DISPLAY_SEL>` and `display --space <SPACE_SEL>` need live
+/// macOS state (cursor warp, active-display activation, the SA `focus_space`
+/// opcode), so they are intercepted here. `display --label` is a pure model
+/// change, so this returns `None` for it (handled by `AppState`). Mirrors the C
+/// `handle_domain_display`.
+fn try_display(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    tokens: &[String],
+) -> Option<Response> {
+    let Ok(Message::Display(cmd)) = parse_message(tokens) else {
+        return None;
+    };
+
+    // The acting display: an explicit leading selector, else the display under the
+    // cursor (C `display_manager_active_display_id`), else the model's active display.
+    let acting = match cmd.target.as_ref() {
+        Some(selector) => match runtime.state.resolve_display(Some(selector)) {
+            Ok(did) => did,
+            Err(error) => return Some(Err(error)),
+        },
+        None => match cursor_display_id()
+            .ok()
+            .or_else(|| runtime.state.resolve_display(None).ok())
+        {
+            Some(did) => did,
+            None => return Some(Err("could not locate the display to act on!\n".to_string())),
+        },
+    };
+
+    // A display command carries a single acting sub-command; `--label` and a bare
+    // `--focus` are pure/ill-formed and fall through to `AppState`.
+    match cmd.actions.first()? {
+        DisplayAction::Focus(Some(selector)) => {
+            let dest = match runtime.state.resolve_display(Some(selector)) {
+                Ok(did) => did,
+                Err(error) => return Some(Err(error)),
+            };
+            if dest == acting {
+                return Some(Err("cannot focus an already focused display.\n".to_string()));
+            }
+            Some(focus_display(runtime, display_frames, dest))
+        }
+        DisplayAction::Space(selector) => {
+            let sid = match runtime.state.resolve_space(Some(selector)) {
+                Ok(sid) => sid,
+                Err(error) => return Some(Err(error)),
+            };
+            // The space must belong to the acting display (C SAME_DISPLAY).
+            if display_for_space(sid).ok() != Some(acting) {
+                return Some(Err(
+                    "acting display does not contain the given space.\n".to_string()
+                ));
+            }
+            if sa.focus_space(sid).is_err() {
+                return Some(Err(
+                    "cannot focus space due to an error with the scripting-addition.\n".to_string(),
+                ));
+            }
+            if let Err(error) = activate_space_display_if_cross(sid) {
+                return Some(Err(error));
+            }
+            refresh_all_active_spaces(runtime, display_frames);
+            runtime.state.set_active_space(sid);
+            Some(Ok(None))
+        }
+        // `--focus` with no selector and `--label` are not intercepted.
+        DisplayAction::Focus(None) | DisplayAction::Label(_) => None,
+    }
+}
+
+/// Focus a display: focus the first window on its active space if one exists
+/// (raise + center cursor + activate the display), otherwise warp the cursor to
+/// the display center and activate it. Mirrors the C
+/// `display_manager_focus_display`.
+fn focus_display(
+    runtime: &mut Runtime<AxSink>,
+    display_frames: &[(u32, Area)],
+    dest: u32,
+) -> Response {
+    let dest_space = runtime
+        .state
+        .display_active_space_id(dest)
+        .or_else(|| current_space_for_display(dest).ok());
+
+    if let Some(sid) = dest_space {
+        if let Some(wid) = runtime.state.first_window_on_space(sid) {
+            runtime.sink.focus_window(wid);
+            runtime.state.set_focused_window(Some(wid));
+            center_mouse_on_focus(runtime, wid);
+            set_active_display(dest).map_err(|error| error.to_string())?;
+            runtime.state.set_active_space(sid);
+            refresh_all_active_spaces(runtime, display_frames);
+            return Ok(None);
+        }
+    }
+
+    warp_cursor_to_display_center(dest).map_err(|error| error.to_string())?;
+    set_active_display(dest).map_err(|error| error.to_string())?;
+    if let Some(sid) = dest_space {
+        runtime.state.set_active_space(sid);
+    }
+    refresh_all_active_spaces(runtime, display_frames);
+    Ok(None)
+}
+
 fn try_space_focus(
     sa: &ScriptingAddition,
     runtime: &mut Runtime<AxSink>,
@@ -4096,7 +4203,15 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                                                             &tokens,
                                                         ) {
                                                             Some(response) => response,
-                                                            None => runtime.message(&tokens),
+                                                            None => match try_display(
+                                                                &scripting_addition,
+                                                                &mut runtime,
+                                                                &display_frames,
+                                                                &tokens,
+                                                            ) {
+                                                                Some(response) => response,
+                                                                None => runtime.message(&tokens),
+                                                            },
                                                         },
                                                     }
                                                 }

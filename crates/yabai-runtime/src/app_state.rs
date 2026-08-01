@@ -527,6 +527,15 @@ impl AppState {
         self.display_active_space.get(&display_id).copied()
     }
 
+    /// First managed window on `sid`'s tree, mirroring the C
+    /// `window_manager_find_focusable_window_on_space` used by
+    /// `display_manager_focus_display`. `None` when the space is empty/unmanaged.
+    pub fn first_window_on_space(&self, sid: u64) -> Option<u32> {
+        self.spaces
+            .get(&sid)
+            .and_then(|tree| tree.window_list().first().copied())
+    }
+
     pub fn set_focused_window(&mut self, window_id: Option<u32>) {
         if window_id.is_some() && window_id != self.focused_window {
             if let Some(prev) = self.focused_window {
@@ -3006,6 +3015,19 @@ mod tests {
             Ok(None)
         );
         assert_eq!(state.space(2).unwrap().window_list(), vec![2, 1]);
+    }
+
+    #[test]
+    fn first_window_on_space_returns_first_or_none() {
+        // Backs the daemon's `display --focus`, which focuses the first window on
+        // the destination display's active space (else warps the cursor).
+        let mut state = state_with_space();
+        assert_eq!(state.first_window_on_space(1), None);
+        state.add_window(7).unwrap();
+        state.add_window(9).unwrap();
+        assert_eq!(state.first_window_on_space(1), Some(7));
+        // An unknown space has no window.
+        assert_eq!(state.first_window_on_space(999), None);
     }
 
     #[test]

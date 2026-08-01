@@ -418,11 +418,11 @@ extern "C" fn mouse_drag_callback(
                 return std::ptr::null_mut();
             }
         }
-        K_CG_EVENT_LEFT_MOUSE_UP | K_CG_EVENT_RIGHT_MOUSE_UP => {
-            if DRAG_CONSUMING.swap(false, Ordering::Relaxed) {
-                send_drag(MouseDragEvent::Up(point));
-                return std::ptr::null_mut();
-            }
+        K_CG_EVENT_LEFT_MOUSE_UP | K_CG_EVENT_RIGHT_MOUSE_UP
+            if DRAG_CONSUMING.swap(false, Ordering::Relaxed) =>
+        {
+            send_drag(MouseDragEvent::Up(point));
+            return std::ptr::null_mut();
         }
         _ => {}
     }

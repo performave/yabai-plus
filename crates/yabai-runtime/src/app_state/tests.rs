@@ -772,6 +772,40 @@ fn set_space_frame_insets_by_padding() {
 }
 
 #[test]
+fn window_origin_display_routes_new_windows() {
+    // Two displays: space 1 on display 10 (active), space 2 on display 20.
+    let mut state = AppState::new();
+    state.add_display(10, Area::new(0.0, 0.0, 1000.0, 1000.0));
+    state.add_display(20, Area::new(1000.0, 0.0, 1000.0, 1000.0));
+    state.add_space_to_display(1, 10, Area::new(0.0, 0.0, 1000.0, 1000.0));
+    state.add_space_to_display(2, 20, Area::new(1000.0, 0.0, 1000.0, 1000.0));
+    state.set_display_active_space(10, 1);
+    state.set_display_active_space(20, 2);
+    state.set_active_space(1);
+    let cursor = Some(Point {
+        x: 1500.0,
+        y: 500.0,
+    }); // over display 20 (space 2)
+
+    // default: keeps the window's physical space.
+    assert_eq!(state.origin_space_for_new_window(2, cursor), 2);
+
+    // focused: routes to the active space (1), regardless of physical space.
+    state
+        .handle_tokens(&toks(&["config", "window_origin_display", "focused"]))
+        .unwrap();
+    assert_eq!(state.origin_space_for_new_window(2, cursor), 1);
+
+    // cursor: routes to the space under the cursor (2), even though active is 1.
+    state
+        .handle_tokens(&toks(&["config", "window_origin_display", "cursor"]))
+        .unwrap();
+    assert_eq!(state.origin_space_for_new_window(1, cursor), 2);
+    // cursor off every display falls back to the physical space.
+    assert_eq!(state.origin_space_for_new_window(1, None), 1);
+}
+
+#[test]
 fn external_bar_reserves_space_and_scopes_to_mode() {
     // Two displays; space 1 on display 10, space 2 on display 20 (the main one).
     let mut state = AppState::new();

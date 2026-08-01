@@ -3204,11 +3204,21 @@ fn reconcile_pid(
 
     for window in discovered {
         let id = window.id;
-        let Some(sid) = managed_space_for_window(&runtime.state, id) else {
+        let Some(physical_sid) = managed_space_for_window(&runtime.state, id) else {
             continue;
         };
         current.insert(id);
         let is_new = !known.contains(&id);
+        // A genuinely new window honors `window_origin_display` (focused/cursor
+        // route it away from its physical space); an already-known window that
+        // moved keeps following its physical space.
+        let sid = if is_new {
+            runtime
+                .state
+                .origin_space_for_new_window(physical_sid, cursor_location().ok())
+        } else {
+            physical_sid
+        };
         let (app, title) = (window.app.clone(), window.title.clone());
         // Refresh metadata every pass so titles stay current.
         runtime.state.set_window_meta(

@@ -19,7 +19,8 @@ use yabai_core::{
     Area, Child, ConfigOp, Direction, DisplayAction, DisplayArrangementOrder, ExternalBarMode,
     Layer, Message, MouseDropAction, NodeSplit, Point, QueryCommand, QueryScopeKind, QueryTarget,
     Rule, RuleApply, RuleCommand, RuleEffects, Selector, Signal, SignalCommand, SignalEvent,
-    SpaceAction, Tree, ValueType, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
+    SpaceAction, Tree, ValueType, ViewType, WindowAction, WindowFrame, WindowOriginMode, ZoomKind,
+    parse_message,
 };
 
 use crate::config::Config;
@@ -524,6 +525,22 @@ impl AppState {
     pub fn managed_space_at_point(&self, point: Point) -> Option<u64> {
         self.display_at_point(point)
             .and_then(|did| self.display_active_space_id(did))
+    }
+
+    /// The space a newly-discovered window should be assigned to, honoring
+    /// `window_origin_display` (C `event_loop` application-launched routing):
+    /// `default` keeps the window's physical space, `focused` routes it to the
+    /// active space, `cursor` to the active space under `cursor` — both of which
+    /// are visible, so the tiling flush relocates the window there. Falls back to
+    /// the physical space when the focused/cursor space is unknown.
+    pub fn origin_space_for_new_window(&self, physical_sid: u64, cursor: Option<Point>) -> u64 {
+        match self.config.window_origin_display {
+            WindowOriginMode::Default => physical_sid,
+            WindowOriginMode::Focused => self.active_space_id().unwrap_or(physical_sid),
+            WindowOriginMode::Cursor => cursor
+                .and_then(|point| self.managed_space_at_point(point))
+                .unwrap_or(physical_sid),
+        }
     }
 
     /// The managed window whose tiled frame contains `point`, resolving the

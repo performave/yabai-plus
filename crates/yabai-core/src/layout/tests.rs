@@ -1,4 +1,3 @@
-
 use super::*;
 
 const SCREEN: Area = Area::new(0.0, 0.0, 1000.0, 1000.0);

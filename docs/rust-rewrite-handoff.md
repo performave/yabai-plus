@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  204 workspace tests pass. The shipped C `make` flow is unchanged.
+  205 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -104,15 +104,15 @@ current state. Only recent milestones are kept here going forward.
     `display --focus`/`--space` error paths, and the SA ops
     `--opacity`/`--sub-layer`/`--toggle sticky`/`--raise`/`--lower`,
     `space --create`/`--focus`.
-  - **BUG found live (fix next):** after `space --create`, the daemon does not
-    reconcile the new space into its model, so mission-control-index selectors
-    (`window --space <n>`, `space <n> --destroy`) don't resolve to the new space
-    (no effect, though rc=0). The SA opcodes are fine (destroying the space
-    directly via `--experimental-sa-destroy-space` works) — it's the daemon's
-    space-index mapping that's stale after a dynamic create. Likely
-    `refresh_live_display_state` / the space-discovery path not picking up the
-    just-created space before the next selector resolves.
-  204 workspace tests, clippy clean.
+  - **BUG found live + FIXED:** numeric space selectors resolved as raw sids, so
+    `window --space <n>` / `space <n> --destroy` targeted sid n instead of the
+    nth mission-control space (silent no-op; `space --focus` was unaffected as it
+    uses the live SkyLight order). Fixed with a daemon-pushed
+    `AppState::mission_control_order` (seeded at startup + refreshed on topology
+    change); numeric selectors now map `order[n-1]` like C. Verified live:
+    `window --space 2` moves onto the created space, `space 2 --destroy`
+    destroys it.
+  205 workspace tests, clippy clean.
 - Sessions 40–74 (2026-07-03/04) — window `--grid`/`--move`/`--resize`/`--ratio`/
   `--raise`/`--lower`/`--insert`/`--scratchpad`, all `--toggle` variants
   (split/windowed-fullscreen/pip/expose/native-fullscreen), per-space
@@ -682,7 +682,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 204 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 205 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

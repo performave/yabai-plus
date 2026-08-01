@@ -6,7 +6,6 @@ members = [
     "crates/yabai-ipc",
     "crates/yabai-macos",
     "crates/yabai-osax-common",
-    "crates/yabai-osax-legacy",
     "crates/yabai-runtime",
     "crates/yabai-sa",
 ]

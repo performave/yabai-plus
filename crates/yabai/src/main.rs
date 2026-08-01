@@ -1485,6 +1485,32 @@ fn try_window_windowed_fullscreen(
     }
 }
 
+/// After a successful `window --space`/`--display` SA move `(wid, sid)`, refresh
+/// live topology and reassign the window to the target space in the model so a
+/// following `query --windows` reflects the move immediately (the window is
+/// already physically on `sid`; without this the model shows the old space until
+/// the next reconcile). Best-effort: if `sid` isn't yet a managed space in the
+/// model, the periodic reconcile catches it.
+fn finish_window_to_space(
+    runtime: &mut Runtime<AxSink>,
+    display_frames: &mut Vec<(u32, Area)>,
+    result: Result<(u32, u64), String>,
+) -> Response {
+    match result {
+        Ok((wid, sid)) => {
+            refresh_live_display_state(runtime, display_frames);
+            let _ = runtime
+                .state
+                .handle_event(StateEvent::WindowAssignedToSpace {
+                    window_id: wid,
+                    sid,
+                });
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Intercept `window [sel] --toggle expose`, mirroring
 /// `window_manager_toggle_window_expose`: focus the acting window with a raise,
 /// then trigger App Exposé for its application via the CoreDock
@@ -1599,22 +1625,20 @@ fn try_scripting_addition(
                     WindowAction::Space(selector) => {
                         // Move the acting (target/focused) window to the selected space,
                         // mirroring `window --space` (`scripting_addition_move_window_to_space`).
-                        let result = match (
+                        let targets = (
                             runtime.state.resolve_window_selector(cmd.target.as_ref()),
                             runtime.state.resolve_space(Some(selector)),
-                        ) {
+                        );
+                        let result = match targets {
                             (Ok(wid), Ok(sid)) => sa
                                 .move_window_to_space(sid, wid)
-                                .map(|()| None)
+                                .map(|()| (wid, sid))
                                 .map_err(|error| {
                                     format!("could not move window to space: {error}\n")
                                 }),
                             (Err(error), _) | (_, Err(error)) => Err(error),
                         };
-                        if result.is_ok() {
-                            refresh_live_display_state(runtime, display_frames);
-                        }
-                        return Some(result);
+                        return Some(finish_window_to_space(runtime, display_frames, result));
                     }
                     WindowAction::Display(selector) => {
                         // Move the acting window to the selected display's active space,
@@ -1636,16 +1660,13 @@ fn try_scripting_addition(
                         ) {
                             (Ok(wid), Ok(sid)) => sa
                                 .move_window_to_space(sid, wid)
-                                .map(|()| None)
+                                .map(|()| (wid, sid))
                                 .map_err(|error| {
                                     format!("could not move window to space: {error}\n")
                                 }),
                             (Err(error), _) | (_, Err(error)) => Err(error),
                         };
-                        if result.is_ok() {
-                            refresh_live_display_state(runtime, display_frames);
-                        }
-                        return Some(result);
+                        return Some(finish_window_to_space(runtime, display_frames, result));
                     }
                     // `window --opacity <float>` sets the window alpha through the
                     // SA; it is purely visual, so no tree re-flow is needed.
@@ -2327,11 +2348,23 @@ fn reconcile_pid(
     }
 
     for id in known.difference(&current).copied().collect::<Vec<_>>() {
-        runtime.sink.unregister(id);
-        runtime.state.remove_window_meta(id);
-        let _ = runtime
-            .state
-            .handle_event(StateEvent::WindowDestroyed { window_id: id });
+        // A window missing from this pass's AX enumeration is EITHER genuinely
+        // closed OR merely on a non-visible space (AX can't enumerate those). Only
+        // drop it if it is on no known space; otherwise keep tracking it and
+        // reassign it to the space it actually moved to. Without this, moving a
+        // window to another space would make the next reconcile forget it.
+        if let Some(sid) = managed_space_for_window(&runtime.state, id) {
+            let _ = runtime
+                .state
+                .handle_event(StateEvent::WindowAssignedToSpace { window_id: id, sid });
+            current.insert(id);
+        } else {
+            runtime.sink.unregister(id);
+            runtime.state.remove_window_meta(id);
+            let _ = runtime
+                .state
+                .handle_event(StateEvent::WindowDestroyed { window_id: id });
+        }
     }
     *known = current;
 

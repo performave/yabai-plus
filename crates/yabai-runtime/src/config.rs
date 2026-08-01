@@ -7,8 +7,9 @@
 //! [`LayoutConfig`] for the per-space trees via [`Config::layout_config`].
 
 use yabai_core::{
-    Child, ConfigOp, ConfigValue, FfmMode, InsertionPolicy, LayoutConfig, MouseAction,
-    MouseDropAction, MouseModifier, NodeSplit, ViewType,
+    ANIMATION_EASING_NAMES, Child, ConfigOp, ConfigValue, DisplayArrangementOrder, ExternalBar,
+    ExternalBarMode, FfmMode, InsertionPolicy, LayoutConfig, MouseAction, MouseDropAction,
+    MouseModifier, NodeSplit, ViewType, WindowOriginMode,
 };
 
 /// All daemon-configurable settings the command model understands.
@@ -44,6 +45,14 @@ pub struct Config {
     pub left_padding: i32,
     pub right_padding: i32,
     pub window_gap: i32,
+    pub display_arrangement_order: DisplayArrangementOrder,
+    pub window_origin_display: WindowOriginMode,
+    /// Index into `yabai_core::ANIMATION_EASING_NAMES`.
+    pub window_animation_easing: u8,
+    /// `insert_feedback_color`, packed `0xAARRGGBB`.
+    pub insert_feedback_color: u32,
+    pub external_bar: ExternalBar,
+    pub skip_window_focus_animation: bool,
 }
 
 impl Default for Config {
@@ -77,6 +86,18 @@ impl Default for Config {
             left_padding: 0,
             right_padding: 0,
             window_gap: 0,
+            display_arrangement_order: DisplayArrangementOrder::Default,
+            window_origin_display: WindowOriginMode::Default,
+            // C default `ease_out_circ_type` (index 19 in ANIMATION_EASING_NAMES).
+            window_animation_easing: 19,
+            // C default `rgba_color_from_hex(0xffd75f5f)`.
+            insert_feedback_color: 0xffd7_5f5f,
+            external_bar: ExternalBar {
+                mode: ExternalBarMode::Off,
+                top: 0,
+                bottom: 0,
+            },
+            skip_window_focus_animation: false,
         }
     }
 }
@@ -138,6 +159,22 @@ impl Config {
             "left_padding" => self.left_padding.to_string(),
             "right_padding" => self.right_padding.to_string(),
             "window_gap" => self.window_gap.to_string(),
+            "display_arrangement_order" => {
+                arrangement_order_str(self.display_arrangement_order).to_string()
+            }
+            "window_origin_display" => window_origin_str(self.window_origin_display).to_string(),
+            "window_animation_easing" => {
+                ANIMATION_EASING_NAMES[self.window_animation_easing as usize].to_string()
+            }
+            // C prints `0x%x` (no zero-padding).
+            "insert_feedback_color" => format!("0x{:x}", self.insert_feedback_color),
+            "external_bar" => format!(
+                "{}:{}:{}",
+                external_bar_mode_str(self.external_bar.mode),
+                self.external_bar.top,
+                self.external_bar.bottom
+            ),
+            "skip_window_focus_animation" => bool_str(self.skip_window_focus_animation).to_string(),
             other => return Err(format!("unsupported config key '{other}'")),
         };
         Ok(out)
@@ -177,6 +214,20 @@ impl Config {
             ("left_padding", ConfigValue::Int(i)) => self.left_padding = *i,
             ("right_padding", ConfigValue::Int(i)) => self.right_padding = *i,
             ("window_gap", ConfigValue::Int(i)) => self.window_gap = *i,
+            ("display_arrangement_order", ConfigValue::ArrangementOrder(o)) => {
+                self.display_arrangement_order = *o
+            }
+            ("window_origin_display", ConfigValue::WindowOrigin(m)) => {
+                self.window_origin_display = *m
+            }
+            ("window_animation_easing", ConfigValue::AnimationEasing(i)) => {
+                self.window_animation_easing = *i
+            }
+            ("insert_feedback_color", ConfigValue::Color(c)) => self.insert_feedback_color = *c,
+            ("external_bar", ConfigValue::ExternalBar(b)) => self.external_bar = *b,
+            ("skip_window_focus_animation", ConfigValue::Bool(b)) => {
+                self.skip_window_focus_animation = *b
+            }
             (other, _) => return Err(format!("unsupported config key '{other}'")),
         }
         Ok(())
@@ -216,6 +267,33 @@ fn mouse_drop_str(action: MouseDropAction) -> &'static str {
     match action {
         MouseDropAction::Swap => "swap",
         MouseDropAction::Stack => "stack",
+    }
+}
+
+/// Mirrors `display_arrangement_order_str` in `src/display_manager.h`.
+fn arrangement_order_str(order: DisplayArrangementOrder) -> &'static str {
+    match order {
+        DisplayArrangementOrder::Default => "default",
+        DisplayArrangementOrder::Horizontal => "horizontal",
+        DisplayArrangementOrder::Vertical => "vertical",
+    }
+}
+
+/// Mirrors `window_origin_mode_str` in `src/window_manager.h`.
+fn window_origin_str(mode: WindowOriginMode) -> &'static str {
+    match mode {
+        WindowOriginMode::Default => "default",
+        WindowOriginMode::Focused => "focused",
+        WindowOriginMode::Cursor => "cursor",
+    }
+}
+
+/// Mirrors `external_bar_mode_str` in `src/display_manager.h`.
+fn external_bar_mode_str(mode: ExternalBarMode) -> &'static str {
+    match mode {
+        ExternalBarMode::Off => "off",
+        ExternalBarMode::Main => "main",
+        ExternalBarMode::All => "all",
     }
 }
 
@@ -259,5 +337,52 @@ fn insertion_str(point: InsertionPolicy) -> &'static str {
         InsertionPolicy::Focused => "focused",
         InsertionPolicy::First => "first",
         InsertionPolicy::Last => "last",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yabai_core::parse_config;
+
+    fn set(config: &mut Config, tokens: &[&str]) {
+        let owned: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+        for op in parse_config(&owned).unwrap().ops {
+            config.apply(&op).unwrap();
+        }
+    }
+
+    fn get(config: &mut Config, key: &str) -> String {
+        config
+            .apply(&ConfigOp::Get(key.to_string()))
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn extended_config_keys_round_trip() {
+        let mut config = Config::default();
+
+        // Defaults print the way the C daemon does.
+        assert_eq!(get(&mut config, "display_arrangement_order"), "default");
+        assert_eq!(get(&mut config, "window_origin_display"), "default");
+        assert_eq!(get(&mut config, "window_animation_easing"), "ease_out_circ");
+        assert_eq!(get(&mut config, "insert_feedback_color"), "0xffd75f5f");
+        assert_eq!(get(&mut config, "external_bar"), "off:0:0");
+        assert_eq!(get(&mut config, "skip_window_focus_animation"), "off");
+
+        // Set/get round-trips.
+        set(&mut config, &["display_arrangement_order", "horizontal"]);
+        assert_eq!(get(&mut config, "display_arrangement_order"), "horizontal");
+        set(&mut config, &["window_origin_display", "focused"]);
+        assert_eq!(get(&mut config, "window_origin_display"), "focused");
+        set(&mut config, &["window_animation_easing", "ease_in_sine"]);
+        assert_eq!(get(&mut config, "window_animation_easing"), "ease_in_sine");
+        set(&mut config, &["insert_feedback_color", "0x11223344"]);
+        assert_eq!(get(&mut config, "insert_feedback_color"), "0x11223344");
+        set(&mut config, &["external_bar", "main:28:4"]);
+        assert_eq!(get(&mut config, "external_bar"), "main:28:4");
+        set(&mut config, &["skip_window_focus_animation", "on"]);
+        assert_eq!(get(&mut config, "skip_window_focus_animation"), "on");
     }
 }

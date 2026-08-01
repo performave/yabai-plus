@@ -94,6 +94,67 @@ pub enum MouseDropAction {
     Stack,
 }
 
+/// `display_arrangement_order`: how displays are indexed (C
+/// `enum display_arrangement_order`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayArrangementOrder {
+    Default,
+    Horizontal,
+    Vertical,
+}
+
+/// `window_origin_display`: which display a new window's origin is chosen from
+/// (C `enum window_origin_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowOriginMode {
+    Default,
+    Focused,
+    Cursor,
+}
+
+/// `external_bar` mode (C `enum external_bar_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalBarMode {
+    Off,
+    Main,
+    All,
+}
+
+/// `external_bar <mode>:<top>:<bottom>`: reserve space at the top/bottom of a
+/// display for an external status bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalBar {
+    pub mode: ExternalBarMode,
+    pub top: i32,
+    pub bottom: i32,
+}
+
+/// Animation easing function names in C `ANIMATION_EASING_TYPE_ENTRY` order;
+/// `window_animation_easing` stores the index into this table.
+pub const ANIMATION_EASING_NAMES: [&str; 21] = [
+    "ease_in_sine",
+    "ease_out_sine",
+    "ease_in_out_sine",
+    "ease_in_quad",
+    "ease_out_quad",
+    "ease_in_out_quad",
+    "ease_in_cubic",
+    "ease_out_cubic",
+    "ease_in_out_cubic",
+    "ease_in_quart",
+    "ease_out_quart",
+    "ease_in_out_quart",
+    "ease_in_quint",
+    "ease_out_quint",
+    "ease_in_out_quint",
+    "ease_in_expo",
+    "ease_out_expo",
+    "ease_in_out_expo",
+    "ease_in_circ",
+    "ease_out_circ",
+    "ease_in_out_circ",
+];
+
 /// A typed config value, resolved according to the setting's expected type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigValue {
@@ -107,6 +168,13 @@ pub enum ConfigValue {
     MouseMod(MouseModifier),
     MouseAction(MouseAction),
     MouseDrop(MouseDropAction),
+    ArrangementOrder(DisplayArrangementOrder),
+    WindowOrigin(WindowOriginMode),
+    /// Index into [`ANIMATION_EASING_NAMES`].
+    AnimationEasing(u8),
+    /// `insert_feedback_color`, a packed `0xAARRGGBB` value.
+    Color(u32),
+    ExternalBar(ExternalBar),
     Float(f32),
     Int(i32),
 }
@@ -141,6 +209,11 @@ enum ValueKind {
     MouseMod,
     MouseAction,
     MouseDrop,
+    ArrangementOrder,
+    WindowOrigin,
+    AnimationEasing,
+    Color,
+    ExternalBar,
     Float,
     Int,
 }
@@ -167,6 +240,12 @@ fn config_value_kind(key: &str) -> Option<ValueKind> {
         "mouse_modifier" => ValueKind::MouseMod,
         "mouse_action1" | "mouse_action2" => ValueKind::MouseAction,
         "mouse_drop_action" => ValueKind::MouseDrop,
+        "display_arrangement_order" => ValueKind::ArrangementOrder,
+        "window_origin_display" => ValueKind::WindowOrigin,
+        "window_animation_easing" => ValueKind::AnimationEasing,
+        "insert_feedback_color" => ValueKind::Color,
+        "external_bar" => ValueKind::ExternalBar,
+        "skip_window_focus_animation" => ValueKind::Bool,
         "split_ratio"
         | "window_opacity_duration"
         | "window_animation_duration"
@@ -217,9 +296,64 @@ fn parse_config_value(kind: ValueKind, value: &str) -> Option<ConfigValue> {
             "stack" => Some(ConfigValue::MouseDrop(MouseDropAction::Stack)),
             _ => None,
         },
+        ValueKind::ArrangementOrder => match value {
+            "default" => Some(ConfigValue::ArrangementOrder(
+                DisplayArrangementOrder::Default,
+            )),
+            "horizontal" => Some(ConfigValue::ArrangementOrder(
+                DisplayArrangementOrder::Horizontal,
+            )),
+            "vertical" => Some(ConfigValue::ArrangementOrder(
+                DisplayArrangementOrder::Vertical,
+            )),
+            _ => None,
+        },
+        ValueKind::WindowOrigin => match value {
+            "default" => Some(ConfigValue::WindowOrigin(WindowOriginMode::Default)),
+            "focused" => Some(ConfigValue::WindowOrigin(WindowOriginMode::Focused)),
+            "cursor" => Some(ConfigValue::WindowOrigin(WindowOriginMode::Cursor)),
+            _ => None,
+        },
+        ValueKind::AnimationEasing => ANIMATION_EASING_NAMES
+            .iter()
+            .position(|name| *name == value)
+            .map(|index| ConfigValue::AnimationEasing(index as u8)),
+        ValueKind::Color => parse_color_u32(value)
+            .filter(|color| *color != 0)
+            .map(ConfigValue::Color),
+        ValueKind::ExternalBar => parse_external_bar(value).map(ConfigValue::ExternalBar),
         ValueKind::Float => value.parse::<f32>().ok().map(ConfigValue::Float),
         ValueKind::Int => value.parse::<i32>().ok().map(ConfigValue::Int),
     }
+}
+
+/// Parse an `insert_feedback_color` value: a hex `0x…` literal or a decimal, into
+/// a packed `u32`. Mirrors the C `token_to_value` accepting `TOKEN_TYPE_U32`.
+fn parse_color_u32(value: &str) -> Option<u32> {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u32>().ok()
+    }
+}
+
+/// Parse an `external_bar` value `<mode>:<top>:<bottom>` where `mode` is
+/// `off`/`main`/`all` and top/bottom are integers. Mirrors the C
+/// `sscanf("%5[^:]:%d:%d")` + mode validation.
+fn parse_external_bar(value: &str) -> Option<ExternalBar> {
+    let mut parts = value.splitn(3, ':');
+    let mode = match parts.next()? {
+        "off" => ExternalBarMode::Off,
+        "main" => ExternalBarMode::Main,
+        "all" => ExternalBarMode::All,
+        _ => return None,
+    };
+    let top = parts.next()?.parse::<i32>().ok()?;
+    let bottom = parts.next()?.parse::<i32>().ok()?;
+    Some(ExternalBar { mode, top, bottom })
 }
 
 /// Parse the tokens following the `config` domain into a [`ConfigCommand`].
@@ -1143,6 +1277,61 @@ mod tests {
             cmd.ops,
             vec![ConfigOp::Set("window_gap".to_string(), ConfigValue::Int(8))]
         );
+    }
+
+    #[test]
+    fn config_extended_keys_parse_typed_values() {
+        let cases: &[(&[&str], ConfigValue)] = &[
+            (
+                &["display_arrangement_order", "vertical"],
+                ConfigValue::ArrangementOrder(DisplayArrangementOrder::Vertical),
+            ),
+            (
+                &["window_origin_display", "cursor"],
+                ConfigValue::WindowOrigin(WindowOriginMode::Cursor),
+            ),
+            (
+                &["window_animation_easing", "ease_out_circ"],
+                ConfigValue::AnimationEasing(19),
+            ),
+            (
+                &["insert_feedback_color", "0xffd75f5f"],
+                ConfigValue::Color(0xffd7_5f5f),
+            ),
+            (
+                &["external_bar", "all:32:0"],
+                ConfigValue::ExternalBar(ExternalBar {
+                    mode: ExternalBarMode::All,
+                    top: 32,
+                    bottom: 0,
+                }),
+            ),
+            (
+                &["skip_window_focus_animation", "on"],
+                ConfigValue::Bool(true),
+            ),
+        ];
+        for (tokens, expected) in cases {
+            let cmd = parse_config(&toks(tokens)).unwrap();
+            assert_eq!(
+                cmd.ops,
+                vec![ConfigOp::Set(tokens[0].to_string(), expected.clone())],
+                "parsing {tokens:?}"
+            );
+        }
+
+        // Invalid values are rejected (unknown easing, zero color, bad bar mode).
+        for bad in [
+            vec!["window_animation_easing", "bogus"],
+            vec!["insert_feedback_color", "0x0"],
+            vec!["external_bar", "sometimes:1:2"],
+            vec!["display_arrangement_order", "diagonal"],
+        ] {
+            assert!(
+                parse_config(&toks(&bad)).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
     }
 
     #[test]

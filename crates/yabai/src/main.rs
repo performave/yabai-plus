@@ -1485,6 +1485,28 @@ fn try_window_windowed_fullscreen(
     }
 }
 
+/// Before sending the FOCUSED window off a currently-visible space, re-focus
+/// another window on that source space (mirroring C
+/// `window_manager_send_window_to_space`), so macOS doesn't follow the moved
+/// window to the destination space. No-op when `wid` isn't focused, its source
+/// space isn't visible, or no other window is there (the C Finder-drop for the
+/// empty case needs a private PSN API and is deferred).
+fn keep_source_space_focused(runtime: &mut Runtime<AxSink>, wid: u32) {
+    if runtime.state.focused_window_id() != Some(wid) {
+        return;
+    }
+    let Some(src) = runtime.state.window_known_space_id(wid) else {
+        return;
+    };
+    if !runtime.state.is_space_visible(src) {
+        return;
+    }
+    if let Some(next) = runtime.state.window_on_space_excluding(src, wid) {
+        runtime.sink.focus_window(next);
+        runtime.state.set_focused_window(Some(next));
+    }
+}
+
 /// After a successful `window --space`/`--display` SA move `(wid, sid)`, refresh
 /// live topology and reassign the window to the target space in the model so a
 /// following `query --windows` reflects the move immediately (the window is
@@ -1630,12 +1652,14 @@ fn try_scripting_addition(
                             runtime.state.resolve_space(Some(selector)),
                         );
                         let result = match targets {
-                            (Ok(wid), Ok(sid)) => sa
-                                .move_window_to_space(sid, wid)
-                                .map(|()| (wid, sid))
-                                .map_err(|error| {
-                                    format!("could not move window to space: {error}\n")
-                                }),
+                            (Ok(wid), Ok(sid)) => {
+                                keep_source_space_focused(runtime, wid);
+                                sa.move_window_to_space(sid, wid)
+                                    .map(|()| (wid, sid))
+                                    .map_err(|error| {
+                                        format!("could not move window to space: {error}\n")
+                                    })
+                            }
                             (Err(error), _) | (_, Err(error)) => Err(error),
                         };
                         return Some(finish_window_to_space(runtime, display_frames, result));
@@ -1658,12 +1682,14 @@ fn try_scripting_addition(
                                     })
                                 }),
                         ) {
-                            (Ok(wid), Ok(sid)) => sa
-                                .move_window_to_space(sid, wid)
-                                .map(|()| (wid, sid))
-                                .map_err(|error| {
-                                    format!("could not move window to space: {error}\n")
-                                }),
+                            (Ok(wid), Ok(sid)) => {
+                                keep_source_space_focused(runtime, wid);
+                                sa.move_window_to_space(sid, wid)
+                                    .map(|()| (wid, sid))
+                                    .map_err(|error| {
+                                        format!("could not move window to space: {error}\n")
+                                    })
+                            }
                             (Err(error), _) | (_, Err(error)) => Err(error),
                         };
                         return Some(finish_window_to_space(runtime, display_frames, result));

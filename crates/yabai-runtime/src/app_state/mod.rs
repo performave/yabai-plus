@@ -596,6 +596,20 @@ impl AppState {
             .and_then(|tree| tree.window_list().first().copied())
     }
 
+    /// A managed window on `sid`'s tree other than `exclude` (C
+    /// `window_manager_find_window_on_space_by_rank_filtering_window`). Used to
+    /// keep focus on the source space when the focused window is sent elsewhere.
+    pub fn window_on_space_excluding(&self, sid: u64, exclude: u32) -> Option<u32> {
+        self.spaces
+            .get(&sid)
+            .and_then(|tree| tree.window_list().into_iter().find(|&w| w != exclude))
+    }
+
+    /// Whether `sid` is currently the visible space on any display.
+    pub fn is_space_visible(&self, sid: u64) -> bool {
+        self.space_is_visible(sid)
+    }
+
     pub fn set_focused_window(&mut self, window_id: Option<u32>) {
         if window_id.is_some() && window_id != self.focused_window {
             if let Some(prev) = self.focused_window {

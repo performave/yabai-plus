@@ -228,6 +228,12 @@ pub struct AppState {
     /// Last known cursor location (top-left CG coords), set by the daemon before
     /// dispatching a command so the `mouse` selector can resolve.
     cursor_point: Option<Point>,
+    /// Daemon-resolved window under the cursor for the `mouse` window selector,
+    /// set before dispatching a `window ... mouse` command. Uses the live
+    /// CoreGraphics z-order so it finds floating / `config manage off` windows the
+    /// tree-only [`Self::window_at_point`] misses; the resolver prefers it and
+    /// falls back to the tree lookup when it is unset (tests / non-daemon use).
+    cursor_window: Option<u32>,
     /// Per-space padding override (`space --padding`), `sid -> [top, bottom, left,
     /// right]`. Absent means fall back to the global `config` padding. Consulted by
     /// [`Self::set_space_frame`] so the override survives every reconcile.
@@ -545,6 +551,14 @@ impl AppState {
     /// daemon sets this before dispatching each command.
     pub fn set_cursor_point(&mut self, point: Point) {
         self.cursor_point = Some(point);
+    }
+
+    /// Set (or clear) the daemon-resolved window under the cursor, consulted first
+    /// by the `mouse` window selector. The daemon primes this via CoreGraphics
+    /// before dispatching a `window ... mouse` command so the selector reaches
+    /// floating / `config manage off` windows.
+    pub fn set_cursor_window(&mut self, window_id: Option<u32>) {
+        self.cursor_window = window_id;
     }
 
     /// The display whose frame contains `point` (the `mouse` display).
@@ -2892,8 +2906,11 @@ impl AppState {
         }
         if let Selector::Mouse = selector {
             return self
-                .cursor_point
-                .and_then(|point| self.window_at_point(point))
+                .cursor_window
+                .or_else(|| {
+                    self.cursor_point
+                        .and_then(|point| self.window_at_point(point))
+                })
                 .ok_or_else(|| "could not locate the window under the cursor.\n".to_string());
         }
 

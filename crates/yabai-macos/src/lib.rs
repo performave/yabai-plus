@@ -25,8 +25,8 @@ pub mod workspace;
 pub use ax::{
     AxDiagnostics, AxPidDiagnostics, AxSink, AxWindow, AxWindowInfo, DiscoveredAxWindow,
     accessibility_trusted, accessibility_trusted_with_prompt, focused_window,
-    focused_window_diagnostics, move_focused_window, move_pid_window, pid_window_infos,
-    tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
+    focused_window_diagnostics, focused_window_for_pid, move_focused_window, move_pid_window,
+    pid_window_infos, tileable_pid_windows, windows_for_pid, windows_for_pid_diagnostics,
 };
 #[cfg(target_os = "macos")]
 pub use cgwindow::{CgWindow, application_pids_with_windows, on_screen_windows};

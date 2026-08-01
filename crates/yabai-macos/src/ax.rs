@@ -406,6 +406,44 @@ pub fn windows_for_pid_diagnostics(pid: i32) -> AxPidDiagnostics {
     }
 }
 
+/// The Accessibility focused window of a specific application (`pid`), if one can
+/// be resolved. Used on application activation (a front-app switch): the
+/// newly-active app does not re-fire `AXFocusedWindowChanged` for a window that
+/// was already its internal focus, so the daemon reads the app's focused window
+/// directly to keep focus tracking correct across app switches.
+pub fn focused_window_for_pid(pid: i32) -> io::Result<Option<DiscoveredAxWindow>> {
+    if !accessibility_trusted() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Accessibility permission is not granted",
+        ));
+    }
+
+    // SAFETY: creates an owned AX application element for `pid`, released below.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Ok(None);
+    }
+
+    // SAFETY: creates an owned CFString for the duration of the copy attempt.
+    let focused_window_attr = unsafe { cfstring(b"AXFocusedWindow\0") };
+    if focused_window_attr.is_null() {
+        // SAFETY: `app` is an owned AX element from CreateApplication.
+        unsafe { CFRelease(app) };
+        return Ok(None);
+    }
+
+    let window = copy_attribute(app, focused_window_attr);
+    // SAFETY: the app element and attribute-name string are owned and no longer
+    // needed once the focused-window element has been copied out.
+    unsafe {
+        CFRelease(app);
+        CFRelease(focused_window_attr);
+    }
+
+    adopt_window(window)
+}
+
 fn focused_application_window() -> CFTypeRef {
     let app = system_attribute(b"AXFocusedApplication\0");
     if app.is_null() {

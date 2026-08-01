@@ -19,15 +19,15 @@ use yabai_macos::{
     MissionControlEvent, MouseDragButton, MouseDragEvent, ObservedEvent, WorkspaceEvent,
     accessibility_trusted_with_prompt, active_displays, application_pids_with_windows,
     current_space_for_display, cursor_display_id, cursor_location, display_for_space, display_uuid,
-    dock_pid, focused_window, focused_window_diagnostics, main_display_id, main_visible_frame,
-    mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
-    observe_display_reconfiguration, observe_mission_control, observe_mouse_drag,
-    observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
-    regular_application_pids, set_active_display, set_drag_modifier, space_is_native_fullscreen,
-    spaces_for_display, spaces_for_window, switch_space_by_gesture, tileable_pid_windows,
-    visible_frame_for_display, warp_cursor_to_display_center, warp_cursor_to_point, window_alpha,
-    window_is_ordered_in, window_level, windows_for_pid, windows_for_pid_diagnostics,
-    windows_on_space,
+    dock_pid, focused_window, focused_window_diagnostics, focused_window_for_pid, main_display_id,
+    main_visible_frame, mission_control_spaces, move_focused_window, move_pid_window,
+    ns_application_load, observe_display_reconfiguration, observe_mission_control,
+    observe_mouse_drag, observe_mouse_moved, observe_pid, observe_workspace, on_screen_windows,
+    pid_window_infos, regular_application_pids, set_active_display, set_drag_modifier,
+    space_is_native_fullscreen, spaces_for_display, spaces_for_window, switch_space_by_gesture,
+    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
+    warp_cursor_to_point, window_alpha, window_is_ordered_in, window_level, windows_for_pid,
+    windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, LiveWindowInfo, RecordingSink,
@@ -2389,11 +2389,20 @@ fn fire_signals(
 /// center, unless it is already inside the window. Mirrors
 /// `window_manager_center_mouse`: read the live cursor, skip when contained, and
 /// warp to the frame center.
+///
+/// The frame comes from the window's live AX rect (`window->frame` in the C), so
+/// the cursor also follows focus onto floating / `config manage off` windows,
+/// which have no entry in the BSP layout tree. Falls back to the tiled area from
+/// the tree if the sink no longer retains the window's element.
 fn center_mouse_on_focus(runtime: &Runtime<AxSink>, window_id: u32) {
     if !runtime.state.config.mouse_follows_focus {
         return;
     }
-    let Some(area) = runtime.state.window_area(window_id) else {
+    let Some(area) = runtime
+        .sink
+        .window_frame(window_id)
+        .or_else(|| runtime.state.window_area(window_id))
+    else {
         return;
     };
     if let Ok(cursor) = cursor_location() {
@@ -2435,6 +2444,62 @@ fn apply_auto_opacity(sa: &ScriptingAddition, runtime: &Runtime<AxSink>, focused
             normal
         };
         let _ = sa.set_opacity(wid, opacity, dur);
+    }
+}
+
+/// Register a real focus change on `window_id` — from an AX `FocusedWindowChanged`
+/// observer or an application activation (front-app switch). Points the
+/// command-active space at the window's space, records the window as focused,
+/// centers the cursor when `mouse_follows_focus` is on, and fires `window_focused`
+/// once per real change (deduped via `last_focus_signal`).
+///
+/// `window_known_space_id` (not `window_space_id`) so a floating/off-tree window —
+/// e.g. any window under `config manage off` — is still tracked as the focused
+/// window, letting focused-window commands act on it. A window idling on a
+/// non-visible space can fall out of the model's tracking (AX enumerates only the
+/// visible space), leaving it spaceless; resolve its space authoritatively and
+/// re-attach it so focus still registers — otherwise focused-window keybinds
+/// (`--swap`, `--focus`, `--toggle float`, `--space`, ...) would silently act on a
+/// stale window instead of the one the user just focused. Focus is registered even
+/// when the space cannot be resolved at all (e.g. SkyLight space enumeration
+/// unavailable); the space adjustment above only runs when the space is known.
+fn register_focus_change(
+    sa: &ScriptingAddition,
+    runtime: &mut Runtime<AxSink>,
+    last_focus_signal: &mut Option<u32>,
+    window_id: u32,
+) {
+    let known = runtime.state.window_known_space_id(window_id);
+    let sid = known.or_else(|| managed_space_for_window(&runtime.state, window_id));
+    if let Some(sid) = sid {
+        if known.is_none() {
+            // Re-attach a window the model had lost track of, so it is tracked and
+            // focus can register on it.
+            let _ = runtime
+                .state
+                .handle_event(StateEvent::WindowAssignedToSpace { window_id, sid });
+        }
+        runtime.state.set_active_space(sid);
+    }
+    let _ = runtime
+        .state
+        .handle_event(StateEvent::WindowFocused { window_id });
+    center_mouse_on_focus(runtime, window_id);
+    // `window_focused` signal, de-duplicated against the command focus path.
+    if *last_focus_signal != Some(window_id) {
+        if runtime.state.config.enable_window_opacity {
+            apply_auto_opacity(sa, runtime, Some(window_id));
+        }
+        *last_focus_signal = Some(window_id);
+        let meta = runtime.state.window_meta(window_id);
+        fire_signals(
+            runtime,
+            SignalEvent::WindowFocused,
+            &[("YABAI_WINDOW_ID", window_id.to_string())],
+            meta.map(|m| m.app.as_str()),
+            meta.map(|m| m.title.as_str()),
+            None,
+        );
     }
 }
 
@@ -3025,61 +3090,12 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // Focus may have moved to a window on another display; point the
                     // command-active space at the focused window's space.
                     if let Some(window_id) = focused {
-                        // `window_known_space_id` (not `window_space_id`) so a
-                        // floating/off-tree window — e.g. any window under `config
-                        // manage off` — is still tracked as the focused window,
-                        // letting focused-window commands act on it. A window idling
-                        // on a non-visible space can fall out of the model's tracking
-                        // (AX enumerates only the visible space), leaving it space-
-                        // less; resolve its space authoritatively so focus still
-                        // registers — otherwise focused-window keybinds (`--toggle
-                        // float`, `--space`, ...) would silently act on a stale
-                        // window instead of the one the user just focused.
-                        let known = runtime.state.window_known_space_id(window_id);
-                        let sid =
-                            known.or_else(|| managed_space_for_window(&runtime.state, window_id));
-                        if let Some(sid) = sid {
-                            if known.is_none() {
-                                // Re-attach a window the model had lost track of, so
-                                // it is tracked and focus can register on it.
-                                let _ =
-                                    runtime
-                                        .state
-                                        .handle_event(StateEvent::WindowAssignedToSpace {
-                                            window_id,
-                                            sid,
-                                        });
-                            }
-                            runtime.state.set_active_space(sid);
-                        }
-                        // Register focus even when the window's space cannot be
-                        // resolved (e.g. a floating window when SkyLight's space
-                        // enumeration is unavailable), so focused-window keybinds
-                        // (`--toggle float`, `--space`, ...) still act on the window
-                        // the user just focused rather than a stale one. Fires
-                        // unconditionally; the `sid` block above only adjusts the
-                        // active space when it is known.
-                        let _ = runtime
-                            .state
-                            .handle_event(StateEvent::WindowFocused { window_id });
-                        center_mouse_on_focus(&runtime, window_id);
-                        // `window_focused` signal (observer-driven focus, e.g. a
-                        // click). De-duplicated against the command path below.
-                        if last_focus_signal != Some(window_id) {
-                            if runtime.state.config.enable_window_opacity {
-                                apply_auto_opacity(&scripting_addition, &runtime, Some(window_id));
-                            }
-                            last_focus_signal = Some(window_id);
-                            let meta = runtime.state.window_meta(window_id);
-                            fire_signals(
-                                &runtime,
-                                SignalEvent::WindowFocused,
-                                &[("YABAI_WINDOW_ID", window_id.to_string())],
-                                meta.map(|m| m.app.as_str()),
-                                meta.map(|m| m.title.as_str()),
-                                None,
-                            );
-                        }
+                        register_focus_change(
+                            &scripting_addition,
+                            &mut runtime,
+                            &mut last_focus_signal,
+                            window_id,
+                        );
                     }
                 }
                 WmWork::Workspace(event) => match event {
@@ -3159,6 +3175,21 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                             None,
                             None,
                         );
+                        // A front-app switch does not re-fire the newly-active
+                        // app's `AXFocusedWindowChanged` when its focused window is
+                        // unchanged within that app, so the observer path never
+                        // learns focus moved. Read the app's focused window
+                        // directly and register it — otherwise focused-window
+                        // commands (`--swap`/`--focus`/...) keep acting on the
+                        // previously focused window from the old app.
+                        if let Ok(Some(window)) = focused_window_for_pid(pid) {
+                            register_focus_change(
+                                &scripting_addition,
+                                &mut runtime,
+                                &mut last_focus_signal,
+                                window.id,
+                            );
+                        }
                     }
                     WorkspaceEvent::ApplicationDeactivated { pid, app } => {
                         fire_signals(
@@ -3376,6 +3407,10 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     let sub_commands = split_action_commands(&tokens);
                     let mut response: Response = Ok(None);
                     for tokens in sub_commands {
+                        // Resolve the `mouse` window selector against the live cursor via
+                        // CoreGraphics so it reaches floating / `config manage off` windows
+                        // the tree-only resolver misses. No-op for other commands.
+                        prime_mouse_window_selector(&mut runtime, &tokens);
                         // Some commands need macOS-layer state/effects the pure core can't
                         // perform; handle those here, otherwise fall through.
                         let fullscreen_exit = try_window_native_fullscreen_exit(

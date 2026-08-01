@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::ffi::c_void;
+use yabai_core::Area;
 
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
@@ -20,6 +21,22 @@ type CFDictionaryRef = *const c_void;
 type CFNumberRef = *const c_void;
 type CFIndex = isize;
 type Boolean = u8;
+
+#[repr(C)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+#[repr(C)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+#[repr(C)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
 
 // `kCFNumberSInt32Type` from <CoreFoundation/CFNumber.h>.
 const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
@@ -32,8 +49,10 @@ unsafe extern "C" {
     static kCGWindowOwnerPID: CFStringRef;
     static kCGWindowNumber: CFStringRef;
     static kCGWindowLayer: CFStringRef;
+    static kCGWindowBounds: CFStringRef;
 
     fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> CFArrayRef;
+    fn CGRectMakeWithDictionaryRepresentation(dict: CFDictionaryRef, rect: *mut CGRect) -> Boolean;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -45,11 +64,43 @@ unsafe extern "C" {
     fn CFRelease(cf: CFTypeRef);
 }
 
-/// A normal on-screen window: its CG id and owning pid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A normal on-screen window: its CG id, owning pid, and on-screen bounds.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CgWindow {
     pub window_id: u32,
     pub pid: i32,
+    /// The window's frame in top-left global CoreGraphics coordinates
+    /// (`kCGWindowBounds`), the same space as cursor/warp coordinates.
+    pub bounds: Area,
+}
+
+/// Read `kCGWindowBounds` (a CFDictionary rect representation) into an [`Area`].
+fn dict_bounds(dict: CFDictionaryRef) -> Option<Area> {
+    // SAFETY: `dict` is a valid CFDictionary; `kCGWindowBounds` is a valid key
+    // constant. `CGRectMakeWithDictionaryRepresentation` fills `rect` on success
+    // (returns false / leaves it untouched otherwise, guarded by the return).
+    unsafe {
+        let bounds = CFDictionaryGetValue(dict, kCGWindowBounds);
+        if bounds.is_null() {
+            return None;
+        }
+        let mut rect = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 0.0,
+                height: 0.0,
+            },
+        };
+        let ok = CGRectMakeWithDictionaryRepresentation(bounds as CFDictionaryRef, &mut rect);
+        (ok != 0).then(|| {
+            Area::new(
+                rect.origin.x as f32,
+                rect.origin.y as f32,
+                rect.size.width as f32,
+                rect.size.height as f32,
+            )
+        })
+    }
 }
 
 /// Read a 32-bit integer value out of a CFDictionary entry.
@@ -72,7 +123,9 @@ fn dict_i32(dict: CFDictionaryRef, key: CFStringRef) -> Option<i32> {
     }
 }
 
-/// Every normal (layer 0) on-screen window, with its CG id and owner pid.
+/// Every normal (layer 0) on-screen window, with its CG id, owner pid, and
+/// bounds. Returned in CoreGraphics stacking order, front-most first, so callers
+/// can resolve the top window under a point.
 pub fn on_screen_windows() -> Vec<CgWindow> {
     let option = K_CG_WINDOW_LIST_ON_SCREEN_ONLY | K_CG_WINDOW_LIST_EXCLUDE_DESKTOP;
     // SAFETY: `CGWindowListCopyWindowInfo` returns an owned CFArray (or null) of
@@ -93,9 +146,10 @@ pub fn on_screen_windows() -> Vec<CgWindow> {
             if dict_i32(dict, kCGWindowLayer) != Some(0) {
                 continue;
             }
-            let (Some(pid), Some(number)) = (
+            let (Some(pid), Some(number), Some(bounds)) = (
                 dict_i32(dict, kCGWindowOwnerPID),
                 dict_i32(dict, kCGWindowNumber),
+                dict_bounds(dict),
             ) else {
                 continue;
             };
@@ -103,6 +157,7 @@ pub fn on_screen_windows() -> Vec<CgWindow> {
                 windows.push(CgWindow {
                     window_id: number as u32,
                     pid,
+                    bounds,
                 });
             }
         }

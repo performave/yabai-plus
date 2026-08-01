@@ -715,6 +715,34 @@ fn window_mouse_selector_resolves_window_under_cursor() {
 }
 
 #[test]
+fn window_mouse_selector_prefers_daemon_primed_window() {
+    let mut state = state_with_space();
+    state.add_window(1).unwrap();
+    state.add_window(2).unwrap();
+    state.set_focused_window(Some(1));
+
+    // The daemon resolves the window under the cursor via CoreGraphics (finding
+    // floating / `config manage off` windows the tree misses) and primes it. The
+    // `mouse` selector must prefer it over the tree-based point lookup — here the
+    // cursor point is in window 1's half, but the primed override wins.
+    state.set_cursor_point(Point { x: 100.0, y: 500.0 });
+    state.set_cursor_window(Some(2));
+    assert_eq!(
+        state.handle_tokens(&toks(&["window", "--focus", "mouse"])),
+        Ok(None)
+    );
+    assert_eq!(state.focused_window_id(), Some(2));
+
+    // Clearing the override falls back to the tree lookup at the cursor point.
+    state.set_cursor_window(None);
+    assert_eq!(
+        state.handle_tokens(&toks(&["window", "--focus", "mouse"])),
+        Ok(None)
+    );
+    assert_eq!(state.focused_window_id(), Some(1));
+}
+
+#[test]
 fn space_rotate_and_layout() {
     let mut state = state_with_space();
     state.add_window(1).unwrap();

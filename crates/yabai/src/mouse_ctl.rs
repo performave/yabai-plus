@@ -22,7 +22,7 @@ pub(crate) fn handle_mouse_moved(
         return;
     }
     runtime.state.set_cursor_point(point);
-    let Some(window_id) = runtime.state.managed_window_at_point(point) else {
+    let Some(window_id) = ffm_window_at_point(runtime, point) else {
         return;
     };
     if runtime.state.focused_window_id() == Some(window_id) {
@@ -57,6 +57,52 @@ pub(crate) fn handle_mouse_moved(
             None,
         );
     }
+}
+
+/// The window `focus_follows_mouse` should focus for a cursor at `point`: the
+/// top-most on-screen window under the cursor that the daemon tracks.
+///
+/// Uses the live CoreGraphics stacking order + geometry rather than the BSP tree,
+/// so it finds floating / `config manage off` windows too — focus-follows-mouse
+/// then behaves identically whether or not the window is tiled. Only windows the
+/// daemon tracks are eligible: if the top-most window under the cursor is one
+/// yabai never manages (a panel, the Arc picture-in-picture, other AX-ineligible
+/// surfaces), focus stays put — mirroring the C, which does nothing when the
+/// window at the point is not a managed window. Falls back to the tree lookup if
+/// CoreGraphics reports nothing (e.g. a tiled window it momentarily omits).
+pub(crate) fn ffm_window_at_point(runtime: &Runtime<AxSink>, point: Point) -> Option<u32> {
+    match on_screen_windows()
+        .into_iter()
+        .find(|window| window.bounds.contains_point(point))
+    {
+        Some(window) => runtime
+            .state
+            .window_known_space_id(window.window_id)
+            .map(|_| window.window_id),
+        None => runtime.state.managed_window_at_point(point),
+    }
+}
+
+/// Before dispatching a `window ... mouse` command, resolve the window under the
+/// live cursor via CoreGraphics and stash it on the state, so the pure `mouse`
+/// window selector reaches floating / `config manage off` windows (the tree-only
+/// resolver misses them). A no-op for any command that is not a `window` command
+/// referencing the `mouse` selector, so ordinary dispatch pays no CoreGraphics
+/// cost. Reading the cursor here (rather than the last mouse-move) keeps the
+/// selector correct even when `focus_follows_mouse` is off and no move events are
+/// being tracked.
+pub(crate) fn prime_mouse_window_selector(runtime: &mut Runtime<AxSink>, tokens: &[String]) {
+    if tokens.first().map(String::as_str) != Some("window")
+        || !tokens.iter().any(|token| token == "mouse")
+    {
+        return;
+    }
+    let Ok(point) = cursor_location() else {
+        return;
+    };
+    runtime.state.set_cursor_point(point);
+    let window = ffm_window_at_point(runtime, point);
+    runtime.state.set_cursor_window(window);
 }
 
 /// Map the configured `mouse_modifier` to the compact `MOUSE_MOD_*` mask the drag

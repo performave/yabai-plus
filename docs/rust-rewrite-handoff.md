@@ -94,9 +94,13 @@ current state. Only recent milestones are kept here going forward.
   destroyed/transient windows during native-fullscreen transitions — now uses
   strict `window_space_strict`); live-verified `--toggle zoom-fullscreen/
   zoom-parent/pip/native-fullscreen/windowed-fullscreen(float)` and
-  `focus_follows_mouse autofocus`. Minor known gap: `--toggle
-  windowed-fullscreen` on a *managed* window gets re-tiled back (works when the
-  window is floating first).
+  `focus_follows_mouse autofocus`. Also verified `window --insert <dir>` and
+  `--toggle expose`. `--toggle windowed-fullscreen` on a *managed* window
+  re-tiles back — NOT a real parity bug: C's `WINDOW_WINDOWED` flag is never
+  checked in the tiling path either, so C also re-tiles on the next reflow (the
+  daemon just reflows more eagerly; fully works when the window is floating).
+  Essentially all window/space/config features are now live-verified; the one
+  remaining functional gap is `query --windows` field completeness.
 - **2026-07-31 (session 75)** — installed the Rust toolchain locally (rustup
   stable) and drove the port to functional completeness (details in git log):
   - **All 7 command domains fully handled**: added `display --focus`/`--space`

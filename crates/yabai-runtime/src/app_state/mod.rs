@@ -233,6 +233,11 @@ pub struct AppState {
     /// The main display id (C `display_manager_main_display_id`, `CGMainDisplayID`),
     /// set by the daemon. Used to scope `external_bar main` to the main display.
     main_display: Option<u32>,
+    /// Space ids in global mission-control order (index n = position n-1), pushed
+    /// by the daemon from the live SkyLight order so numeric space selectors map
+    /// like C's `parse_space_selector` (a mission-control index, not a raw sid).
+    /// Empty in pure tests, where the numeric selector falls back to a raw sid.
+    mission_control_order: Vec<u64>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -971,6 +976,14 @@ impl AppState {
     /// be scoped to it. Set by the daemon during display discovery.
     pub fn set_main_display(&mut self, display_id: u32) {
         self.main_display = Some(display_id);
+    }
+
+    /// Record the live global mission-control space order (from
+    /// `mission_control_spaces()`), so a numeric space selector resolves to the
+    /// nth space like C rather than to a raw sid. The daemon refreshes this on
+    /// startup and after every space topology change.
+    pub fn set_mission_control_order(&mut self, order: Vec<u64>) {
+        self.mission_control_order = order;
     }
 
     /// Inset a space's usable display frame by the `external_bar` reservation when
@@ -2535,7 +2548,21 @@ impl AppState {
 
     fn resolve_space_selector(&self, selector: Option<&Selector>) -> Result<u64, String> {
         match selector {
-            Some(Selector::Index(id)) => Ok(u64::from(*id)),
+            // A numeric space selector is a 1-based mission-control index (C
+            // `parse_space_selector`), resolved against the live global order the
+            // daemon pushes. Falls back to the raw sid only when that order is
+            // unset (pure tests), preserving their small-sid==index convention.
+            Some(Selector::Index(id)) => {
+                if self.mission_control_order.is_empty() {
+                    return Ok(u64::from(*id));
+                }
+                (*id >= 1)
+                    .then(|| self.mission_control_order.get(*id as usize - 1).copied())
+                    .flatten()
+                    .ok_or_else(|| {
+                        format!("could not locate space with mission-control index '{id}'.\n")
+                    })
+            }
             Some(Selector::Label(label)) => self
                 .space_labels
                 .iter()

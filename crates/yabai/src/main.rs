@@ -865,6 +865,13 @@ fn refresh_live_display_state(
     if frames_changed {
         runtime.state.flush_all_active_to(&mut runtime.sink);
     }
+
+    // Push the live global mission-control space order so numeric space selectors
+    // (`window --space 2`, `space 2 --destroy`, ...) resolve to the right sid,
+    // including spaces created since startup.
+    if let Ok(order) = mission_control_spaces() {
+        runtime.state.set_mission_control_order(order);
+    }
 }
 
 fn focus_space_by_gesture(
@@ -2502,6 +2509,11 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
         if let Some(current) = current {
             state.set_display_active_space(*display_id, current);
         }
+    }
+    // Seed the global mission-control space order so numeric space selectors
+    // resolve like C from the first command (refreshed later on topology change).
+    if let Ok(order) = mission_control_spaces() {
+        state.set_mission_control_order(order);
     }
     let _ = state.handle_tokens(&tile_config_tokens(gap, padding));
     for (sid, usable) in &seeded {

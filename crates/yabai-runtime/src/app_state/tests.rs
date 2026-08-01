@@ -772,6 +772,23 @@ fn set_space_frame_insets_by_padding() {
 }
 
 #[test]
+fn numeric_space_selector_is_a_mission_control_index() {
+    // Regression for the live-found bug: `window --space 2` targeted raw sid 2
+    // instead of the 2nd mission-control space (a real sid like 18).
+    let mut state = state_with_space();
+    // Without a pushed order, a numeric selector falls back to the raw sid (the
+    // pure-test convention where small sids double as indices).
+    assert_eq!(state.resolve_space(Some(&Selector::Index(1))), Ok(1));
+
+    // With the live order pushed, index 2 resolves to the 2nd space's sid.
+    state.set_mission_control_order(vec![1, 18]);
+    assert_eq!(state.resolve_space(Some(&Selector::Index(1))), Ok(1));
+    assert_eq!(state.resolve_space(Some(&Selector::Index(2))), Ok(18));
+    // Out-of-range index errors like C.
+    assert!(state.resolve_space(Some(&Selector::Index(3))).is_err());
+}
+
+#[test]
 fn window_origin_display_routes_new_windows() {
     // Two displays: space 1 on display 10 (active), space 2 on display 20.
     let mut state = AppState::new();

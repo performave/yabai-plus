@@ -1076,6 +1076,16 @@ impl AppState {
         self.mission_control_order = order;
     }
 
+    /// The 1-based mission-control index of a space (its position in the
+    /// daemon-pushed global order), matching C `space_manager_mission_control_index`
+    /// and `query --spaces` `index`. 0 when the order is unknown or `sid` absent.
+    fn space_mission_control_index(&self, sid: u64) -> usize {
+        self.mission_control_order
+            .iter()
+            .position(|&s| s == sid)
+            .map_or(0, |index| index + 1)
+    }
+
     /// Inset a space's usable display frame by the `external_bar` reservation when
     /// the setting applies to that space's display (C `display_bounds_constrained`
     /// external-bar branch): `all` reserves on every display, `main` only on the
@@ -2195,6 +2205,7 @@ impl AppState {
             &cmd.properties,
             &[
                 "id",
+                "index",
                 "label",
                 "type",
                 "windows",
@@ -2398,6 +2409,10 @@ impl AppState {
         for property in properties {
             match *property {
                 "id" => fields.push(format!("\t\"id\":{sid}")),
+                "index" => fields.push(format!(
+                    "\t\"index\":{}",
+                    self.space_mission_control_index(sid)
+                )),
                 "label" => fields.push(format!(
                     "\t\"label\":\"{}\"",
                     json_escape(

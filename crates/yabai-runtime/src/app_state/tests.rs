@@ -1462,6 +1462,18 @@ fn query_spaces_serializes_display_property() {
 }
 
 #[test]
+fn query_spaces_serializes_mission_control_index() {
+    // `index` is the space's position in the daemon-pushed global order (not its
+    // raw sid), matching C's mission-control index.
+    let mut state = state_with_displays();
+    state.set_mission_control_order(vec![1, 2]);
+    assert_eq!(
+        state.handle_tokens(&toks(&["query", "--spaces", "id,index", "--space", "2"])),
+        Ok(Some("{\n\t\"id\":2,\n\t\"index\":2\n}\n".to_string()))
+    );
+}
+
+#[test]
 fn query_displays_serializes_registered_displays() {
     let mut state = state_with_displays();
     state.set_active_space(2);

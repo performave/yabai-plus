@@ -3,7 +3,7 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-YABAI_BIN="${YABAI_BIN:-$ROOT/bin/yabai}"
+YABAI_BIN="${YABAI_BIN:-$ROOT/target/release/yabai}"
 USER_NAME="${USER:-}"
 TMP_ROOT="${TMPDIR:-/tmp}"
 CONFIG_FILE=""

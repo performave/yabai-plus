@@ -9,7 +9,7 @@
 
 BINARY := target/release/yabai
 
-.PHONY: all build release install universal icon test clippy fmt fmt-check check clean man sign dev
+.PHONY: all build release install universal icon test e2e clippy fmt fmt-check check clean man sign dev
 
 all: release
 
@@ -42,6 +42,11 @@ icon: bin/yabai
 
 test:
 	cargo test --workspace
+
+# End-to-end smoke test against a foreground daemon (skips when preconditions
+# aren't safe). Builds the release binary first.
+e2e: release
+	sh scripts/e2e-smoke.sh
 
 clippy:
 	cargo clippy --workspace --all-targets

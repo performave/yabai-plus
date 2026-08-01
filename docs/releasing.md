@@ -11,7 +11,7 @@ version tag is pushed. You should rarely need to build a release by hand.
 ## TL;DR
 
 ```bash
-# 1. Bump the upstream fallback version in src/yabai.c (MAJOR/MINOR/PATCH).
+# 1. Bump the fallback version (YABAI_VERSION) in crates/yabai/src/main.rs.
 # 2. Add a CHANGELOG.md entry.
 # 3. Commit, then tag and push:
 git tag v7.1.25-plus.1
@@ -32,26 +32,30 @@ v<upstream-version>-plus.<n>
    e.g. v7.1.25-plus.1, v7.1.25-plus.2, v7.1.26-plus.1
 ```
 
-The version string is compiled into the binary from `src/yabai.c`:
+The version is a `YABAI_VERSION` constant in `crates/yabai/src/main.rs`,
+overridable at build time via the `YABAI_VERSION` env (`option_env!`):
 
-```c
-#define MAJOR 7
-#define MINOR 1
-#define PATCH 25
+```rust
+const YABAI_VERSION: &str = match option_env!("YABAI_VERSION") {
+    Some(version) => version,
+    None => "v7.1.25-plus.7",
+};
 ```
 
-`yabai --version` prints `yabai-${YABAI_VERSION}`. For release builds, the GitHub
-Actions workflow passes the pushed tag into `make`, so a tag like
+`yabai --version` prints `yabai-${YABAI_VERSION}`. For release builds the workflow
+passes the pushed tag as `YABAI_VERSION` into `make universal`, so a tag like
 `v7.1.25-plus.1` produces `yabai-v7.1.25-plus.1` and an archive named from that
-output. Local builds on an exact tag pick up that tag via `git describe`; untagged
-builds fall back to the upstream version string in `src/yabai.c`.
+output. Local builds without the env fall back to the constant above.
 
 ## What the release workflow does
 
 On a `v*` tag push (`.github/workflows/release.yml`), a `macos-14` runner:
 
 1. **Imports** the Developer ID Application certificate into a throwaway keychain.
-2. **Builds** a universal (x86_64 + arm64) binary with `make install`.
+2. **Installs** the Rust toolchain and **builds** a universal (x86_64 + arm64)
+   binary with `make universal` (builds both apple-darwin targets and lipo's them
+   into `bin/yabai`; the OSAX island is compiled + embedded by
+   `crates/yabai-sa/build.rs`).
 3. **Builds** the man page (`make man`, needs `asciidoctor`).
 4. **Codesigns** `bin/yabai` with the hardened runtime and a secure timestamp
    (`codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY"`).
@@ -68,8 +72,9 @@ These are the non-obvious bits that cause most release failures:
   **not** interfere with the scripting addition — SA injection into Dock.app is
   gated by partially-disabled SIP + root, a separate mechanism. Keep the flag.
 - **Only the main `bin/yabai` binary is signed.** The scripting-addition
-  `payload`/`loader` are compiled into the binary (`src/osax/*_bin.c`) and injected
-  into Dock at runtime; they must **not** be hardened-runtime signed. The workflow
+  `payload`/`loader` are compiled from `crates/yabai-sa/osax/*.m` and embedded into
+  the binary by `build.rs`; `yabai --load-sa` writes them out and ad-hoc signs them
+  at load time, so they must **not** be hardened-runtime signed here. The workflow
   never touches them — leave it that way.
 - **A bare CLI binary cannot be stapled.** Notarization still succeeds; Gatekeeper
   verifies the ticket online on first run. `xcrun stapler staple bin/yabai` will
@@ -84,7 +89,7 @@ These are the non-obvious bits that cause most release failures:
 If CI is unavailable:
 
 ```bash
-make install VERSION="v7.1.25-plus.1"  # universal build into bin/yabai
+make universal VERSION="v7.1.25-plus.1"  # universal build into bin/yabai
 make man              # man page (requires asciidoctor)
 codesign --force --timestamp --options runtime \
   --sign "Developer ID Application: <Your Name> (TEAMID)" bin/yabai

@@ -1,52 +1,48 @@
 # Testing
 
-This fork has two automated test layers.
+Two automated layers, plus manual live testing for anything the macOS boundary
+touches.
 
 ## Unit tests
 
 ```bash
-make test
+cargo test --workspace    # (make test)
 ```
 
-The unit harness lives under `tests/` and builds a standalone binary that includes
-the source tree with `TESTS` defined. These tests should stay deterministic and
-avoid depending on a running window manager, Accessibility permission, a GUI
-session, the scripting addition, SIP state, or Mission Control.
+The unit suites live inside each crate (`crates/*/src/**` and the split-out
+`<mod>/tests.rs` files). They are pure and deterministic — they must not depend on
+a running window manager, Accessibility permission, a GUI session, the scripting
+addition, SIP state, or Mission Control.
 
-CI runs `make` and `make test` on a GitHub-hosted macOS runner.
+CI (`.github/workflows/test.yml`) runs `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets`, `cargo build --release`, and
+`cargo test --workspace` on a GitHub-hosted macOS runner.
 
 ## Local e2e smoke
 
 ```bash
-make e2e
+make e2e     # sh scripts/e2e-smoke.sh
 ```
 
-The e2e smoke test builds `bin/yabai`, starts it in the foreground with an empty
-temporary config, sends real `yabai -m` messages, and verifies basic query,
-config, rule, and error-path behavior.
-
-Stop the normal service first if you want the smoke test to run instead of skip:
+Builds the release binary, starts it in the foreground with an empty temporary
+config, sends real `yabai -m` messages, and verifies basic query, config, rule,
+and error-path behavior. Stop the normal service first, or point the script at a
+specific binary:
 
 ```bash
 yabai --stop-service
-make e2e
+YABAI_BIN=./target/release/yabai sh scripts/e2e-smoke.sh
 yabai --start-service
 ```
 
-If Accessibility permission is tied to another signed binary, run the script with
-that binary explicitly:
+It skips (rather than fails) when local preconditions aren't safe: another yabai
+is running, Accessibility isn't granted, "Displays have separate Spaces" is
+disabled, or `python3` is unavailable.
 
-```bash
-YABAI_BIN=/opt/homebrew/bin/yabai sh scripts/e2e-smoke.sh
-```
+## Live testing
 
-It intentionally skips instead of failing when local preconditions are not safe:
-
-- another yabai instance is already running for the current user
-- Accessibility permission is not available
-- Displays have separate Spaces is disabled
-- `python3` is unavailable for JSON assertions
-
-The smoke test does not exercise the scripting addition, Mission Control, space
-dragging, or multi-display physical workflows. Those still need manual testing or
-a dedicated self-hosted Mac with the required SIP, display, and permission state.
+Features that touch the macOS boundary (tiling, SA ops, mouse, Mission Control,
+multi-display) need a real run: grant Accessibility to the binary, load the
+scripting addition (`sudo yabai --load-sa`) for SA-backed features, and verify
+against the read-only `--experimental-*` probes and `yabai -m query`. This
+rearranges real windows and switches spaces — use a disposable machine/VM.

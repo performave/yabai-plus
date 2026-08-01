@@ -89,7 +89,14 @@ current state. Only recent milestones are kept here going forward.
   caught them — keep testing live (SA stays loaded). Follow-up live pass found
   no new bugs across `space --rotate/--mirror/--balance`, `window --warp/--stack`,
   sticky (shows on all spaces), scratchpad (assign/hide/show/recover), and `rule
-  manage=off` on new windows — all confirmed correct.
+  manage=off` on new windows — all confirmed correct. Third pass: fixed a
+  phantom-window bug (the keep-guard's `spaces_for_window` fallback retained
+  destroyed/transient windows during native-fullscreen transitions — now uses
+  strict `window_space_strict`); live-verified `--toggle zoom-fullscreen/
+  zoom-parent/pip/native-fullscreen/windowed-fullscreen(float)` and
+  `focus_follows_mouse autofocus`. Minor known gap: `--toggle
+  windowed-fullscreen` on a *managed* window gets re-tiled back (works when the
+  window is floating first).
 - **2026-07-31 (session 75)** — installed the Rust toolchain locally (rustup
   stable) and drove the port to functional completeness (details in git log):
   - **All 7 command domains fully handled**: added `display --focus`/`--space`

@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  210 workspace tests pass. The shipped C `make` flow is unchanged.
+  212 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -87,9 +87,20 @@ current state. Only recent milestones are kept here going forward.
   index from `mission_control_order`). Deferred (edge/fragile, documented in the
   compat ledger): window `sub-level`/`sub-layer` (magic-id `mach_msg`),
   `root-window`/`is-grabbed`/`has-ax-reference`, listing minimized/native-fs
-  windows; space/display `uuid`; space `is-native-fullscreen`. 210 tests.
-  **The port now has functional parity with C yabai for the practical surface;
-  remaining work is the gated production cutover and the deferred OSAX island.**
+  windows; space `uuid`. Follow-up landed the clean edge fields:
+  **display `uuid`** (CGDisplay UUID), **space `is-native-fullscreen`**
+  (SLSSpaceGetType), and space `index`. Space `uuid` plumbing exists but is
+  gated (SLSSpaceCopyName returns empty on macOS 15 here). Remaining query fields
+  are all fragile (`mach_msg` sub-level), hollow (`is-grabbed`/`has-ax-reference`),
+  or involved (minimized/native-fs window listing). 212 tests.
+  **FUNCTIONAL PARITY WITH C YABAI IS COMPLETE for the practical surface** — all
+  7 command domains, all config, all signals, rules, mouse, and query are
+  implemented and live-verified. The only remaining work is (a) the **gated
+  production cutover** (wire the Rust binary into `make`/launchd/signing/
+  notarization per `docs/releasing.md` — a deliberate, user-initiated step, NOT
+  to be done unprompted) and (b) the **deferred OSAX payload rewrite**. The Rust
+  WM daemon runs as `--experimental-rust-wm-daemon`; the shipped C `make` flow is
+  still unchanged.
 - **2026-08-01 (session 76)** — SA loaded locally (SIP off + `-arm64e_preview_abi`,
   payload v2.1.30) enabling full live testing, which caught **3 real parity bugs
   (all fixed + verified live)**: (1) numeric space selectors resolved as raw sids
@@ -725,7 +736,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 210 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 212 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

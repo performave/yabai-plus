@@ -3025,7 +3025,11 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // Focus may have moved to a window on another display; point the
                     // command-active space at the focused window's space.
                     if let Some(window_id) = focused {
-                        if let Some(sid) = runtime.state.window_space_id(window_id) {
+                        // `window_known_space_id` (not `window_space_id`) so a
+                        // floating/off-tree window — e.g. any window under `config
+                        // manage off` — is still tracked as the focused window,
+                        // letting focused-window commands act on it.
+                        if let Some(sid) = runtime.state.window_known_space_id(window_id) {
                             runtime.state.set_active_space(sid);
                             let _ = runtime
                                 .state

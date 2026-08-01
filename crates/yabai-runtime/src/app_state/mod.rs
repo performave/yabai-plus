@@ -981,11 +981,32 @@ impl AppState {
     pub fn set_window_floating(&mut self, window_id: u32, floating: bool, sid: u64) {
         if floating {
             self.floating.insert(window_id);
+            // Track its space even though it is off-tree, so space/display-scoped
+            // queries list it and focus resolution (`window_known_space_id`) can
+            // point the daemon's `focused_window` at it.
+            self.window_spaces.insert(window_id, sid);
             for tree in self.spaces.values_mut() {
                 tree.remove_window(window_id);
             }
         } else if self.floating.remove(&window_id) {
             let _ = self.assign_window_to_space(window_id, sid);
+        }
+    }
+
+    /// Tile or float `window_id` on `sid` per an effective `manage` decision — a
+    /// rule's explicit setting, else the global `config.manage`. Idempotent, so it
+    /// is safe to (re)apply on every reconcile pass or `config manage` toggle.
+    fn set_window_managed(&mut self, window_id: u32, sid: u64, manage: bool) {
+        if manage {
+            // Tile: drop any float mark and (re)insert into the tree. A plain
+            // `set_window_floating(false)` only re-tiles a *previously* floating
+            // window, so it would leave a never-floated window (e.g. one newly seen
+            // under `config manage off`) untiled.
+            self.floating.remove(&window_id);
+            let _ = self.assign_window_to_space(window_id, sid);
+        } else {
+            // Float (untiled), but tracked so it stays listed and focusable.
+            self.set_window_floating(window_id, true, sid);
         }
     }
 
@@ -1378,6 +1399,12 @@ impl AppState {
             StateEvent::WindowAssignedToSpace { window_id, sid } => {
                 if self.config.manage {
                     self.assign_window_to_space(window_id, sid)?;
+                } else if self.spaces.contains_key(&sid) {
+                    // Hybrid mode (`config manage off`): tiling is opt-in via a
+                    // `manage=on` rule, applied separately. Don't auto-tile here,
+                    // but still record space membership so an off-tree (floating)
+                    // window stays listed and focusable as it moves between spaces.
+                    self.window_spaces.insert(window_id, sid);
                 }
             }
             StateEvent::WindowDestroyed { window_id } => {
@@ -1980,6 +2007,14 @@ impl AppState {
         for index in remove.into_iter().rev() {
             self.rules.remove(index);
         }
+        // A window no rule explicitly claimed inherits the global `config.manage`
+        // default. Under `config manage off` (hybrid mode) this floats — and thus
+        // tracks — every window a `manage=on` rule didn't opt into tiling, instead
+        // of leaving it untracked (absent from queries, unfocusable). Mirrors the
+        // intent of the old `app=".*" manage=off` wildcard rule this replaced.
+        if result.manage.is_none() {
+            result.manage = Some(self.config.manage);
+        }
         self.apply_rule_effects_to_window(window_id, sid, &result);
         result
     }
@@ -2130,8 +2165,7 @@ impl AppState {
 
     fn apply_rule_effects_to_window(&mut self, window_id: u32, sid: u64, effects: &RuleEffects) {
         if let Some(manage) = effects.manage {
-            // manage=off -> floating (untiled); manage=on -> tiled.
-            self.set_window_floating(window_id, !manage, sid);
+            self.set_window_managed(window_id, sid, manage);
         }
         if let Some(label) = &effects.scratchpad {
             let _ = self.set_window_scratchpad(window_id, label.clone(), sid);

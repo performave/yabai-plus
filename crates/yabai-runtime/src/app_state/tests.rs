@@ -1843,6 +1843,49 @@ fn one_shot_rule_is_removed_after_new_window_match() {
 }
 
 #[test]
+fn manage_off_floats_and_tracks_unmatched_new_window() {
+    // Hybrid mode (`config manage off`): a new window no `manage=on` rule claimed
+    // must be FLOATED and tracked — not left untracked ("limbo"), which made
+    // `query --windows` omit it and focused-window commands fail with "no focused
+    // window". Regression test for that bug.
+    let mut state = state_with_space();
+    state.config.manage = false;
+    state.apply_new_window_rules(1, "Finder", "", "", "", 1);
+    // Floated, not tiled.
+    assert!(state.is_floating(1));
+    assert!(state.space(1).unwrap().window_list().is_empty());
+    // Tracked: known on its space (so scoped queries list it) and present in the
+    // off-tree set (so `query --windows` lists it and focus can target it).
+    assert_eq!(state.window_known_space_id(1), Some(1));
+    assert!(state.off_tree_window_ids().contains(&1));
+}
+
+#[test]
+fn manage_off_still_tiles_manage_on_ruled_window() {
+    // Under `config manage off`, an explicit `manage=on` rule must still tile the
+    // window, even though it was never floating first.
+    let mut state = state_with_space();
+    state.config.manage = false;
+    state
+        .handle_tokens(&toks(&["rule", "--add", "app=^Kitty$", "manage=on"]))
+        .unwrap();
+    state.apply_new_window_rules(1, "Kitty", "", "", "", 1);
+    assert!(!state.is_floating(1));
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+}
+
+#[test]
+fn manage_on_default_tiles_unmatched_new_window() {
+    // Normal mode (`config manage on`, the default): an unmatched new window still
+    // tiles — the config-default fallback must not regress standard tiling.
+    let mut state = state_with_space();
+    assert!(state.config.manage);
+    state.apply_new_window_rules(1, "Finder", "", "", "", 1);
+    assert!(!state.is_floating(1));
+    assert_eq!(state.space(1).unwrap().window_list(), vec![1]);
+}
+
+#[test]
 fn parse_error_surfaces_as_response_error() {
     let mut state = AppState::new();
     assert_eq!(

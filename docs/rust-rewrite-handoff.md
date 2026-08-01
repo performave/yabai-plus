@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  199 workspace tests pass. The shipped C `make` flow is unchanged.
+  201 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -86,12 +86,18 @@ current state. Only recent milestones are kept here going forward.
   - `config` domain completed: the last 6 keys (`display_arrangement_order`,
     `window_origin_display`, `window_animation_easing`, `insert_feedback_color`,
     `external_bar`, `skip_window_focus_animation`) now parse/store/round-trip
-    with C-faithful values and print formats. Behavioral *enactment* of
-    external_bar / arrangement-order / window-origin is still deferred to their
-    subsystems (values are stored but inert).
+    with C-faithful values and print formats.
   - Refactor: extracted the 12 experimental diagnostic probes into
     `crates/yabai/src/probes.rs` (main.rs 4703 → 4430 lines).
-  199 workspace tests, clippy clean.
+  - Enacted two previously-inert config effects: `display_arrangement_order`
+    (display indexing/selectors sort by center x/y, C
+    `display_manager_coordinate_comparator`) and `external_bar` (reserves
+    top/bottom screen space per `all`/`main`/`off`, C
+    `display_bounds_constrained`; tracks `CGMainDisplayID`;
+    `dispatch_config` now re-insets spaces immediately on layout-config change).
+  201 workspace tests, clippy clean. Still inert: `window_origin_display`,
+  `window_animation_easing`, `insert_feedback_color`,
+  `skip_window_focus_animation` (cosmetic/animation-only).
 - Sessions 40–74 (2026-07-03/04) — window `--grid`/`--move`/`--resize`/`--ratio`/
   `--raise`/`--lower`/`--insert`/`--scratchpad`, all `--toggle` variants
   (split/windowed-fullscreen/pip/expose/native-fullscreen), per-space
@@ -658,7 +664,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 199 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 201 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

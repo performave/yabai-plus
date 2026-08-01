@@ -25,12 +25,12 @@ use yabai_macos::{
     observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
     regular_application_pids, set_active_display, set_drag_modifier, spaces_for_display,
     spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
-    warp_cursor_to_display_center, warp_cursor_to_point, window_is_ordered_in, windows_for_pid,
-    windows_for_pid_diagnostics, windows_on_space,
+    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_is_ordered_in,
+    windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
 };
 use yabai_runtime::{
-    Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, RecordingSink, Response, Runtime,
-    StateEvent, WindowMeta,
+    Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, LiveWindowInfo, RecordingSink,
+    Response, Runtime, StateEvent, WindowMeta,
 };
 use yabai_sa::{ScriptingAddition, ScriptingAdditionStatus};
 
@@ -1014,6 +1014,25 @@ fn run_space_probe(args: &[String]) -> ExitCode {
 /// `window --focus <selector>` (the action carries the selector) or
 /// `window <selector> --focus` (the leading target is the window to focus). A
 /// bare `window --focus` with no target and no selector is not a focus request.
+/// Whether the message is a `query --windows` (so the daemon should populate
+/// per-window live AX/SkyLight info before serving it).
+fn is_window_query(tokens: &[String]) -> bool {
+    tokens.first().map(String::as_str) == Some("query")
+        && tokens.iter().any(|token| token == "--windows")
+}
+
+/// Read the live AX/SkyLight per-window fields the pure serializer can't (opacity
+/// via SkyLight for now) into `AppState`, for every window the daemon tracks.
+fn populate_window_live_info(runtime: &mut Runtime<AxSink>) {
+    for wid in runtime.state.all_window_ids() {
+        let info = LiveWindowInfo {
+            opacity: window_alpha(wid).unwrap_or(1.0),
+            ..Default::default()
+        };
+        runtime.state.set_window_live_info(wid, info);
+    }
+}
+
 fn is_window_focus(tokens: &[String]) -> bool {
     let Ok(Message::Window(cmd)) = parse_message(tokens) else {
         return false;
@@ -3077,6 +3096,11 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // the window/space/display under the pointer.
                     if let Ok(cursor) = cursor_location() {
                         runtime.state.set_cursor_point(cursor);
+                    }
+                    // `query --windows` reports fields that need a live AX/SkyLight
+                    // read (opacity, ...); populate them just before serving it.
+                    if is_window_query(&tokens) {
+                        populate_window_live_info(&mut runtime);
                     }
                     // Some commands need macOS-layer state/effects the pure core can't
                     // perform; handle those here, otherwise fall through.

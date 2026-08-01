@@ -1126,6 +1126,29 @@ fn query_windows_serializes_stack_index() {
 }
 
 #[test]
+fn query_windows_serializes_opacity_from_live_info() {
+    // The daemon pushes live AX/SkyLight info before a query; the pure serializer
+    // reports it. Absent info defaults to opacity 0.
+    let mut state = state_with_space();
+    state.add_window(10).unwrap();
+    state.add_window(20).unwrap();
+    state.set_window_live_info(
+        10,
+        LiveWindowInfo {
+            opacity: 0.55,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        state.handle_tokens(&toks(&["query", "--windows", "id,opacity"])),
+        Ok(Some(
+            "[{\n\t\"id\":10,\n\t\"opacity\":0.5500\n},{\n\t\"id\":20,\n\t\"opacity\":0.0000\n}]\n"
+                .to_string()
+        ))
+    );
+}
+
+#[test]
 fn query_windows_serializes_is_floating_and_is_sticky() {
     // Tiled windows report both as false; the fields are now requestable instead
     // of erroring (C never rejects is-floating/is-sticky). Floating/sticky windows

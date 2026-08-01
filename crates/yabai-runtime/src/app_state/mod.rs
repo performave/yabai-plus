@@ -180,6 +180,9 @@ pub struct AppState {
     last_focused_window: Option<u32>,
     last_active_space: Option<u64>,
     window_meta: HashMap<u32, WindowMeta>,
+    /// Live AX/SkyLight per-window state pushed by the daemon before a
+    /// `query --windows` (see [`LiveWindowInfo`]).
+    window_live_info: HashMap<u32, LiveWindowInfo>,
     window_spaces: HashMap<u32, u64>,
     /// Windows the user floated (`window --toggle float`): kept out of every tree
     /// so they are never tiled, and skipped by reconcile's space assignment.
@@ -356,6 +359,22 @@ pub struct WindowMeta {
     pub app: String,
     pub title: String,
     pub pid: i32,
+}
+
+/// Live per-window state the daemon reads from AX/SkyLight just before serving a
+/// `query --windows`, so the pure serializer can report the C fields that need a
+/// live read (it has no macOS access of its own). Populated via
+/// [`AppState::set_window_live_info`]; absent windows report defaults.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveWindowInfo {
+    pub opacity: f32,
+    pub role: String,
+    pub subrole: String,
+    pub can_move: bool,
+    pub can_resize: bool,
+    /// SkyLight window level and the C `sub-level` (relative sub-level).
+    pub level: i64,
+    pub sub_level: i64,
 }
 
 impl AppState {
@@ -663,6 +682,21 @@ impl AppState {
     /// Forget a window's metadata (e.g. when it is destroyed).
     pub fn remove_window_meta(&mut self, window_id: u32) {
         self.window_meta.remove(&window_id);
+        self.window_live_info.remove(&window_id);
+    }
+
+    /// Record (or replace) a window's live AX/SkyLight info for the next query.
+    pub fn set_window_live_info(&mut self, window_id: u32, info: LiveWindowInfo) {
+        self.window_live_info.insert(window_id, info);
+    }
+
+    /// The live info for a window, or a default (all-zero/empty) when the daemon
+    /// hasn't pushed any (e.g. pure tests, or a window it couldn't read).
+    fn live_info(&self, window_id: u32) -> LiveWindowInfo {
+        self.window_live_info
+            .get(&window_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn space(&self, sid: u64) -> Option<&Tree> {
@@ -2199,6 +2233,7 @@ impl AppState {
                 "has-shadow",
                 "has-fullscreen-zoom",
                 "has-parent-zoom",
+                "opacity",
                 "is-floating",
                 "is-sticky",
             ],
@@ -2409,6 +2444,42 @@ impl AppState {
                 "has-parent-zoom" => fields.push(format!(
                     "\t\"has-parent-zoom\":{}",
                     json_bool(self.window_zoom(frame.window_id) == Some(ZoomKind::Parent))
+                )),
+                "opacity" => fields.push(format!(
+                    "\t\"opacity\":{:.4}",
+                    self.live_info(frame.window_id).opacity
+                )),
+                "role" => fields.push(format!(
+                    "\t\"role\":\"{}\"",
+                    json_escape(&self.live_info(frame.window_id).role)
+                )),
+                "subrole" => fields.push(format!(
+                    "\t\"subrole\":\"{}\"",
+                    json_escape(&self.live_info(frame.window_id).subrole)
+                )),
+                "can-move" => fields.push(format!(
+                    "\t\"can-move\":{}",
+                    json_bool(self.live_info(frame.window_id).can_move)
+                )),
+                "can-resize" => fields.push(format!(
+                    "\t\"can-resize\":{}",
+                    json_bool(self.live_info(frame.window_id).can_resize)
+                )),
+                "level" => fields.push(format!(
+                    "\t\"level\":{}",
+                    self.live_info(frame.window_id).level
+                )),
+                "sub-level" => fields.push(format!(
+                    "\t\"sub-level\":{}",
+                    self.live_info(frame.window_id).sub_level
+                )),
+                "layer" => fields.push(format!(
+                    "\t\"layer\":\"{}\"",
+                    window_layer_str(self.live_info(frame.window_id).level)
+                )),
+                "sub-layer" => fields.push(format!(
+                    "\t\"sub-layer\":\"{}\"",
+                    window_layer_str(self.live_info(frame.window_id).sub_level)
                 )),
                 "is-floating" => fields.push(format!(
                     "\t\"is-floating\":{}",
@@ -2737,6 +2808,18 @@ fn format_area(name: &str, area: Area) -> String {
 
 fn json_bool(value: bool) -> &'static str {
     if value { "true" } else { "false" }
+}
+
+/// Map a CG window level to the C layer string (`window_layer` in `src/window.c`):
+/// below = `kCGBackstopMenuLevel` (-20), normal = `kCGNormalWindowLevel` (0),
+/// above = `kCGFloatingWindowLevel` (3); anything else is `unknown`.
+fn window_layer_str(level: i64) -> &'static str {
+    match level {
+        -20 => "below",
+        0 => "normal",
+        3 => "above",
+        _ => "unknown",
+    }
 }
 
 /// Compile a rule's filter patterns, mapping a bad pattern to the C

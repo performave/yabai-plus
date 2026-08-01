@@ -74,6 +74,21 @@ fully preserved in git history (`git log -- docs/rust-rewrite-handoff.md`) and
 superseded by the **RESUME HERE** section below, which is the ground truth for
 current state. Only recent milestones are kept here going forward.
 
+- **2026-08-01 (session 78)** — **removed the C daemon; this is now a Rust
+  project.** Ported the deferred OSAX/Phase-8 work: (1) the OSAX injection island
+  (`crates/yabai-sa/osax/*.m`, loader/payload — must stay ObjC) is compiled +
+  embedded by `crates/yabai-sa/build.rs`; (2) `sa.m`'s load/install/uninstall/
+  PAC-patch/sudoers orchestration is ported to `yabai-sa::loader`; (3) the CLI
+  (`--load-sa`/`--check-sa`/`--uninstall-sa`/sudoers/service/`--version` + the
+  default production WM daemon with per-user flock + config-exec) is in the Rust
+  `main`. Then deleted all `src/` (C), the dead `yabai-osax-legacy` crate, and the
+  C `tests/`; replaced the makefile with a cargo wrapper (`make universal` lipo's
+  x86_64+arm64 into bin/yabai); rewired `test.yml`/`release.yml` to cargo; and
+  rewrote AGENTS.md. **Live-verified end to end (macOS 15.6.1 arm64):** Rust
+  `--load-sa` installed the embedded binaries, PAC-patched + signed them, injected
+  into Dock, and `--check-sa` reported healthy; `yabai` (no args) ran the
+  production daemon on the real socket with the SA and served `yabai -m` queries.
+  0 C files remain (only the 4-file ObjC OSAX island). 212 tests, clippy clean.
 - **2026-08-01 (session 77)** — **closed the `query` completeness gap for the
   common surface** via daemon live-read augmentation (`AppState::LiveWindowInfo` +
   `set_window_live_info`, populated by `populate_window_live_info` before serving

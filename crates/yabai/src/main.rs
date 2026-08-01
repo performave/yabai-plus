@@ -19,13 +19,14 @@ use yabai_macos::{
     MouseDragButton, MouseDragEvent, ObservedEvent, WorkspaceEvent,
     accessibility_trusted_with_prompt, active_displays, application_pids_with_windows,
     current_space_for_display, cursor_display_id, cursor_location, display_for_space,
-    focused_window, focused_window_diagnostics, main_visible_frame, mission_control_spaces,
-    move_focused_window, move_pid_window, ns_application_load, observe_display_reconfiguration,
-    observe_mouse_drag, observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
-    regular_application_pids, set_active_display, set_drag_modifier, spaces_for_display,
-    spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
-    warp_cursor_to_display_center, warp_cursor_to_point, window_is_ordered_in, windows_for_pid,
-    windows_for_pid_diagnostics, windows_on_space,
+    focused_window, focused_window_diagnostics, main_display_id, main_visible_frame,
+    mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
+    observe_display_reconfiguration, observe_mouse_drag, observe_mouse_moved, observe_pid,
+    observe_workspace, pid_window_infos, regular_application_pids, set_active_display,
+    set_drag_modifier, spaces_for_display, spaces_for_window, switch_space_by_gesture,
+    tileable_pid_windows, visible_frame_for_display, warp_cursor_to_display_center,
+    warp_cursor_to_point, window_is_ordered_in, windows_for_pid, windows_for_pid_diagnostics,
+    windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, RecordingSink, Response, Runtime,
@@ -161,6 +162,8 @@ fn seed_live_displays(state: &mut AppState) {
         }
         Err(error) => eprintln!("yabai-rust: failed to discover displays: {error}"),
     }
+    // Record the main display so `external_bar main` can be scoped to it.
+    state.set_main_display(main_display_id());
 }
 
 fn bind_experimental_daemon(socket_path: &str) -> io::Result<UnixListener> {
@@ -692,6 +695,8 @@ fn refresh_live_display_state(
     if displays.is_empty() {
         return;
     }
+    // The main display can change on hotplug/rearrange; keep it current.
+    runtime.state.set_main_display(main_display_id());
 
     // Snapshot the known topology before this refresh registers/removes anything,
     // so we can fire *_added / *_removed signals for the diff.

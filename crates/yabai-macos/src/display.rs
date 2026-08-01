@@ -52,6 +52,14 @@ unsafe extern "C" {
     ) -> i32;
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
+    fn CGMainDisplayID() -> u32;
+}
+
+/// The main display id (`CGMainDisplayID` — the display with the active menu bar),
+/// mirroring the C `display_manager_main_display_id`.
+pub fn main_display_id() -> u32 {
+    // SAFETY: `CGMainDisplayID` takes no arguments and returns a display id.
+    unsafe { CGMainDisplayID() }
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]

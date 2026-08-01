@@ -16,10 +16,10 @@ use std::collections::{HashMap, HashSet};
 use regex_lite::Regex;
 use yabai_core::layout::HANDLE_ABS;
 use yabai_core::{
-    Area, Child, ConfigOp, Direction, DisplayAction, DisplayArrangementOrder, Layer, Message,
-    MouseDropAction, NodeSplit, Point, QueryCommand, QueryScopeKind, QueryTarget, Rule, RuleApply,
-    RuleCommand, RuleEffects, Selector, Signal, SignalCommand, SignalEvent, SpaceAction, Tree,
-    ValueType, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
+    Area, Child, ConfigOp, Direction, DisplayAction, DisplayArrangementOrder, ExternalBarMode,
+    Layer, Message, MouseDropAction, NodeSplit, Point, QueryCommand, QueryScopeKind, QueryTarget,
+    Rule, RuleApply, RuleCommand, RuleEffects, Selector, Signal, SignalCommand, SignalEvent,
+    SpaceAction, Tree, ValueType, ViewType, WindowAction, WindowFrame, ZoomKind, parse_message,
 };
 
 use crate::config::Config;
@@ -229,6 +229,9 @@ pub struct AppState {
     /// cleared), mapping `sid -> saved gap value` so a re-toggle restores it. The
     /// live `tree.config.gap` is held at zero while a space is present here.
     gap_disabled: HashMap<u64, i32>,
+    /// The main display id (C `display_manager_main_display_id`, `CGMainDisplayID`),
+    /// set by the daemon. Used to scope `external_bar main` to the main display.
+    main_display: Option<u32>,
 }
 
 /// A [`Rule`] with its filter patterns compiled to regexes. Absent filters keep
@@ -947,11 +950,40 @@ impl AppState {
             .find_map(|(&wid, existing)| (existing == label).then_some(wid))
     }
 
-    /// Set a space's usable frame from its full display frame, insetting by the
-    /// configured paddings (as the C view does when the space manager sets the
-    /// root area), then re-flow the tree.
+    /// Record the main display id (`CGMainDisplayID`), so `external_bar main` can
+    /// be scoped to it. Set by the daemon during display discovery.
+    pub fn set_main_display(&mut self, display_id: u32) {
+        self.main_display = Some(display_id);
+    }
+
+    /// Inset a space's usable display frame by the `external_bar` reservation when
+    /// the setting applies to that space's display (C `display_bounds_constrained`
+    /// external-bar branch): `all` reserves on every display, `main` only on the
+    /// main display. Reserves `top` at the top and `bottom` at the bottom.
+    fn apply_external_bar(&self, sid: u64, frame: Area) -> Area {
+        let bar = self.config.external_bar;
+        let applies = match bar.mode {
+            ExternalBarMode::Off => false,
+            ExternalBarMode::All => true,
+            ExternalBarMode::Main => self.space_displays.get(&sid).copied() == self.main_display,
+        };
+        if !applies {
+            return frame;
+        }
+        Area::new(
+            frame.x,
+            frame.y + bar.top as f32,
+            frame.w,
+            frame.h - (bar.top + bar.bottom) as f32,
+        )
+    }
+
+    /// Set a space's usable frame from its full display frame, reserving any
+    /// `external_bar` space then insetting by the configured paddings (as the C
+    /// view does when the space manager sets the root area), then re-flow the tree.
     pub fn set_space_frame(&mut self, sid: u64, display_frame: Area) -> Result<(), String> {
         self.space_usable.insert(sid, display_frame);
+        let display_frame = self.apply_external_bar(sid, display_frame);
         let [top, bottom, left, right] = self.space_padding(sid);
         let area = Area::new(
             display_frame.x + left as f32,
@@ -1250,13 +1282,23 @@ impl AppState {
                 layout_dirty = true;
             }
         }
-        // A config change that affects layout re-flows every known space.
+        // A config change that affects layout re-flows every known space. Refresh
+        // each tree's layout policy, then re-inset its root area from the stored
+        // usable frame so global-padding / external_bar changes apply immediately.
         if layout_dirty {
             let layout_config = self.config.layout_config();
-            for tree in self.spaces.values_mut() {
-                tree.config = layout_config;
-                let root = tree.root();
-                tree.update(root);
+            let sids: Vec<u64> = self.spaces.keys().copied().collect();
+            for sid in &sids {
+                if let Some(tree) = self.spaces.get_mut(sid) {
+                    tree.config = layout_config;
+                }
+                if let Some(usable) = self.space_usable.get(sid).copied() {
+                    let _ = self.set_space_frame(*sid, usable);
+                }
+                if let Some(tree) = self.spaces.get_mut(sid) {
+                    let root = tree.root();
+                    tree.update(root);
+                }
             }
         }
         Ok((!output.is_empty()).then_some(output))
@@ -3566,6 +3608,51 @@ mod tests {
         assert_eq!(frame.y as i32, 20);
         assert_eq!(frame.w as i32, 980);
         assert_eq!(frame.h as i32, 960);
+    }
+
+    #[test]
+    fn external_bar_reserves_space_and_scopes_to_mode() {
+        // Two displays; space 1 on display 10, space 2 on display 20 (the main one).
+        let mut state = AppState::new();
+        state.add_display(10, Area::new(0.0, 0.0, 1000.0, 1000.0));
+        state.add_display(20, Area::new(1000.0, 0.0, 1000.0, 1000.0));
+        state.add_space_to_display(1, 10, Area::new(0.0, 0.0, 1000.0, 1000.0));
+        state.add_space_to_display(2, 20, Area::new(1000.0, 0.0, 1000.0, 1000.0));
+        state.set_main_display(20);
+        state.add_window(1).unwrap(); // lands on the active space (1)
+        state.set_active_space(2);
+        state.add_window(2).unwrap();
+        state
+            .set_space_frame(1, Area::new(0.0, 0.0, 1000.0, 1000.0))
+            .unwrap();
+        state
+            .set_space_frame(2, Area::new(1000.0, 0.0, 1000.0, 1000.0))
+            .unwrap();
+
+        // `all`: both displays reserve 30 top / 10 bottom.
+        state
+            .handle_tokens(&toks(&["config", "external_bar", "all:30:10"]))
+            .unwrap();
+        let f1 = state.flush(1).unwrap()[0].area;
+        assert_eq!((f1.y as i32, f1.h as i32), (30, 960));
+        let f2 = state.flush(2).unwrap()[0].area;
+        assert_eq!((f2.y as i32, f2.h as i32), (30, 960));
+
+        // `main`: only display 20 (space 2) reserves; space 1 is full-height again.
+        state
+            .handle_tokens(&toks(&["config", "external_bar", "main:30:10"]))
+            .unwrap();
+        let f1 = state.flush(1).unwrap()[0].area;
+        assert_eq!((f1.y as i32, f1.h as i32), (0, 1000));
+        let f2 = state.flush(2).unwrap()[0].area;
+        assert_eq!((f2.y as i32, f2.h as i32), (30, 960));
+
+        // `off`: no reservation anywhere.
+        state
+            .handle_tokens(&toks(&["config", "external_bar", "off:0:0"]))
+            .unwrap();
+        let f2 = state.flush(2).unwrap()[0].area;
+        assert_eq!((f2.y as i32, f2.h as i32), (0, 1000));
     }
 
     #[test]

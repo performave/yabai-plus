@@ -2172,6 +2172,8 @@ impl AppState {
                 "has-shadow",
                 "has-fullscreen-zoom",
                 "has-parent-zoom",
+                "is-floating",
+                "is-sticky",
             ],
             "window",
         )?;
@@ -2380,6 +2382,14 @@ impl AppState {
                 "has-parent-zoom" => fields.push(format!(
                     "\t\"has-parent-zoom\":{}",
                     json_bool(self.window_zoom(frame.window_id) == Some(ZoomKind::Parent))
+                )),
+                "is-floating" => fields.push(format!(
+                    "\t\"is-floating\":{}",
+                    json_bool(self.is_floating(frame.window_id))
+                )),
+                "is-sticky" => fields.push(format!(
+                    "\t\"is-sticky\":{}",
+                    json_bool(self.is_sticky(frame.window_id))
                 )),
                 _ => unreachable!("query_properties rejects unsupported properties"),
             }

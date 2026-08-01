@@ -1109,6 +1109,21 @@ fn query_windows_serializes_stack_index() {
 }
 
 #[test]
+fn query_windows_serializes_is_floating_and_is_sticky() {
+    // Tiled windows report both as false; the fields are now requestable instead
+    // of erroring (C never rejects is-floating/is-sticky). Floating/sticky windows
+    // themselves leave the tree, so they don't appear in this tree-based query.
+    let mut state = state_with_space();
+    state.add_window(10).unwrap();
+    assert_eq!(
+        state.handle_tokens(&toks(&["query", "--windows", "id,is-floating,is-sticky"])),
+        Ok(Some(
+            "[{\n\t\"id\":10,\n\t\"is-floating\":false,\n\t\"is-sticky\":false\n}]\n".to_string()
+        ))
+    );
+}
+
+#[test]
 fn query_windows_serializes_has_shadow() {
     let mut state = state_with_space();
     state.add_window(10).unwrap();

@@ -523,4 +523,6 @@ Add entries here when the Rust rewrite intentionally changes behavior.
 
 | Area | Change | Migration note |
 |---|---|---|
-| _none yet_ | _none yet_ | _none yet_ |
+| `query` empty property segment | `id,,uuid`, `,id`, `id,` are rejected instead of C's incidental in-place token behavior | Use clean comma-separated property lists |
+| `query --windows` fields | The pure serializer emits a subset of window fields: `id`, `pid`, `app`, `title`, `scratchpad`, `frame`, `has-focus`, `space`, `display`, `is-visible`, `split-type`, `split-child`, `stack-index`, `has-shadow`, `has-fullscreen-zoom`, `has-parent-zoom`, `is-floating`, `is-sticky`. The remaining C fields (`role`, `subrole`, `root-window`, `level`, `sub-level`, `layer`, `sub-layer`, `opacity`, `can-move`, `can-resize`, `has-ax-reference`, `is-native-fullscreen`, `is-minimized`, `is-hidden`, `is-grabbed`) need live AX/SkyLight reads and error with "not available from pure state" | Deferred: needs daemon-side query augmentation with live per-window AX/SLS reads |
+| `query --windows` scope | Only windows currently in a BSP tree are listed; floating/sticky/scratchpad/minimized/native-fullscreen windows (which leave their tree) are omitted | Deferred: needs the daemon to track off-tree window frames via AX |

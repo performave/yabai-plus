@@ -23,10 +23,11 @@ use yabai_macos::{
     mission_control_spaces, move_focused_window, move_pid_window, ns_application_load,
     observe_display_reconfiguration, observe_mission_control, observe_mouse_drag,
     observe_mouse_moved, observe_pid, observe_workspace, pid_window_infos,
-    regular_application_pids, set_active_display, set_drag_modifier, spaces_for_display,
-    spaces_for_window, switch_space_by_gesture, tileable_pid_windows, visible_frame_for_display,
-    warp_cursor_to_display_center, warp_cursor_to_point, window_alpha, window_is_ordered_in,
-    window_level, windows_for_pid, windows_for_pid_diagnostics, windows_on_space,
+    regular_application_pids, set_active_display, set_drag_modifier, space_is_native_fullscreen,
+    spaces_for_display, spaces_for_window, switch_space_by_gesture, tileable_pid_windows,
+    visible_frame_for_display, warp_cursor_to_display_center, warp_cursor_to_point, window_alpha,
+    window_is_ordered_in, window_level, windows_for_pid, windows_for_pid_diagnostics,
+    windows_on_space,
 };
 use yabai_runtime::{
     Actor, AppState, AppliedRuleEffects, DropResult, LayoutSink, LiveWindowInfo, RecordingSink,
@@ -3122,6 +3123,17 @@ fn run_rust_wm_daemon(args: &[String]) -> ExitCode {
                     // read (opacity, ...); populate them just before serving it.
                     if is_window_query(&tokens) {
                         populate_window_live_info(&mut runtime);
+                    }
+                    // `query --spaces is-native-fullscreen` needs a live SkyLight
+                    // read per space; populate it before serving.
+                    if tokens.first().map(String::as_str) == Some("query")
+                        && tokens.iter().any(|token| token == "--spaces")
+                    {
+                        for sid in runtime.state.space_ids() {
+                            runtime
+                                .state
+                                .set_space_native_fullscreen(sid, space_is_native_fullscreen(sid));
+                        }
                     }
                     // Some commands need macOS-layer state/effects the pure core can't
                     // perform; handle those here, otherwise fall through.

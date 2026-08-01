@@ -1462,6 +1462,24 @@ fn query_spaces_serializes_display_property() {
 }
 
 #[test]
+fn query_spaces_serializes_is_native_fullscreen() {
+    let mut state = state_with_displays();
+    state.set_space_native_fullscreen(2, true);
+    assert_eq!(
+        state.handle_tokens(&toks(&[
+            "query",
+            "--spaces",
+            "id,is-native-fullscreen",
+            "--space",
+            "2",
+        ])),
+        Ok(Some(
+            "{\n\t\"id\":2,\n\t\"is-native-fullscreen\":true\n}\n".to_string()
+        ))
+    );
+}
+
+#[test]
 fn query_spaces_serializes_mission_control_index() {
     // `index` is the space's position in the daemon-pushed global order (not its
     // raw sid), matching C's mission-control index.

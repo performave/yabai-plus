@@ -130,6 +130,7 @@ unsafe extern "C" {
     fn SLSGetWindowBounds(cid: i32, wid: u32, frame: *mut CGRect) -> i32;
     fn SLSGetWindowAlpha(cid: i32, wid: u32, alpha: *mut f32) -> i32;
     fn SLSGetWindowLevel(cid: i32, wid: u32, level: *mut i32) -> i32;
+    fn SLSSpaceGetType(cid: i32, sid: u64) -> i32;
     fn SLSGetWindowTransform(cid: i32, wid: u32, transform: *mut CGAffineTransform) -> i32;
     fn SLSWindowIsOrderedIn(cid: i32, wid: u32, ordered_in: *mut u8) -> i32;
 }
@@ -608,6 +609,14 @@ pub fn window_alpha(window_id: u32) -> io::Result<f32> {
     } else {
         Ok(alpha)
     }
+}
+
+/// Whether a space is a native-fullscreen space (`SLSSpaceGetType == 4`),
+/// backing `query --spaces is-native-fullscreen`. C `space_is_fullscreen`.
+pub fn space_is_native_fullscreen(sid: u64) -> bool {
+    // SAFETY: `SLSMainConnectionID` is the process' connection; `sid` is a plain
+    // space id. `SLSSpaceGetType` returns the space type enum.
+    unsafe { SLSSpaceGetType(SLSMainConnectionID(), sid) == 4 }
 }
 
 /// A window's CG window level via SkyLight (`SLSGetWindowLevel`), backing

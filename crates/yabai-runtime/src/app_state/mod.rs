@@ -220,6 +220,9 @@ pub struct AppState {
     display_labels: HashMap<u32, String>,
     /// Daemon-pushed display UUID strings for `query --displays uuid`.
     display_uuids: HashMap<u32, String>,
+    /// Daemon-pushed per-space native-fullscreen flag for
+    /// `query --spaces is-native-fullscreen` (SLSSpaceGetType == 4).
+    space_native_fullscreen: HashMap<u64, bool>,
     /// Last known cursor location (top-left CG coords), set by the daemon before
     /// dispatching a command so the `mouse` selector can resolve.
     cursor_point: Option<Point>,
@@ -1073,6 +1076,12 @@ impl AppState {
     /// Record a display's UUID string for `query --displays uuid`.
     pub fn set_display_uuid(&mut self, display_id: u32, uuid: String) {
         self.display_uuids.insert(display_id, uuid);
+    }
+
+    /// Record whether a space is native-fullscreen, for `query --spaces
+    /// is-native-fullscreen` (daemon reads `SLSSpaceGetType` before serving).
+    pub fn set_space_native_fullscreen(&mut self, sid: u64, value: bool) {
+        self.space_native_fullscreen.insert(sid, value);
     }
 
     /// Record the live global mission-control space order (from
@@ -2228,6 +2237,7 @@ impl AppState {
                 "last-window",
                 "has-focus",
                 "is-visible",
+                "is-native-fullscreen",
                 "display",
             ],
             "space",
@@ -2463,6 +2473,15 @@ impl AppState {
                 "is-visible" => fields.push(format!(
                     "\t\"is-visible\":{}",
                     json_bool(self.space_is_visible(sid))
+                )),
+                "is-native-fullscreen" => fields.push(format!(
+                    "\t\"is-native-fullscreen\":{}",
+                    json_bool(
+                        self.space_native_fullscreen
+                            .get(&sid)
+                            .copied()
+                            .unwrap_or(false)
+                    )
                 )),
                 "display" => fields.push(format!(
                     "\t\"display\":{}",

@@ -15,9 +15,60 @@ codesign -f -s - target/release/yabai   # (make sign) so macOS doesn't SIGKILL a
 
 Run the built binary directly — there is no Homebrew swap. Grant it
 Accessibility once (System Settings → Privacy & Security → Accessibility); the
-grant tracks the binary's signature, so ad-hoc re-signing may require re-granting.
-For a full production run, `./target/release/yabai` with no args starts the
-daemon on the real socket (see below).
+grant tracks the binary's signature, so every `cargo build` (new cdhash) revokes
+it and the daemon exits with `Accessibility permission is not granted`. See
+[Accessibility that survives rebuilds](#accessibility-that-survives-rebuilds) to
+grant it once and stop re-granting. For a full production run,
+`./target/release/yabai` with no args starts the daemon on the real socket.
+
+## Running as a launchd service
+
+For a persistent daemon (survives logout, restarts on crash) instead of a
+foreground process, use the built-in launchd management. The plist
+(`crates/yabai/src/service.rs`) points at the current binary and is bootstrapped
+into the **GUI domain** (`gui/$(id -u)`) — this matters: the daemon must run in
+your Aqua session or SkyLight space/window APIs (`SLSCopyWindowsWithOptionsAndTags`,
+`SLSCopySpacesForWindows`) return nothing and every window resolves to `space 0`.
+A plain `nohup ./target/release/yabai &` from a non-GUI shell (e.g. an SSH/agent
+session) hits exactly that.
+
+```bash
+./target/release/yabai --install-service   # write ~/Library/LaunchAgents/com.asmvik.yabai.plist
+./target/release/yabai --start-service      # bootstrap + start (RunAtLoad)
+yabai --restart-service                     # after a rebuild: picks up the new binary
+yabai --stop-service
+yabai --uninstall-service
+```
+
+launchd throttles rapid restarts (~10 s); if `--restart-service` leaves it in
+`spawn scheduled`, force it: `launchctl kickstart -k gui/$(id -u)/com.asmvik.yabai`.
+Check state with `launchctl print gui/$(id -u)/com.asmvik.yabai | grep -E 'state|pid'`.
+
+## Accessibility that survives rebuilds
+
+The System-Settings grant pins the binary's **cdhash**, which changes on every
+build — so you re-grant after every `cargo build`. Since the ad-hoc *identifier*
+(`yabai-<hash>`) is stable across rebuilds, pin the Accessibility grant to the
+identifier instead. One-time (needs SIP's filesystem protection disabled, which
+you already have for the SA):
+
+```bash
+BIN="$PWD/target/release/yabai"
+ID=$(codesign -dv "$BIN" 2>&1 | sed -n 's/^Identifier=//p')   # e.g. yabai-f7b659e4729e6145
+printf 'identifier "%s"\n' "$ID" | csreq -r- -b /tmp/yabai_req.bin
+TCC="/Library/Application Support/com.apple.TCC/TCC.db"
+sudo sqlite3 "$TCC" "INSERT OR REPLACE INTO access \
+  (service,client,client_type,auth_value,auth_reason,auth_version,csreq,flags,last_modified) \
+  VALUES ('kTCCServiceAccessibility','$BIN',1,2,4,1,readfile('/tmp/yabai_req.bin'),0, \
+          CAST(strftime('%s','now') AS INTEGER));"
+sudo killall tccd            # flush the TCC cache
+yabai --restart-service      # or relaunch the binary
+```
+
+`client_type=1` is a path-based entry; `auth_value=2` is *allowed*. After this,
+rebuilds keep Accessibility as long as the identifier is unchanged. If the daemon
+still logs `Accessibility permission is not granted`, the identifier changed
+(re-run the block) or SIP is not sufficiently disabled (`csrutil status`).
 
 ## Getting traces
 

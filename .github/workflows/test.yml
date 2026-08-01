@@ -17,8 +17,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build debug binary
-        run: make
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
 
-      - name: Run unit tests
-        run: make test
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build release binary (Rust + embedded OSAX island)
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --workspace

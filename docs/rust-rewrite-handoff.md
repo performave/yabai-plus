@@ -57,7 +57,7 @@ reconstructing context.
   them through the SA z-order opcodes. The whole `display` domain is now wired:
   `--focus` (C `display_manager_focus_display`), `--space` (C
   `display_manager_focus_space`, SA `focus_space`), and `--label`.
-  201 workspace tests pass. The shipped C `make` flow is unchanged.
+  202 workspace tests pass. The shipped C `make` flow is unchanged.
 - Last updated: 2026-07-31.
 - User decisions captured:
   - The Rust rewrite may diverge permanently from upstream yabai. Rebaseability is no
@@ -101,10 +101,15 @@ current state. Only recent milestones are kept here going forward.
     remains monolithic; its `*_via_sa` SA-helper block is a future extraction
     target but is tightly coupled to the interceptors (needs a wide
     `pub(crate)` surface), so do it carefully, not in a rushed pass.
-  201 workspace tests, clippy clean. Still inert: `window_origin_display`
-  (new-window origin display — next enactment candidate),
-  `window_animation_easing`, `insert_feedback_color`,
-  `skip_window_focus_animation` (cosmetic/animation-only).
+  - Enacted `window_origin_display` (new windows route to physical/focused/
+    cursor space, C `event_loop` app-launched routing) via pure
+    `AppState::origin_space_for_new_window`, called in daemon reconcile for
+    genuinely-new windows.
+  202 workspace tests, clippy clean. The only still-inert config keys are the
+  cosmetic/animation-only ones — `window_animation_easing`,
+  `insert_feedback_color`, `skip_window_focus_animation` — which need
+  window-move animation / insert-feedback overlay infrastructure that is not
+  ported (low value; left stored + round-tripping).
 - Sessions 40–74 (2026-07-03/04) — window `--grid`/`--move`/`--resize`/`--ratio`/
   `--raise`/`--lower`/`--insert`/`--scratchpad`, all `--toggle` variants
   (split/windowed-fullscreen/pip/expose/native-fullscreen), per-space
@@ -671,7 +676,7 @@ deminimize/title-change events and app/title filters for metadata-carrying event
   block needs a `// SAFETY:` comment. `cargo fmt` reorders `use` lists
   (types/fns interleaved alphabetically); let it, then match its output.
 - Verify each step with `cargo fmt --all && cargo clippy --workspace
-  --all-targets && cargo test --workspace`. Currently 201 tests, clippy clean.
+  --all-targets && cargo test --workspace`. Currently 202 tests, clippy clean.
   The toolchain is rustup stable (installed locally 2026-07-31); `cargo` builds
   and tests the workspace directly on this machine.
 - The live WM daemon binds only a caller-supplied socket; to message it use a

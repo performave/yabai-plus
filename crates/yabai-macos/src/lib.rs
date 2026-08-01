@@ -50,9 +50,8 @@ pub use screen::{main_visible_frame, visible_frame_for_display};
 pub use space::{
     current_space_for_display, display_for_space, mission_control_spaces,
     space_is_native_fullscreen, space_uuid, spaces_for_display, spaces_for_window,
-    switch_space_by_gesture,
-    window_alpha, window_bounds, window_is_ordered_in, window_level, window_transform,
-    windows_on_space,
+    switch_space_by_gesture, window_alpha, window_bounds, window_is_ordered_in, window_level,
+    window_transform, windows_on_space,
 };
 #[cfg(target_os = "macos")]
 pub use workspace::{

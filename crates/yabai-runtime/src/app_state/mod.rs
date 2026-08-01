@@ -2454,12 +2454,7 @@ impl AppState {
                 "id" => fields.push(format!("\t\"id\":{sid}")),
                 "uuid" => fields.push(format!(
                     "\t\"uuid\":\"{}\"",
-                    json_escape(
-                        self.space_uuids
-                            .get(&sid)
-                            .map(String::as_str)
-                            .unwrap_or("")
-                    )
+                    json_escape(self.space_uuids.get(&sid).map(String::as_str).unwrap_or(""))
                 )),
                 "index" => fields.push(format!(
                     "\t\"index\":{}",

@@ -34,7 +34,7 @@
 #endif
 
 #define HASHTABLE_IMPLEMENTATION
-#include "../misc/hashtable.h"
+#include "hashtable.h"
 #undef HASHTABLE_IMPLEMENTATION
 
 #define page_align(addr) (vm_address_t)((uintptr_t)(addr) & (~(vm_page_size - 1)))

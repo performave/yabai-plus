@@ -1,116 +1,58 @@
 # AGENTS.md
 
-Guidance for AI agents and new contributors working in this repository.
+Guidance for agents and contributors.
 
-## What this repo is
+## What this is
 
-This is **yabai-plus**, a personal fork of [koekeishiya/yabai](https://github.com/koekeishiya/yabai)
-(a tiling window manager for macOS). It tracks upstream and carries a small set of
-patches on top, distributed as signed/notarized releases.
+**yabai-plus** — a **Rust** tiling window manager for macOS. It started as a fork
+of [koekeishiya/yabai](https://github.com/koekeishiya/yabai) (C) and was
+rewritten into Rust; **the C daemon is gone**. Command grammar, IPC wire format,
+and behavior track upstream yabai (contract: `docs/rust-rewrite-compat.md`).
 
-**Upstream does not accept pull requests.** Patches live here and are rebased onto
-new upstream releases rather than contributed back.
+The only non-Rust code is the OSAX injection island
+(`crates/yabai-sa/osax/*.m`) — the tiny ObjC loader/payload that runs *inside*
+Dock (arm64e, Dock-private classes). `crates/yabai-sa/build.rs` compiles and
+embeds it into the Rust binary.
 
-### Remotes
+## Workspace (`crates/`)
 
-- `origin` → `Performave/yabai-plus` (this fork; push here)
-- `upstream` → `koekeishiya/yabai` (pull new releases/tags from here)
+- **yabai** — the binary: CLI + the production WM daemon (`main.rs`, split into
+  `probes`/`sa_ops`/`mouse_ctl`/`service`).
+- **yabai-core** — pure BSP layout tree, geometry, parser, command model.
+- **yabai-runtime** — control plane: `AppState`, `Config`, query serializer,
+  rules, signals.
+- **yabai-macos** — the macOS boundary (AX, CoreGraphics/SkyLight, observers,
+  mouse tap).
+- **yabai-ipc** — client/daemon socket framing.
+- **yabai-sa** — SA opcode client + `loader` (install/`--load-sa`, ported from
+  `sa.m`) + the embedded OSAX island.
+- **yabai-osax-common** — shared SA constants.
 
-```bash
-git fetch upstream --tags      # get new upstream work
-git rebase upstream/master     # rebase the patch branch onto latest
-```
-
-## Current patches on top of upstream
-
-- **"Don't warp mouse_follows_focus to/from ineligible windows"** (`src/event_loop.c`,
-  `window_did_receive_focus`): only center the cursor when both the focused and
-  previously-focused windows are eligible for management. Prevents involuntary
-  cursor jumps when auxiliary windows (Picture-in-Picture panels, `AXSystemDialog`)
-  steal and return focus on their own.
-- **"Fix Mission Control cross-display space-drag teleport"** (`src/window_manager.c`):
-  recompute a view's frame for its current display when the view is invalid,
-  before the dirty gate, so a space dragged to another display repositions its
-  windows onto the new display instead of leaving them behind. See
-  [docs/debugging.md](./docs/debugging.md) for the root-cause notes.
-- **"Add `yabai --check-sa`"** (`src/yabai.c`, `src/sa.m`, `src/sa.h`): report
-  whether the scripting addition is loaded and healthy by talking to the payload
-  in Dock directly (no root, no re-inject).
-- **"Patch SA loader PAC ABI to match Dock on Sequoia"** (`src/sa.m`): on
-  Apple Silicon, normalize the installed loader's arm64e PAC capability to the
-  Dock binary before signing/injection. This preserves SA loading on Sequoia
-  where Dock is PAC ABI `0x80` but newer toolchains can emit loader binaries as
-  `0x81`.
-- **Local-dev makefile block** (`makefile`): `make dev` / `dev-restore` /
-  `sa-status` — see Building below.
-
-When adding patches, keep each one a focused, well-described commit so it stays
-easy to rebase onto upstream.
-
-## Building
+## Build & test
 
 ```bash
-make install   # release build (-O3), universal x86_64 + arm64, into bin/yabai
-make           # debug build (-O0 -g)
-make man       # build the man page (requires asciidoctor)
-make clean     # remove build artifacts
+make check                # fmt-check + clippy + tests (the gate)
+cargo build --release     # -> target/release/yabai   (make release)
+make universal VERSION=vX # x86_64+arm64 -> bin/yabai  (release path)
 ```
 
-The build is a single `xcrun clang` invocation (see `makefile`); there is no
-external dependency graph beyond the macOS SDK + frameworks. C standard is C11.
+A macOS SDK is needed (`build.rs` runs `xcrun clang` on the OSAX island). Live
+testing needs Accessibility granted and, for SA features, the SA loaded — it
+rearranges real windows, so use a disposable machine/VM.
 
-For the local dev loop, `make dev` builds a Developer-ID-signed **canary** binary
-(marked in `yabai --version`) and swaps it into the Homebrew path; `make
-dev-restore` puts the release binary back. See **[docs/debugging.md](./docs/debugging.md)**
-for the full workflow — getting verbose traces, the scripting-addition gotchas
-(what actually needs it, how to check it, the known injection failure), and
-Mission Control / multi-display debugging notes.
+## Scripting addition
 
-## Architecture (orientation, not exhaustive)
-
-- `src/yabai.c` — entry point, CLI/message dispatch, version macros (`MAJOR`/`MINOR`/`PATCH`).
-- `src/event_loop.c` — event handling, focus/mouse behavior. (The mouse-warp patch lives here.)
-- `src/window_manager.c`, `src/space_manager.c`, `src/display_manager.c` — core WM logic.
-- `src/osax/` — the **scripting addition**: code injected into `Dock.app` for
-  privileged window-server operations.
-  - `loader.m` injects a payload into Dock via `task_for_pid` + `mach_vm_*` +
-    `pthread_create_from_mach_thread`/`dlopen`.
-  - `payload.m` / `arm64_payload.m` / `x64_payload.m` run inside Dock.
-  - `*_bin.c` are generated (xxd) blobs of the compiled loader/payload, embedded
-    into the main binary at build time. **Do not edit `*_bin.c` by hand.**
-
-### Scripting addition: important constraints
-
-- The SA requires the user to **partially disable SIP** and run `yabai --load-sa`
-  (as root). This is a user setup step; no code/signing change removes it.
-- Injection into Dock is gated by SIP + root — **not** by yabai's own code-signing
-  flags. Signing yabai with the hardened runtime does not break the SA.
-- On Apple Silicon, `--load-sa` also normalizes the loader's arm64e PAC ABI to
-  match Dock before ad-hoc signing it. Do not replace that with Developer-ID or
-  hardened-runtime signing for the injected loader/payload.
-- **Only `bin/yabai` is codesigned.** The injected loader/payload must not be
-  hardened-runtime signed (they run inside Dock). Never add signing of the osax
-  payloads.
-
-## Releases & CI
-
-Releases are automated: pushing a `v*` tag runs `.github/workflows/release.yml`,
-which builds → Developer ID signs → notarizes → publishes a GitHub Release.
-
-- **How to cut a release:** [docs/releasing.md](./docs/releasing.md)
-- **One-time CI/secret setup:** [docs/ci-setup.md](./docs/ci-setup.md)
-
-Versioning: `v<upstream-version>-plus.<n>` (e.g. `v7.1.25-plus.1`). Release
-builds compile the pushed tag into `yabai --version`; bump the upstream fallback
-version macros in `src/yabai.c` and add a `CHANGELOG.md` entry before tagging.
+`sudo yabai --load-sa` installs + injects the SA (all Rust). Needs SIP partially
+disabled and, on Apple Silicon, the `-arm64e_preview_abi` boot-arg. A fresh
+install writes the bundle + restarts Dock; the **next** `--load-sa` injects.
+`yabai --check-sa` reports status without root. Don't hardened-runtime sign the
+injected loader/payload; the OSAX island is intentionally ObjC.
 
 ## Conventions
 
-- Match the surrounding C style (the upstream codebase's idioms, naming, and
-  comment style) when patching, so diffs stay minimal and rebases stay clean.
-- Keep changes scoped; prefer small commits with clear messages explaining the
-  *why* (these become rebase fodder against upstream).
-- Use Conventional Commits for all commit messages: `<type>(<scope>): <summary>`
-  or `<type>: <summary>`. Prefer `fix`, `feat`, `docs`, `build`, `ci`, `refactor`,
-  `test`, or `chore`; use `!` or a `BREAKING CHANGE:` footer for breaking changes.
-- Don't reformat upstream files wholesale — it makes future rebases painful.
+- Conventional Commits (`fix`/`feat`/`docs`/`build`/`refactor`/…; `!` for breaks).
+- Every `unsafe` block needs a `// SAFETY:` comment (clippy denies otherwise).
+  Run `cargo fmt`.
+- Document intentional divergences from upstream in
+  `docs/rust-rewrite-compat.md`.
+- Releases: push a `v<upstream>-plus.<n>` tag → `.github/workflows/release.yml`.

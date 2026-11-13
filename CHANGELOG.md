@@ -11,6 +11,8 @@ inherited from upstream.
 
 ## [Unreleased]
 
+## [7.1.25-plus.8]
+
 ### Changed (yabai-plus)
 - Releases are signed with an Apple Development certificate and no longer
   notarized, because there is no paid Apple Developer account behind them for

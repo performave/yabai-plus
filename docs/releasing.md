@@ -4,7 +4,7 @@ This document describes how a yabai-plus release is cut. Releases are produced
 automatically by the [`release` workflow](../.github/workflows/release.yml) when a
 version tag is pushed. You should rarely need to build a release by hand.
 
-> One-time setup (Apple Developer account, GitHub secrets) lives in
+> One-time setup (signing mode, GitHub secrets) lives in
 > [ci-setup.md](./ci-setup.md). Read that first if releases have never run on
 > this repo.
 

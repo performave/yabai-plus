@@ -11,6 +11,20 @@ inherited from upstream.
 
 ## [Unreleased]
 
+### Changed (yabai-plus)
+- Releases are signed with an Apple Development certificate and no longer
+  notarized, because there is no paid Apple Developer account behind them for
+  now. The Developer ID that signed earlier releases has been revoked, and macOS
+  now kills those binaries at launch, so 7.1.25-plus.7 and earlier no longer
+  start. The new certificate means Accessibility has to be granted once more
+  after this upgrade: remove yabai's old entry in System Settings > Privacy &
+  Security > Accessibility and approve it again. After that the grant survives
+  upgrades as before. A Homebrew install never needed notarization, because
+  Homebrew does not quarantine what a formula installs. Signing and
+  notarization stay in the release workflow, behind the `MACOS_SIGNING`
+  repository variable (see `docs/ci-setup.md`). The release runner moves from
+  the retired `macos-14` image to `macos-26`.
+
 ## [7.1.25-plus.7]
 
 ### Fixed (yabai-plus)

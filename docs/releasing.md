@@ -18,8 +18,12 @@ git tag v7.1.25-plus.1
 git push origin v7.1.25-plus.1
 ```
 
-Pushing the tag triggers the workflow, which builds, signs, notarizes, and
-creates a GitHub Release with the archive attached.
+Pushing the tag triggers the workflow, which builds, signs, and creates a GitHub
+Release with the archive attached. It notarizes too when the `MACOS_SIGNING`
+variable is `notarized`. Until there is a paid Apple Developer account again,
+the variable is `signed` and releases carry the free account's Apple Development
+certificate. See
+[ci-setup.md](./ci-setup.md#signing-modes).
 
 Before tagging, confirm `CHANGELOG.md` has a heading matching the release tag
 without the leading `v` (for example, `## [7.1.25-plus.1]`) and that its notes
@@ -53,15 +57,19 @@ builds fall back to the upstream version string in `src/yabai.c`.
 
 ## What the release workflow does
 
-On a `v*` tag push (`.github/workflows/release.yml`), a `macos-14` runner:
+On a `v*` tag push (`.github/workflows/release.yml`), a `macos-26` runner:
 
-1. **Imports** the Developer ID Application certificate into a throwaway keychain.
+1. **Reads the signing mode** from `MACOS_SIGNING` (an unknown value stops the
+   run) and **imports** the signing certificate into a throwaway keychain
+   (skipped for `adhoc`).
 2. **Builds** a universal (x86_64 + arm64) binary with `make install`.
 3. **Builds** the man page (`make man`, needs `asciidoctor`).
-4. **Codesigns** `bin/yabai` with the hardened runtime and a secure timestamp
+4. **Codesigns** `bin/yabai` with the hardened runtime. Under `signed` or
+   `notarized` that uses the certificate and a secure timestamp
    (`codesign --force --timestamp --options runtime --sign "$APPLE_SIGNING_IDENTITY"`).
+   Under `adhoc` it is `--sign - --timestamp=none`.
 5. **Notarizes** via `xcrun notarytool submit --wait` using an App Store Connect
-   API key.
+   API key. Only under `notarized`.
 6. **Assembles** `bin/yabai-v<version>.tar.gz` containing `bin/`, `doc/`, `examples/`, plus a `.sha256` checksum file.
 7. **Creates** a GitHub Release for the tag with the tarball attached.
 
@@ -80,9 +88,12 @@ These are the non-obvious bits that cause most release failures:
   verifies the ticket online on first run. `xcrun stapler staple bin/yabai` will
   fail and that is expected. If you ever need offline-trusted installs, ship a
   `.pkg` and staple that instead.
-- **Use a stable Developer ID across releases.** TCC (Accessibility/Automation)
+- **Use a stable certificate across releases.** TCC (Accessibility/Automation)
   permissions are bound to the signature; keeping the same identity means users
-  grant permission once and it persists across updates.
+  grant permission once and it persists across updates. It need not be a
+  Developer ID: `MACOS_SIGNING=signed` with a free Apple Development certificate
+  keeps the grant too. An `adhoc` release cannot keep it, so every upgrade must
+  be approved again in Accessibility.
 
 ## Building a release manually (fallback)
 

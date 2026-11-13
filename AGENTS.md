@@ -6,7 +6,7 @@ Guidance for AI agents and new contributors working in this repository.
 
 This is **yabai-plus**, a personal fork of [koekeishiya/yabai](https://github.com/koekeishiya/yabai)
 (a tiling window manager for macOS). It tracks upstream and carries a small set of
-patches on top, distributed as signed/notarized releases.
+patches on top, distributed as CI-signed releases.
 
 **Upstream does not accept pull requests.** Patches live here and are rebased onto
 new upstream releases rather than contributed back.
@@ -59,7 +59,7 @@ make clean     # remove build artifacts
 The build is a single `xcrun clang` invocation (see `makefile`); there is no
 external dependency graph beyond the macOS SDK + frameworks. C standard is C11.
 
-For the local dev loop, `make dev` builds a Developer-ID-signed **canary** binary
+For the local dev loop, `make dev` builds a certificate-signed **canary** binary
 (marked in `yabai --version`) and swaps it into the Homebrew path; `make
 dev-restore` puts the release binary back. See **[docs/debugging.md](./docs/debugging.md)**
 for the full workflow — getting verbose traces, the scripting-addition gotchas
@@ -95,7 +95,11 @@ Mission Control / multi-display debugging notes.
 ## Releases & CI
 
 Releases are automated: pushing a `v*` tag runs `.github/workflows/release.yml`,
-which builds → Developer ID signs → notarizes → publishes a GitHub Release.
+which builds → signs → publishes a GitHub Release. The `MACOS_SIGNING` repository
+variable picks the signature: `adhoc` (default, unset), `signed` (any
+certificate), or `notarized` (Developer ID + notarization). There is no paid
+Apple Developer account right now, so releases are `signed` with the free
+account's Apple Development certificate.
 
 - **How to cut a release:** [docs/releasing.md](./docs/releasing.md)
 - **One-time CI/secret setup:** [docs/ci-setup.md](./docs/ci-setup.md)

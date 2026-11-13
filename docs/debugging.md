@@ -22,7 +22,7 @@ the swapped-in build is running, not the Homebrew release:
 yabai --version   # e.g. v7.1.25-plus.2-dirty-canary  ("-canary" = local dev build)
 ```
 
-It also signs with your Developer ID (hardened runtime) so the Accessibility
+It also signs with `DEV_IDENTITY` (hardened runtime) so the Accessibility
 grant and scripting-addition trust carry across the swap, refreshes a
 sha256-pinned passwordless `--load-sa` sudoers rule, and prints `--check-sa` at
 the end. The service label is `com.asmvik.yabai`; `--restart-service` falls back

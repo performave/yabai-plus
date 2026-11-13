@@ -80,10 +80,14 @@ $(BUILD_PATH)/yabai: $(YABAI_SRC)
 # ============================================================================
 .PHONY: build release dev dev-restore sa-status
 
-# Auto-detect the Developer ID signing identity from the keychain (overridable:
-# `make dev DEV_IDENTITY="..."`). Signing with a Developer ID keeps the binary's
-# identifier stable so macOS preserves its Accessibility grant + scripting-addition trust.
-DEV_IDENTITY   ?= $(shell security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $$2; exit}')
+# Signing identity for the dev binary (overridable: `make dev DEV_IDENTITY="..."`).
+# Any real certificate keeps the binary's designated requirement stable, so macOS
+# preserves its Accessibility grant + scripting-addition trust across rebuilds; it
+# need not be a Developer ID. This is the free account's Apple Development
+# certificate, the same one rift-plus's justfile uses. It is named rather than
+# auto-detected: the keychain still holds the paid team's revoked Developer ID,
+# which codesign signs with happily and macOS then kills at launch.
+DEV_IDENTITY   ?= Apple Development: eric.wang401@gmail.com (2RTC9978WY)
 DEV_DEST       ?= /opt/homebrew/bin/yabai
 
 # Canary version string baked into the dev binary so `yabai --version` makes it
@@ -104,7 +108,7 @@ DEV_SUDOERS    ?= /private/etc/sudoers.d/yabai
 build: all       # debug build       -> bin/yabai (upstream: `all`)
 release: install # optimized -O3 build -> bin/yabai (upstream: `install`, installs nothing)
 
-# Build, sign with the Developer ID (so the Accessibility grant + scripting-addition
+# Build, sign with DEV_IDENTITY (so the Accessibility grant + scripting-addition
 # trust carry over), swap into the Homebrew path in place, and restart the service.
 # The scripting addition lives in Dock and survives yabai restarts, so no --load-sa
 # is needed here unless Dock itself has restarted.
